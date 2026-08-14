@@ -436,8 +436,18 @@ payoff against effort, and filtered to what applies before a microVM exists.
    making this a performance decision as much as a security one.
 6. **Warm pool** of pre-created boxes.
 
+Under the microVM backend, several of the deferred items below became
+answerable and were still deferred — for a reason recorded in ADR 0006: the
+guest boots an initramfs rather than a disk image, so there is no rootfs to
+stream and no snapshot to restore. What that buys is a boot measured in
+hundreds of milliseconds with no image build at all; what it costs is that
+nothing the guest writes survives the machine.
+
 Deliberately deferred, with reasons:
 
+- **Firecracker snapshot and restore.** The reason to reach for a VMM at scale,
+  and unbuilt here. `MicroVmSandbox` declares `SnapshotSupport::None` so that
+  nothing pretends otherwise, which is rule 1 doing its job.
 - **Guest-side EROFS/VMDK rootfs.** microsandbox measured a 47× geomean from
   this, but the gain came entirely from deleting a *host FUSE boundary*. Docker
   and namespaces backends have no such boundary — overlayfs is already in the
@@ -453,4 +463,5 @@ Deliberately deferred, with reasons:
 
 - ADR 0002 — host and sandbox are orthogonal
 - ADR 0003 — workspace split to contain `unsafe`
+- ADR 0006 — a microVM boots an initramfs, not a disk image
 - `docs/specs/tinybus-module-release.md` — the module release contract

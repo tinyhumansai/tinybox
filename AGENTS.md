@@ -27,6 +27,7 @@ crates/
 ├── tinybox-host/            # reach: the local machine
 ├── tinybox-docker/          # confinement: containers, snapshots, forking
 ├── tinybox-linux/           # confinement: rootless namespaces, no daemon
+├── tinybox-microvm/         # confinement: a Firecracker guest with its own kernel
 ├── tinybox-ssh/             # reach: another machine, over SSH
 ├── tinybox-sync/            # fingerprinting and workspace transfer
 ├── tinybox-cli/             # the `tinybox` binary

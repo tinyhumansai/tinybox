@@ -14,6 +14,7 @@ use tinybox_core::{
 use tinybox_docker::DockerSandbox;
 use tinybox_host::LocalHost;
 use tinybox_linux::NamespaceSandbox;
+use tinybox_microvm::MicroVmSandbox;
 use tinybox_ssh::{SshHost, SshTarget};
 use tinybox_sync::{Exclusions, Syncer};
 
@@ -53,6 +54,12 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH", requires = "host")]
     ssh_known_hosts: Option<PathBuf>,
 
+    /// The uncompressed guest kernel a microVM boots.
+    ///
+    /// Required by `--sandbox microvm`; tinybox does not download one.
+    #[arg(long, global = true, value_name = "PATH")]
+    microvm_kernel: Option<PathBuf>,
+
     /// Trust an unknown SSH host key on first connection.
     ///
     /// Weakens authentication and is off by default; a changed key is still
@@ -74,6 +81,9 @@ enum SandboxKind {
     /// Linux namespaces, rootless and with no daemon. Isolates a directory you
     /// already have, rather than an image.
     Namespace,
+    /// A Firecracker microVM with its own kernel. The strongest boundary
+    /// available, and the only one a kernel exploit cannot cross.
+    Microvm,
 }
 
 impl SandboxKind {
@@ -83,6 +93,7 @@ impl SandboxKind {
             Self::Passthrough => passthrough::NAME,
             Self::Docker => tinybox_docker::NAME,
             Self::Namespace => tinybox_linux::NAME,
+            Self::Microvm => tinybox_microvm::NAME,
         }
     }
 }
@@ -316,9 +327,13 @@ impl Cli {
             templates,
             reach,
         } = self.resolve(host)?;
-        let namespace = self.namespace;
-        let build =
-            |kind: SandboxKind| build_sandbox(kind, reach.clone(), &store, namespace.as_deref());
+        let backends = Backends {
+            reach: &reach,
+            store: &store,
+            namespace: self.namespace.as_deref(),
+            kernel: self.microvm_kernel.as_deref(),
+        };
+        let build = |kind: SandboxKind| backends.get(kind);
 
         match self.command {
             Command::Create {
@@ -351,11 +366,7 @@ impl Cli {
                 text(out, &render_inspect(&info, sandbox.as_ref()))
             }
 
-            Command::Rm { id } => {
-                let id = BoxId::new(id)?;
-                build(sandbox_of(&store, &id)?)?.destroy(&id).await?;
-                line(out, id.as_ref())
-            }
+            Command::Rm { id } => remove(&store, &backends, id, out).await,
             Command::Sync { dir, to, no_ignore } => {
                 write(out, sync(reach, dir, &to, no_ignore).await?.as_bytes())?;
                 Ok(0)
@@ -771,11 +782,53 @@ fn render_sync(outcome: &tinybox_sync::Sync) -> String {
 ///
 /// Returns [`Error::InvalidIdentifier`] when a Docker namespace is not a valid
 /// identifier.
+/// Destroy one box and print its identifier back.
+async fn remove(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    backends.get(sandbox_of(store, &id)?)?.destroy(&id).await?;
+    line(out, id.as_ref())
+}
+
+/// Everything a sandbox needs that does not come from the subcommand.
+///
+/// A struct rather than four arguments threaded through a closure: the closure
+/// is called from a dozen arms, and each new backend option would otherwise
+/// widen every one of them.
+struct Backends<'a> {
+    /// The machine the backend reaches.
+    reach: &'a Arc<dyn Host>,
+    /// Where boxes are recorded.
+    store: &'a Arc<dyn Store>,
+    /// What keeps one user's containers from colliding with another's.
+    namespace: Option<&'a str>,
+    /// The guest kernel a microVM boots, if one was named.
+    kernel: Option<&'a std::path::Path>,
+}
+
+impl Backends<'_> {
+    /// Build the named sandbox.
+    fn get(&self, kind: SandboxKind) -> tinybox_core::Result<Arc<dyn Sandbox>> {
+        build_sandbox(
+            kind,
+            self.reach.clone(),
+            self.store,
+            self.namespace,
+            self.kernel,
+        )
+    }
+}
+
 fn build_sandbox(
     kind: SandboxKind,
     host: Arc<dyn Host>,
     store: &Arc<dyn Store>,
     namespace: Option<&str>,
+    kernel: Option<&std::path::Path>,
 ) -> tinybox_core::Result<Arc<dyn Sandbox>> {
     Ok(match kind {
         SandboxKind::Passthrough => Arc::new(PassthroughSandbox::new(host, store.clone())),
@@ -792,6 +845,22 @@ fn build_sandbox(
         // command rather than quietly running unlimited.
         SandboxKind::Namespace => {
             Arc::new(NamespaceSandbox::new(host, store.clone()).with_cgroup_limits())
+        }
+        // A kernel is required rather than guessed at: booting somebody's
+        // distribution kernel because it happened to be in /boot would be a
+        // surprising thing to do on their behalf, and most are compressed in a
+        // format Firecracker cannot read anyway.
+        SandboxKind::Microvm => {
+            let kernel = kernel.ok_or_else(|| Error::Backend {
+                sandbox: tinybox_microvm::NAME.to_owned(),
+                operation: "find a guest kernel",
+                message: "pass --microvm-kernel; tinybox does not download one".to_owned(),
+            })?;
+            Arc::new(MicroVmSandbox::new(
+                host,
+                store.clone(),
+                tinybox_microvm::GuestImage::with_kernel(kernel),
+            ))
         }
     })
 }
@@ -817,6 +886,9 @@ fn sandbox_of(store: &Arc<dyn Store>, id: &BoxId) -> tinybox_core::Result<Sandbo
     }
     if recorded.as_str() == tinybox_linux::NAME {
         return Ok(SandboxKind::Namespace);
+    }
+    if recorded.as_str() == tinybox_microvm::NAME {
+        return Ok(SandboxKind::Microvm);
     }
     Err(Error::Unsupported {
         sandbox: recorded.into_string(),

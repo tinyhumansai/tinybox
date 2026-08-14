@@ -40,9 +40,16 @@ these milestones build out.
   built on bubblewrap. **No `unsafe` was needed** — ADR 0005 records why ADR
   0003's expectation was wrong.
 
+- `MicroVmSandbox`: a Firecracker guest with its own kernel — the only
+  isolation here a kernel exploit cannot cross. It boots an initramfs rather
+  than a disk image, which is why a boot costs a few hundred milliseconds and
+  why nothing the guest writes comes back. ADR 0006 records both.
+
 ## Next
-- **M7** — `MicroVmSandbox`: Firecracker, a vsock guest agent, and memory
-  snapshots. The `Sandbox` trait is shaped to accommodate it.
+
+Nothing is scheduled. Every milestone the plan named is shipped; what remains is
+the deferred list below, each item waiting on something concrete rather than on
+time.
 
 ## Deferred
 

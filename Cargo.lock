@@ -776,6 +776,7 @@ dependencies = [
  "tinybox-docker",
  "tinybox-host",
  "tinybox-linux",
+ "tinybox-microvm",
  "tinybox-ssh",
  "tinybox-sync",
  "tokio",
@@ -824,6 +825,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinybox-microvm"
+version = "0.1.5"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tinybox-core",
+ "tinybox-host",
+ "tokio",
+]
+
+[[package]]
 name = "tinybox-module"
 version = "0.1.5"
 dependencies = [
@@ -831,6 +845,7 @@ dependencies = [
  "tinybox-core",
  "tinybox-docker",
  "tinybox-linux",
+ "tinybox-microvm",
  "tinybus",
  "tinybus-module",
  "tokio",

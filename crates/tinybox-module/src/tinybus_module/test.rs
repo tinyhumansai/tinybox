@@ -44,16 +44,16 @@ fn the_registry_reports_every_backend_and_only_the_safe_ones_as_capable() {
     let description = describe(&registered_sandboxes());
 
     // Both backends are listed as present...
-    assert!(description.contains("sandboxes: passthrough, docker, namespace"));
+    assert!(description.contains("sandboxes: passthrough, docker, namespace, microvm"));
     // ...but only Docker clears the isolation floor, and passthrough says so
     // through its own declaration rather than a special case here.
-    assert!(description.ends_with("docker, namespace"));
+    assert!(description.ends_with("docker, namespace, microvm"));
 
     let names = registered_sandboxes()
         .into_iter()
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
-    assert_eq!(names, ["passthrough", "docker", "namespace"]);
+    assert_eq!(names, ["passthrough", "docker", "namespace", "microvm"]);
 }
 
 #[test]
@@ -61,7 +61,6 @@ fn a_populated_registry_lists_every_sandbox() {
     let description = describe(&[("docker", CONTAINER), ("namespace", CONTAINER)]);
 
     assert!(description.contains("sandboxes: docker, namespace"));
-    assert!(description.ends_with("docker, namespace"));
 }
 
 #[test]

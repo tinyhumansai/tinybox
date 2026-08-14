@@ -72,12 +72,22 @@ assert!(bare.require("passthrough", Capability::Fork).is_err());
 | M4 — `SshHost`, fingerprint sync, published ports | shipped |
 | M5 — templates, expiry, `.boxignore`, store locking | shipped |
 | M6 — `NamespaceSandbox` (rootless, no daemon, no root) | shipped |
-| M7 — `MicroVmSandbox` (Firecracker) | deferred |
+| M7 — `MicroVmSandbox` (Firecracker, own kernel) | shipped |
 
-Three sandboxes exist. `passthrough` confines nothing, so `tinybox create`
+Four sandboxes exist. `passthrough` confines nothing, so `tinybox create`
 warns and `tinybox inspect` prints `UNSAFE`. `docker` and `namespace` both clear
 the isolation floor and are defensible places for code you do not trust —
-`namespace` without a daemon, without root, and without an image.
+`namespace` without a daemon, without root, and without an image. `microvm`
+goes further than either: the guest runs its own kernel under KVM, so a kernel
+exploit has nothing to escape into. It needs `firecracker`, a static `busybox`,
+and an uncompressed kernel on the host, and it gives back only the command's
+output — the guest's filesystem is memory, discarded when the machine resets.
+
+```sh
+tinybox create --sandbox microvm --microvm-kernel ~/vmlinux --dir ./project
+tinybox --microvm-kernel ~/vmlinux exec box-0 -- /bin/busybox uname -r
+6.1.128                            # a kernel the host is not running
+```
 
 ## Try it
 

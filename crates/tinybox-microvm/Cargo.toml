@@ -1,0 +1,28 @@
+[package]
+name = "tinybox-microvm"
+description = "A hardware-isolated tinybox sandbox backed by Firecracker microVMs."
+documentation = "https://docs.rs/tinybox-microvm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+tinybox-core.workspace = true
+async-trait.workspace = true
+# The Firecracker one-shot configuration is a JSON document.
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tinybox-host.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

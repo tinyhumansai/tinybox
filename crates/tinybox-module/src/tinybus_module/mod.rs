@@ -91,6 +91,10 @@ fn registered_sandboxes() -> Vec<(&'static str, SandboxCapabilities)> {
             // build rather than a probe of the host.
             tinybox_linux::NamespaceSandbox::declared_capabilities(false),
         ),
+        (
+            tinybox_microvm::NAME,
+            tinybox_microvm::MicroVmSandbox::declared_capabilities(),
+        ),
     ]
 }
 

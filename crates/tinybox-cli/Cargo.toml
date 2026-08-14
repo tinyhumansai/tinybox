@@ -25,6 +25,7 @@ tinybox-core.workspace = true
 tinybox-host.workspace = true
 tinybox-docker.workspace = true
 tinybox-linux.workspace = true
+tinybox-microvm.workspace = true
 tinybox-ssh.workspace = true
 tinybox-sync.workspace = true
 # Argument parsing, help text, and shell-facing errors. The derive API keeps the

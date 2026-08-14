@@ -10,6 +10,7 @@ members = [
     "crates/tinybox-docker",
     "crates/tinybox-host",
     "crates/tinybox-linux",
+    "crates/tinybox-microvm",
     "crates/tinybox-module",
     "crates/tinybox-ssh",
     "crates/tinybox-sync",
@@ -56,6 +57,7 @@ serde = { version = "1", features = ["derive"] }
 tinybox-core = { path = "crates/tinybox-core", version = "0.1.5" }
 tinybox-host = { path = "crates/tinybox-host", version = "0.1.5" }
 tinybox-linux = { path = "crates/tinybox-linux", version = "0.1.5" }
+tinybox-microvm = { path = "crates/tinybox-microvm", version = "0.1.5" }
 tinybox-docker = { path = "crates/tinybox-docker", version = "0.1.5" }
 tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.1.5" }
 tinybox-sync = { path = "crates/tinybox-sync", version = "0.1.5" }
