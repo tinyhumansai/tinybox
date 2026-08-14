@@ -68,10 +68,23 @@ fn describe(sandboxes: &[(&str, SandboxCapabilities)]) -> String {
 
 /// The sandbox backends compiled into this build, with what each declares.
 ///
-/// Empty today: the backend crates land in later milestones, and advertising a
-/// sandbox that cannot be constructed would be worse than reporting none.
+/// Only backends this build can actually construct appear here: advertising a
+/// sandbox that cannot be created would be worse than reporting none.
+///
+/// Passthrough is deliberately included even though it confines nothing, so
+/// that `Describe` reports the full picture — and it is filtered out of the
+/// untrusted-capable list by its own declaration rather than by a special case.
 fn registered_sandboxes() -> Vec<(&'static str, SandboxCapabilities)> {
-    Vec::new()
+    vec![
+        (
+            tinybox_core::passthrough::NAME,
+            SandboxCapabilities::PASSTHROUGH,
+        ),
+        (
+            tinybox_docker::NAME,
+            tinybox_docker::DockerSandbox::declared_capabilities(),
+        ),
+    ]
 }
 
 async fn setup(connection: Connection) -> TinyBusResult<()> {

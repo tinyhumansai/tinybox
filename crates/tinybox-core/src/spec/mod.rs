@@ -102,6 +102,16 @@ impl BoxSpec {
         self
     }
 
+    /// Replace the workspace source.
+    ///
+    /// This is what forking uses: the snapshot becomes the filesystem the new
+    /// box starts from, and everything else about the spec is carried over.
+    #[must_use]
+    pub fn with_source(mut self, source: WorkspaceSource) -> Self {
+        self.source = source;
+        self
+    }
+
     /// Replace the resource limits.
     #[must_use]
     pub const fn with_resources(mut self, resources: Resources) -> Self {

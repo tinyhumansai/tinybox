@@ -155,6 +155,50 @@ VMM — belongs in its own crate, both to keep its dependencies out of the
 released `cdylib` and to keep the impure surface small enough that the per-file
 coverage gate stays reachable.
 
+## The Docker backend
+
+The first backend that confines anything. It declares `IsolationLevel::Kernel`,
+`SnapshotSupport::Filesystem`, `Fork`, and `ResourceLimits`.
+
+It does **not** declare `PauseResume`, even though `docker pause` exists,
+because the `Sandbox` trait has no method that would reach it — a capability no
+caller can invoke is a claim with nothing behind it.
+
+Every operation is a `docker` command run through the sandbox's `Host` rather
+than a call to a local socket, which is what makes Docker-over-SSH fall out of
+composition in M4. ADR 0004 records the tradeoff.
+
+| Concern | How |
+| --- | --- |
+| Lifetime | A detached container held open by `sh -c 'while :; do sleep 86400; done'`. A container exits when its entrypoint returns, and an exited container cannot be `exec`-ed into. |
+| Image requirement | Any image with a `sh`. Distroless images do not work, and that is a real constraint rather than a bug. |
+| `OciImage` | The image reference. |
+| `LocalDir` | Bind-mounted at `/workspace`, which also becomes the working directory, over a small base image. |
+| `Snapshot` | The committed image. |
+| `GitRepo` | Refused by name — no clone step exists yet. |
+| Limits | `--memory`, `--cpus`, `--pids-limit`. Disk is **not** applied: `--storage-opt size=` works on a minority of storage drivers, and a flag that silently does nothing on most systems is worse than an honest omission. |
+| Network | `Denied` → `--network none`. Docker has no outbound-only mode, so `Egress` uses the default bridge; nothing is published inbound because tinybox never passes `--publish`. |
+| State | Read from `docker inspect`, not from the store. A container can be stopped or removed by anything with daemon access, and reporting a stale `ready` would send commands to a box that is gone. Docker's `running` maps to `Ready`, because a tinybox box is `Running` only while a command executes and the keepalive loop is not a command. |
+
+### Snapshot identifiers
+
+`docker commit` prints `sha256:<64 hex>`, which is not a valid tinybox
+identifier — `:` is outside the permitted set. A snapshot id is therefore
+`sha-` plus the first twelve hex characters of the digest. Docker resolves that
+short form as an image reference, so **no snapshot registry is needed**: the
+identifier is the whole record.
+
+### Namespaces
+
+Box identifiers are unique within a `Store`; Docker container names are unique
+across a whole daemon. Those are different scopes, so two stores that both
+allocate `box-0` would fight over one container name. Containers are therefore
+named `tinybox-<namespace>-<box id>`, with the namespace defaulting to
+`default` and settable per sandbox.
+
+This was found by the live suite rather than by review, and it is a real
+multi-user constraint, not a test artifact.
+
 ## Persistence of box records
 
 A `Sandbox` does not own the fact that a box exists; a `Store` does. The CLI

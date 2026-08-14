@@ -19,14 +19,17 @@ these milestones build out.
   to whatever `Host` it is given, so it is already generic over reach — pairing
   it with SSH in M4 needs no new code.
 - `tinybox-host` with `LocalHost`, the only component that touches the OS
-- `tinybox-cli`: `create`, `exec`, `ls`, `inspect`, `rm`, and a one-shot `run`,
-  over a JSON box store that survives between invocations
+- `tinybox-cli`: `create`, `exec`, `ls`, `inspect`, `rm`, `snapshot`, `fork`, and
+  a one-shot `run`, over a JSON box store that survives between invocations
+- `DockerSandbox`: the first backend that confines anything — kernel isolation,
+  enforced CPU/memory/process limits, filesystem snapshots, and forking. It
+  drives `docker` through its `Host` rather than a socket, so Docker-over-SSH
+  arrives free in M4 (ADR 0004).
 
 ## Next
 
-- **M3** — `DockerSandbox` and OCI image sources, with snapshots via commit.
 - **M4** — `SshHost`, blake3 fingerprint sync that skips unchanged trees, and
-  port forwarding. Composes with M3 at no cost.
+  port forwarding. Docker-over-SSH needs no Docker-side code (ADR 0004).
 - **M5** — content-addressed snapshots, `.boxignore` derived from `.gitignore`,
   fork, named templates, the TTL reaper, autosnapshot cadence, and a warm pool.
   Also where the box store grows locking: today two concurrent CLI invocations

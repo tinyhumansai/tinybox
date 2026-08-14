@@ -29,17 +29,31 @@ fn declared_methods_match_the_dispatch_table() {
 
 #[test]
 fn an_empty_registry_is_reported_as_none_rather_than_omitted() {
-    // No backends are compiled in yet, and the module says so plainly rather
-    // than leaving the reader to infer it from an absent list.
-    assert!(registered_sandboxes().is_empty());
-
-    let description = describe(&registered_sandboxes());
+    // A build with no backends must say so plainly rather than leaving the
+    // reader to infer it from an absent list.
+    let description = describe(&[]);
 
     assert!(description.contains(env!("CARGO_PKG_VERSION")));
     assert!(description.contains("kernel"));
     assert!(description.contains("sandboxes: none"));
-    assert!(description.contains("untrusted-capable"));
     assert!(description.ends_with("none"));
+}
+
+#[test]
+fn the_registry_reports_every_backend_and_only_the_safe_ones_as_capable() {
+    let description = describe(&registered_sandboxes());
+
+    // Both backends are listed as present...
+    assert!(description.contains("sandboxes: passthrough, docker"));
+    // ...but only Docker clears the isolation floor, and passthrough says so
+    // through its own declaration rather than a special case here.
+    assert!(description.ends_with("docker"));
+
+    let names = registered_sandboxes()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["passthrough", "docker"]);
 }
 
 #[test]

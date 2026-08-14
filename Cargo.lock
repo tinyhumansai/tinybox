@@ -632,11 +632,13 @@ dependencies = [
 name = "tinybox-cli"
 version = "0.1.5"
 dependencies = [
+ "async-trait",
  "clap",
  "serde",
  "serde_json",
  "tempfile",
  "tinybox-core",
+ "tinybox-docker",
  "tinybox-host",
  "tokio",
 ]
@@ -648,6 +650,17 @@ dependencies = [
  "async-trait",
  "serde",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "tinybox-docker"
+version = "0.1.5"
+dependencies = [
+ "async-trait",
+ "tempfile",
+ "tinybox-core",
+ "tinybox-host",
  "tokio",
 ]
 
@@ -667,6 +680,7 @@ version = "0.1.5"
 dependencies = [
  "serde_json",
  "tinybox-core",
+ "tinybox-docker",
  "tinybus",
  "tinybus-module",
  "tokio",

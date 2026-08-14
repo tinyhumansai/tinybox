@@ -68,16 +68,15 @@ assert!(bare.require("passthrough", Capability::Fork).is_err());
 | --- | --- |
 | M1 — workspace, core model, provider traits, bus adapter | shipped |
 | M2 — `LocalHost` + passthrough sandbox, `tinybox` CLI | shipped |
-| M3 — `DockerSandbox` + OCI images | next |
-| M4 — `SshHost`, fingerprint sync, port forwarding | planned |
+| M3 — `DockerSandbox`, OCI images, snapshots, forking | shipped |
+| M4 — `SshHost`, fingerprint sync, port forwarding | next |
 | M5 — snapshots, templates, lifecycle policy, warm pool | planned |
 | M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | planned |
 | M7 — `MicroVmSandbox` (Firecracker) | deferred |
 
-The only sandbox that exists is `passthrough`, which confines nothing — so
-`tinybox create` warns, `tinybox inspect` prints `UNSAFE`, and the TinyBus
-module's `Describe` reports no untrusted-capable backend. None of that changes
-until M6.
+Two sandboxes exist. `passthrough` confines nothing, so `tinybox create` warns
+and `tinybox inspect` prints `UNSAFE`. `docker` clears the isolation floor and
+is a defensible place for code you do not trust.
 
 ## Try it
 
@@ -85,19 +84,54 @@ until M6.
 cargo build -p tinybox-cli
 export TINYBOX_STATE_DIR=$(mktemp -d)
 
+# Unconfined, on the local machine.
 tinybox create --dir /path/to/project --env CI=true   # -> box-0
 tinybox exec box-0 -- echo hello
-tinybox inspect box-0
 tinybox rm box-0
 
-# or, without leaving a box behind
-tinybox run --dir /path/to/project -- cargo test
+# Confined, in a container.
+tinybox create --sandbox docker --image alpine:3      # -> box-0
+tinybox exec box-0 -- sh -c 'ls /proc | grep -c "^[0-9]*$"'   # a private process table
+tinybox inspect box-0
+```
+
+```text
+id:         box-0
+sandbox:    docker
+state:      ready
+workspace:  alpine:3
+runner:     local / docker
+isolation:  kernel
+untrusted:  safe
+supports:   filesystem snapshots, forking, resource limits
+```
+
+Snapshot a box and branch it — the fork inherits the parent's filesystem and
+writes to it do not reach back:
+
+```sh
+tinybox exec box-0 -- sh -c 'echo captured > /marker'
+snap=$(tinybox snapshot box-0)        # -> sha-30ff5506ef1d
+fork=$(tinybox fork "$snap")          # -> box-1
+tinybox exec "$fork" -- cat /marker   # -> captured
+```
+
+Or run one command and leave nothing behind:
+
+```sh
+tinybox run --sandbox docker --image alpine:3 -- echo once
 ```
 
 Boxes outlive the process that made them, so `create` and `exec` are separate
-invocations. Records live in `$TINYBOX_STATE_DIR`, `$XDG_STATE_HOME/tinybox`, or
-`~/.local/state/tinybox`. A command that fails sets tinybox's exit code to its
-own; a tinybox failure uses `70`, so the two are never confused.
+invocations, and a box remembers which sandbox it belongs to — there is no
+`--sandbox` on `exec`. Records live in `$TINYBOX_STATE_DIR`,
+`$XDG_STATE_HOME/tinybox`, or `~/.local/state/tinybox`. A command that fails
+sets tinybox's exit code to its own; a tinybox failure uses `70`, so the two are
+never confused.
+
+Container names are `tinybox-<namespace>-<box id>`; pass `--namespace` when
+another tinybox shares the daemon, since box ids are only unique within one
+store.
 
 ## Layout
 
@@ -115,7 +149,10 @@ crates/
 │   ├── tests/public_api.rs  # consumer-perspective regression suite
 │   └── examples/basic.rs
 ├── tinybox-host/            # reach: LocalHost today, SshHost in M4
-│   └── src/local/           # the only M2 code that touches the OS
+│   └── src/local/           # the only code that spawns a process directly
+├── tinybox-docker/          # confinement: containers, snapshots, forking
+│   ├── src/sandbox/args.rs  # pure `docker` command construction
+│   └── tests/live_docker.rs # gated behind TINYBOX_LIVE_DOCKER
 ├── tinybox-cli/             # the `tinybox` binary
 │   ├── src/command/         # argument parsing and dispatch
 │   ├── src/store/           # the JSON box store, written atomically
@@ -163,6 +200,17 @@ cargo install cargo-llvm-cov                    # once, before the coverage gate
 The coverage gate requires **90% line coverage in every file individually**, not
 in aggregate.
 
+Tests that need a real Docker daemon are gated and named `live_*`, so an
+ordinary `cargo test` skips them:
+
+```sh
+TINYBOX_LIVE_DOCKER=1 cargo test -p tinybox-docker --test live_docker
+```
+
+They assert isolation *negatively* — that a box cannot see host processes, that
+a denied network really has only loopback — because a positive assertion would
+pass just as happily against a sandbox that confines nothing.
+
 ## Releasing
 
 Run the **Release** workflow from the Actions tab with a `patch`, `minor`, or
@@ -190,7 +238,8 @@ Arch Linux; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022 and
   specification: the model, the capability contract, and the adopted
   optimizations
 - [`docs/adr/`](docs/adr/0001-record-architecture-decisions.md) — architecture
-  decision records
+  decision records, including [why backends drive a CLI through the `Host`
+  trait](docs/adr/0004-drive-backends-through-the-host-trait.md)
 - [`AGENTS.md`](AGENTS.md) — repository guidelines for humans and agents
   (`CLAUDE.md` is a symlink to it)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to propose a change

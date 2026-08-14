@@ -7,6 +7,7 @@ resolver = "3"
 members = [
     "crates/tinybox-cli",
     "crates/tinybox-core",
+    "crates/tinybox-docker",
     "crates/tinybox-host",
     "crates/tinybox-module",
 ]
@@ -51,6 +52,7 @@ serde = { version = "1", features = ["derive"] }
 # Internal path dependencies between workspace members.
 tinybox-core = { path = "crates/tinybox-core", version = "0.1.5" }
 tinybox-host = { path = "crates/tinybox-host", version = "0.1.5" }
+tinybox-docker = { path = "crates/tinybox-docker", version = "0.1.5" }
 
 # Lints apply to every crate in the workspace via `[lints] workspace = true`.
 # CI runs clippy with `-D warnings`, so anything set to "warn" here fails CI.

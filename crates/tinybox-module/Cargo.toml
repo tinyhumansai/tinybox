@@ -23,6 +23,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 tinybox-core.workspace = true
+tinybox-docker.workspace = true
 tinybus.workspace = true
 tinybus-module.workspace = true
 

@@ -115,6 +115,22 @@ pub enum Error {
         message: String,
     },
 
+    /// A backend tool reported a failure.
+    ///
+    /// Distinct from [`Error::Io`], which is this process failing to *start*
+    /// something: here the tool ran and refused. The message is the tool's own
+    /// diagnostic, because it is more specific than anything tinybox could
+    /// reconstruct.
+    #[error("{sandbox} could not {operation}: {message}")]
+    Backend {
+        /// The sandbox whose backend refused.
+        sandbox: String,
+        /// What was being attempted, such as `create the container`.
+        operation: &'static str,
+        /// What the backend said.
+        message: String,
+    },
+
     /// Reading or writing the box store failed, or its contents were not
     /// valid.
     #[error("box store {operation} failed: {message}")]

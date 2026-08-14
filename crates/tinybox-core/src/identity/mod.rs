@@ -23,6 +23,16 @@ mod types;
 
 pub use types::{BoxId, HostRef, SandboxRef, SnapshotId};
 
+/// Whether `value` would be accepted as a tinybox identifier.
+///
+/// Backends sometimes need to validate a name that is not one of the newtypes
+/// here — a Docker namespace, say — against the same rule, and duplicating the
+/// character set is how the two drift apart.
+#[must_use]
+pub fn is_valid(value: &str) -> bool {
+    validate("identifier", value).is_ok()
+}
+
 /// The longest identifier tinybox accepts.
 ///
 /// Container runtimes and filesystem layouts both tolerate far more than this,

@@ -25,6 +25,7 @@ crates/
 │   ├── tests/               # integration tests against the public API only
 │   └── examples/
 ├── tinybox-host/            # reach: LocalHost today, SshHost in M4
+├── tinybox-docker/          # confinement: containers, snapshots, forking
 ├── tinybox-cli/             # the `tinybox` binary
 └── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
     ├── src/lib.rs           # crate docs; the adapter itself is private
@@ -37,9 +38,9 @@ docs/
 └── adr/                     # immutable architecture decision records
 ```
 
-Crates named in the spec but not listed above — `tinybox-docker`,
-`tinybox-linux` — arrive with the milestone that gives them real content. Do not scaffold an empty crate; that is a
-placeholder.
+Crates named in the spec but not listed above — `tinybox-linux` — arrive with
+the milestone that gives them real content. Do not scaffold an empty crate; that
+is a placeholder.
 
 Each feature area is a directory module under a crate's `src/`. A module root
 explains the module, wires its pieces together, and exposes the smallest useful
@@ -74,6 +75,10 @@ variants in `tinybox-core`'s `src/error/mod.rs` and return the crate-wide
    `Sandbox` answers what confines the process. Do not add a backend that
    merges the two (`DockerOverSsh` and its relatives); compose a `Placement`
    instead. See ADR 0002.
+3. **A backend that drives an external tool runs it through its `Host`**, never
+   through a native protocol client bound to a local socket. That is what keeps
+   rule 2 true in practice, and it keeps command construction pure and
+   testable. See ADR 0004.
 
 ## Build And Test
 

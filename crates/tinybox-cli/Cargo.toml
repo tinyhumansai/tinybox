@@ -23,6 +23,7 @@ doc = false
 [dependencies]
 tinybox-core.workspace = true
 tinybox-host.workspace = true
+tinybox-docker.workspace = true
 # Argument parsing, help text, and shell-facing errors. The derive API keeps the
 # command surface declared next to the types it produces.
 clap = { version = "4", features = ["derive"] }
@@ -34,6 +35,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 [dev-dependencies]
 # End-to-end tests drive the real binary against a throwaway state directory.
 tempfile = "3"
+# Tests implement a scripted `Host` so the Docker paths are reachable without a
+# daemon.
+async-trait.workspace = true
 
 [lints]
 workspace = true

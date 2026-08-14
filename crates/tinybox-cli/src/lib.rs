@@ -20,5 +20,5 @@
 mod command;
 mod store;
 
-pub use command::{Cli, run};
+pub use command::{Cli, run, run_with_host};
 pub use store::FileStore;
