@@ -70,8 +70,8 @@ assert!(bare.require("passthrough", Capability::Fork).is_err());
 | M2 — `LocalHost` + passthrough sandbox, `tinybox` CLI | shipped |
 | M3 — `DockerSandbox`, OCI images, snapshots, forking | shipped |
 | M4 — `SshHost`, fingerprint sync, published ports | shipped |
-| M5 — templates, lifecycle policy, warm pool, `.boxignore` | next |
-| M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | planned |
+| M5 — templates, expiry, `.boxignore`, store locking | shipped |
+| M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | next |
 | M7 — `MicroVmSandbox` (Firecracker) | deferred |
 
 Two sandboxes exist. `passthrough` confines nothing, so `tinybox create` warns
@@ -136,11 +136,17 @@ tinybox --host ssh://builder@example.com exec box-0 -- hostname
 Send a working tree over, and watch the second send cost nothing:
 
 ```sh
-tinybox --host ssh://builder@example.com sync --to /srv/work --exclude .git --exclude target
-# sent       9f2c0e1b…   184320 bytes
-tinybox --host ssh://builder@example.com sync --to /srv/work --exclude .git --exclude target
+tinybox --host ssh://builder@example.com sync --to /srv/work
+# sent       9f2c0e1b…   4096 bytes
+tinybox --host ssh://builder@example.com sync --to /srv/work
 # unchanged  9f2c0e1b…
 ```
+
+Nothing was listed on that command line: `sync` reads the workspace's own
+`.gitignore`, so `target/` and `node_modules/` stay behind because the project
+already said they are derived. A `.boxignore` beside it can override — including
+`!.env` to put back something git ignores but a running box needs. `--no-ignore`
+sends everything.
 
 Everything not named on the command line is left to your `~/.ssh/config`, which
 is where jump hosts and multiplexing already live. A throwaway machine has no
@@ -159,6 +165,38 @@ Publish a port with `-p`:
 ```sh
 tinybox create --sandbox docker --image nginx -p 8080:80
 ```
+
+## Templates
+
+Provisioning is the slow part of making a box, so do it once and give the result
+a name. A template is just a named snapshot:
+
+```sh
+tinybox create --sandbox docker --image alpine:3     # -> box-0
+tinybox exec box-0 -- apk add --no-cache build-base  # the slow bit
+tinybox template save build-env --from box-0
+tinybox template ls
+# build-env    sha-2d0325276589
+
+# Every box after this starts with the toolchain already installed.
+tinybox create --sandbox docker --template build-env
+```
+
+## Expiry
+
+Ephemeral boxes carry a ttl. `reap` acts on it:
+
+```sh
+tinybox reap --dry-run
+# would reap   box-3
+tinybox reap
+# reaped       box-3
+```
+
+It is a command rather than a background timer, because tinybox has no
+long-running process to hold one — so run it from cron if you want it periodic.
+A box created before tinybox tracked creation times is never reaped, since
+guessing its age would mean destroying work on the strength of a missing field.
 
 Boxes outlive the process that made them, so `create` and `exec` are separate
 invocations, and a box remembers which sandbox it belongs to — there is no
@@ -195,7 +233,7 @@ crates/
 │   ├── src/host/quote.rs    # the one place a bug is an injection bug
 │   ├── tests/composition.rs # the receipt for "Docker over SSH costs nothing"
 │   └── tests/live_ssh.rs    # gated behind TINYBOX_LIVE_SSH
-├── tinybox-sync/            # fingerprinting and tar-over-stdin transfer
+├── tinybox-sync/            # fingerprinting, exclusions, tar-over-stdin transfer
 ├── tinybox-cli/             # the `tinybox` binary
 │   ├── src/command/         # argument parsing and dispatch
 │   ├── src/store/           # the JSON box store, written atomically

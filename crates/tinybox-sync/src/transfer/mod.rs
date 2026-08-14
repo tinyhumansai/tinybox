@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tinybox_core::{Error, ExecRequest, Host, Result};
 
+use crate::exclude::Exclusions;
 use crate::fingerprint::Fingerprint;
 
 mod archive;
@@ -59,7 +60,7 @@ impl Sync {
 #[derive(Debug, Clone)]
 pub struct Syncer {
     host: Arc<dyn Host>,
-    exclude: Vec<String>,
+    exclude: Exclusions,
 }
 
 impl Syncer {
@@ -68,29 +69,24 @@ impl Syncer {
     pub fn new(host: Arc<dyn Host>) -> Self {
         Self {
             host,
-            exclude: Vec::new(),
+            exclude: Exclusions::none(),
         }
     }
 
-    /// Skip any directory with one of these names, anywhere in the tree.
+    /// Leave behind whatever `exclude` covers.
     ///
-    /// Nothing is excluded by default. Deriving exclusions from `.gitignore` is
-    /// M5's `.boxignore` work; until then a caller that wants `.git` and
-    /// `target` left behind has to say so, because silently dropping files
-    /// would be worse than sending too many.
+    /// Nothing is excluded by default, so sending everything stays an explicit
+    /// choice. [`Exclusions::read`] builds this from a workspace's own
+    /// `.gitignore` and `.boxignore`.
     #[must_use]
-    pub fn excluding<I, S>(mut self, names: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.exclude = names.into_iter().map(Into::into).collect();
+    pub fn excluding(mut self, exclude: Exclusions) -> Self {
+        self.exclude = exclude;
         self
     }
 
     /// What this syncer leaves behind.
     #[must_use]
-    pub fn excluded(&self) -> &[String] {
+    pub const fn excluded(&self) -> &Exclusions {
         &self.exclude
     }
 

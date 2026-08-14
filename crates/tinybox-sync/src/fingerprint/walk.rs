@@ -6,6 +6,7 @@ use std::path::Path;
 use tinybox_core::{Error, Result};
 
 use super::Entry;
+use crate::exclude::Exclusions;
 
 /// Every regular file under `root`, sorted by relative path.
 ///
@@ -20,7 +21,7 @@ use super::Entry;
 /// # Errors
 ///
 /// Returns [`Error::Io`] when `root` or a directory beneath it cannot be read.
-pub(crate) fn entries(root: &Path, exclude: &[String]) -> Result<Vec<Entry>> {
+pub(crate) fn entries(root: &Path, exclude: &Exclusions) -> Result<Vec<Entry>> {
     let mut found = Vec::new();
     collect(root, Path::new(""), exclude, &mut found)?;
     found.sort();
@@ -28,25 +29,31 @@ pub(crate) fn entries(root: &Path, exclude: &[String]) -> Result<Vec<Entry>> {
 }
 
 /// Recurse into one directory, accumulating its files.
-fn collect(root: &Path, relative: &Path, exclude: &[String], found: &mut Vec<Entry>) -> Result<()> {
+fn collect(
+    root: &Path,
+    relative: &Path,
+    exclude: &Exclusions,
+    found: &mut Vec<Entry>,
+) -> Result<()> {
     let directory = root.join(relative);
     let listing = fs::read_dir(&directory)
         .map_err(|error| Error::io("read a workspace directory", &error))?;
 
     for entry in listing {
         let entry = entry.map_err(|error| Error::io("read a workspace directory", &error))?;
-        let name = entry.file_name();
-
-        if exclude.iter().any(|excluded| excluded.as_str() == name) {
-            continue;
-        }
-
-        let child = relative.join(&name);
+        let child = relative.join(entry.file_name());
         // `file_type` does not follow links, which is what lets a link be
         // recognized and skipped rather than silently traversed.
         let kind = entry
             .file_type()
             .map_err(|error| Error::io("inspect a workspace entry", &error))?;
+
+        // Asked before recursing, so an excluded directory is never walked at
+        // all — which is the difference between skipping `target/` and reading
+        // every file in it to decide it was skippable.
+        if exclude.excludes(&child, kind.is_dir()) {
+            continue;
+        }
 
         if kind.is_dir() {
             collect(root, &child, exclude, found)?;

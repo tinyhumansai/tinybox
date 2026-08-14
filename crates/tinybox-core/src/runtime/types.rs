@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
 use crate::identity::BoxId;
-use crate::spec::BoxSpec;
+use crate::spec::{BoxSpec, Lifecycle};
 
 /// Where a box is in its life.
 ///
@@ -72,13 +73,54 @@ pub struct BoxInfo {
     pub state: BoxState,
     /// The spec the box was created from.
     pub spec: BoxSpec,
+    /// When the box was created, if that is known.
+    ///
+    /// `None` for a box recorded before tinybox tracked time. It has to be
+    /// optional rather than defaulted: defaulting to the epoch would make every
+    /// pre-existing box look decades old and be destroyed by the first reap,
+    /// which is exactly the failure a compatibility default is supposed to
+    /// prevent.
+    #[serde(default)]
+    pub created_at: Option<SystemTime>,
 }
 
 impl BoxInfo {
-    /// Record a box in a given state.
+    /// Record a box in a given state, with no creation time.
     #[must_use]
     pub const fn new(id: BoxId, state: BoxState, spec: BoxSpec) -> Self {
-        Self { id, state, spec }
+        Self {
+            id,
+            state,
+            spec,
+            created_at: None,
+        }
+    }
+
+    /// Record when the box was created.
+    #[must_use]
+    pub const fn created_at(mut self, at: SystemTime) -> Self {
+        self.created_at = Some(at);
+        self
+    }
+
+    /// When this box stops being wanted, if it ever does.
+    ///
+    /// Only ephemeral boxes expire, and only once their creation time is known.
+    #[must_use]
+    pub fn expires_at(&self) -> Option<SystemTime> {
+        let Lifecycle::Ephemeral { ttl } = self.spec.lifecycle else {
+            return None;
+        };
+        self.created_at.map(|created| created + ttl)
+    }
+
+    /// Whether this box should be destroyed as of `now`.
+    ///
+    /// A box whose creation time is unknown never expires. Guessing would mean
+    /// destroying somebody's work on the strength of a missing field.
+    #[must_use]
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        self.expires_at().is_some_and(|expiry| now >= expiry)
     }
 }
 

@@ -16,6 +16,7 @@ use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
 use tinybox_host::LocalHost;
 
 use super::{MARKER, Sync, Syncer, default_destination};
+use crate::exclude::Exclusions;
 use crate::fingerprint::Fingerprint;
 
 fn temp_dir() -> Result<TempDir> {
@@ -149,10 +150,11 @@ async fn excluded_directories_do_not_cross() -> Result<()> {
     let destination = temp_dir()?;
     let target = destination.path().join("work").display().to_string();
 
-    let syncer = local_syncer().excluding([".git", "target"]);
+    write(source.path(), ".gitignore", ".git/\ntarget/\n")?;
+    let syncer = local_syncer().excluding(Exclusions::read(source.path())?);
     syncer.sync(source.path(), &target).await?;
 
-    assert_eq!(syncer.excluded(), [".git", "target"]);
+    assert_eq!(syncer.excluded().sources().len(), 1);
     assert!(Path::new(&target).join("a.txt").exists());
     assert!(!Path::new(&target).join(".git").exists());
     assert!(!Path::new(&target).join("target").exists());
@@ -165,7 +167,8 @@ async fn a_change_inside_an_excluded_directory_does_not_trigger_a_resend() -> Re
     write(source.path(), ".git/HEAD", "one")?;
     let destination = temp_dir()?;
     let target = destination.path().join("work").display().to_string();
-    let syncer = local_syncer().excluding([".git"]);
+    write(source.path(), ".gitignore", ".git/\n")?;
+    let syncer = local_syncer().excluding(Exclusions::read(source.path())?);
     syncer.sync(source.path(), &target).await?;
 
     // Committing changes .git constantly; it must not cost a transfer.
@@ -341,7 +344,7 @@ fn a_file_that_cannot_be_read_is_reported_rather_than_packed_empty() -> Result<(
     .map_err(|error| Error::io("chmod", &error))?;
 
     let fingerprint = Fingerprint::parse(&"a".repeat(64))?;
-    let outcome = super::archive::pack(source.path(), &[], &fingerprint);
+    let outcome = super::archive::pack(source.path(), &Exclusions::none(), &fingerprint);
 
     // Running as root defeats the permission bit, so accept either a reported
     // failure or a successful pack rather than asserting something that depends
@@ -353,10 +356,10 @@ fn a_file_that_cannot_be_read_is_reported_rather_than_packed_empty() -> Result<(
 #[test]
 fn packing_the_same_tree_twice_produces_identical_bytes() -> Result<()> {
     let source = source_tree()?;
-    let fingerprint = Fingerprint::of_directory(source.path(), &[])?;
+    let fingerprint = Fingerprint::of_directory(source.path(), &Exclusions::none())?;
 
-    let once = super::archive::pack(source.path(), &[], &fingerprint)?;
-    let twice = super::archive::pack(source.path(), &[], &fingerprint)?;
+    let once = super::archive::pack(source.path(), &Exclusions::none(), &fingerprint)?;
+    let twice = super::archive::pack(source.path(), &Exclusions::none(), &fingerprint)?;
 
     // Deterministic headers: no timestamps, no uid, no gid. Without this an
     // archive would differ on every run and be useless to cache or compare.
@@ -368,9 +371,9 @@ fn packing_the_same_tree_twice_produces_identical_bytes() -> Result<()> {
 #[test]
 fn the_archive_carries_the_marker_and_every_file() -> Result<()> {
     let source = source_tree()?;
-    let fingerprint = Fingerprint::of_directory(source.path(), &[])?;
+    let fingerprint = Fingerprint::of_directory(source.path(), &Exclusions::none())?;
 
-    let packed = super::archive::pack(source.path(), &[], &fingerprint)?;
+    let packed = super::archive::pack(source.path(), &Exclusions::none(), &fingerprint)?;
 
     // Read back with the same library that will unpack it on the far side.
     let mut names = tar::Archive::new(packed.as_slice())

@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tinybox_core::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Capability, Error, ExecOutput, ExecRequest, Host,
+    BoxId, BoxInfo, BoxSpec, BoxState, Capability, Clock, Error, ExecOutput, ExecRequest, Host,
     IsolationLevel, Result, Sandbox, SandboxCapabilities, SnapshotId, SnapshotSupport, Store,
+    SystemClock,
 };
 
 mod args;
@@ -37,6 +38,7 @@ pub const NAME: &str = "docker";
 pub struct DockerSandbox {
     host: Arc<dyn Host>,
     store: Arc<dyn Store>,
+    clock: Arc<dyn Clock>,
     namespace: String,
 }
 
@@ -55,8 +57,16 @@ impl DockerSandbox {
         Self {
             host,
             store,
+            clock: Arc::new(SystemClock::new()),
             namespace: DEFAULT_NAMESPACE.to_owned(),
         }
+    }
+
+    /// Read creation times from `clock` rather than the operating system.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Run containers under a named namespace.
@@ -86,6 +96,7 @@ impl DockerSandbox {
         Ok(Self {
             host,
             store,
+            clock: Arc::new(SystemClock::new()),
             namespace,
         })
     }
@@ -144,23 +155,25 @@ impl Sandbox for DockerSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
-        let id = self.store.allocate_id()?;
-        // Build the command before recording anything, so a source this backend
-        // cannot handle leaves no box behind.
-        let argv = args::run(&self.namespace, &id, spec)?;
+        // Claim the record first. A container is expensive to create and has to
+        // be torn down if the record cannot be written, so taking the cheap
+        // resource first keeps the failure path short.
+        let info =
+            tinybox_core::insert_new(self.store.as_ref(), BoxState::Ready, spec, self.clock.now())?;
 
-        self.docker("create the container", argv).await?;
+        // Build the command before running anything, so a source this backend
+        // cannot handle leaves no container behind.
+        let argv = match args::run(&self.namespace, &info.id, spec) {
+            Ok(argv) => argv,
+            Err(error) => {
+                let _ = self.store.remove(&info.id);
+                return Err(error);
+            }
+        };
 
-        let info = BoxInfo::new(id, BoxState::Ready, spec.clone());
-        if let Err(error) = self.store.insert(&info) {
-            // The container exists but is unreachable without a record, so
-            // remove it rather than leaking it.
-            let _ = self
-                .docker(
-                    "remove the container",
-                    args::remove(&self.namespace, &info.id),
-                )
-                .await;
+        if let Err(error) = self.docker("create the container", argv).await {
+            // No container, so the record would point at nothing.
+            let _ = self.store.remove(&info.id);
             return Err(error);
         }
         Ok(info)

@@ -317,3 +317,25 @@ async fn it_is_usable_behind_a_trait_object() -> Result<()> {
     assert_eq!(sandbox.create(&spec()?).await?.state, BoxState::Ready);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_new_box_records_when_it_was_created() -> Result<()> {
+    let clock = Arc::new(crate::clock::FixedClock::at_epoch());
+    let sandbox = PassthroughSandbox::with_clock(
+        Arc::new(RecordingHost::default()),
+        Arc::new(MemoryStore::new()),
+        clock.clone(),
+    );
+
+    let first = sandbox.create(&spec()?).await?;
+    clock.advance(std::time::Duration::from_secs(30));
+    let second = sandbox.create(&spec()?).await?;
+
+    // Without this, nothing can ever tell whether a box has outlived its ttl.
+    assert_eq!(first.created_at, Some(std::time::SystemTime::UNIX_EPOCH));
+    assert_eq!(
+        second.created_at,
+        Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(30))
+    );
+    Ok(())
+}

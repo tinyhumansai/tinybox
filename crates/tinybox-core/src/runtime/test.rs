@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 
@@ -14,7 +15,7 @@ use super::{BoxInfo, BoxState, ExecOutput, ExecRequest, Host, Sandbox};
 use crate::capability::{Capability, IsolationLevel, SandboxCapabilities, SnapshotSupport};
 use crate::error::{Error, Result};
 use crate::identity::{BoxId, HostRef, SandboxRef, SnapshotId};
-use crate::spec::{BoxSpec, Placement, WorkspaceSource};
+use crate::spec::{BoxSpec, Lifecycle, Placement, WorkspaceSource};
 
 /// An in-memory sandbox whose capabilities are set per test.
 #[derive(Debug)]
@@ -381,4 +382,70 @@ fn every_box_state_renders_for_error_messages() {
     ] {
         assert_eq!(state.to_string(), text);
     }
+}
+
+#[test]
+fn only_an_ephemeral_box_expires() -> Result<()> {
+    let created = SystemTime::UNIX_EPOCH;
+    let ephemeral = BoxInfo::new(
+        BoxId::new("box-0")?,
+        BoxState::Ready,
+        spec()?.with_lifecycle(Lifecycle::Ephemeral {
+            ttl: Duration::from_secs(60),
+        }),
+    )
+    .created_at(created);
+    let persistent = BoxInfo::new(
+        BoxId::new("box-1")?,
+        BoxState::Ready,
+        spec()?.with_lifecycle(Lifecycle::persistent()),
+    )
+    .created_at(created);
+
+    assert_eq!(
+        ephemeral.expires_at(),
+        Some(created + Duration::from_secs(60))
+    );
+    // A workspace someone is using must not disappear on a timer.
+    assert_eq!(persistent.expires_at(), None);
+    assert!(!persistent.is_expired(created + Duration::from_secs(86_400)));
+    Ok(())
+}
+
+#[test]
+fn expiry_happens_at_the_deadline_not_before() -> Result<()> {
+    let created = SystemTime::UNIX_EPOCH;
+    let info = BoxInfo::new(
+        BoxId::new("box-0")?,
+        BoxState::Ready,
+        spec()?.with_lifecycle(Lifecycle::Ephemeral {
+            ttl: Duration::from_secs(60),
+        }),
+    )
+    .created_at(created);
+
+    assert!(!info.is_expired(created));
+    assert!(!info.is_expired(created + Duration::from_secs(59)));
+    assert!(info.is_expired(created + Duration::from_secs(60)));
+    assert!(info.is_expired(created + Duration::from_secs(61)));
+    Ok(())
+}
+
+#[test]
+fn a_box_with_no_recorded_creation_time_never_expires() -> Result<()> {
+    // Exactly what a store written before tinybox tracked time contains.
+    // Guessing an age here would destroy somebody's work on the strength of a
+    // missing field.
+    let info = BoxInfo::new(
+        BoxId::new("box-0")?,
+        BoxState::Ready,
+        spec()?.with_lifecycle(Lifecycle::Ephemeral {
+            ttl: Duration::from_secs(1),
+        }),
+    );
+
+    assert_eq!(info.created_at, None);
+    assert_eq!(info.expires_at(), None);
+    assert!(!info.is_expired(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)));
+    Ok(())
 }

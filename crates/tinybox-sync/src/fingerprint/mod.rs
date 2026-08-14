@@ -18,11 +18,12 @@
 //! change would resend an identical tree.
 //!
 //! ```no_run
-//! use tinybox_sync::Fingerprint;
+//! use tinybox_sync::{Exclusions, Fingerprint};
 //!
-//! let before = Fingerprint::of_directory("/srv/work", &[])?;
+//! let exclude = Exclusions::read("/srv/work")?;
+//! let before = Fingerprint::of_directory("/srv/work", &exclude)?;
 //! // ... no edits ...
-//! let after = Fingerprint::of_directory("/srv/work", &[])?;
+//! let after = Fingerprint::of_directory("/srv/work", &exclude)?;
 //! assert_eq!(before, after);
 //! # Ok::<(), tinybox_core::Error>(())
 //! ```
@@ -32,6 +33,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tinybox_core::{Error, Result};
+
+use crate::exclude::Exclusions;
 
 mod walk;
 
@@ -45,20 +48,17 @@ pub(crate) use walk::entries;
 pub struct Fingerprint(String);
 
 impl Fingerprint {
-    /// Hash the tree rooted at `root`, skipping any directory named in
-    /// `exclude`.
+    /// Hash the tree rooted at `root`, skipping whatever `exclude` covers.
     ///
-    /// `exclude` matches a path component anywhere in the tree, so `.git`
-    /// excludes a nested `.git` too. It is an explicit list rather than
-    /// anything inferred: deriving exclusions from `.gitignore` is M5's
-    /// `.boxignore` work, and guessing in the meantime would silently drop
-    /// files a caller expected to be sent.
+    /// The exclusions are part of the identity: two runs that exclude different
+    /// things are describing different trees, and must not be mistaken for the
+    /// same one.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] when `root` cannot be read, or when a file
     /// disappears or becomes unreadable while the tree is being walked.
-    pub fn of_directory(root: impl AsRef<Path>, exclude: &[String]) -> Result<Self> {
+    pub fn of_directory(root: impl AsRef<Path>, exclude: &Exclusions) -> Result<Self> {
         let root = root.as_ref();
         let mut hasher = blake3::Hasher::new();
 

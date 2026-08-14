@@ -11,7 +11,9 @@
 //! use tinybox_sync::Syncer;
 //!
 //! # async fn run() -> tinybox_core::Result<()> {
-//! let syncer = Syncer::new(Arc::new(LocalHost::new())).excluding([".git", "target"]);
+//! // Reads the workspace's own `.gitignore` and `.boxignore`.
+//! let syncer = Syncer::new(Arc::new(LocalHost::new()))
+//!     .excluding(tinybox_sync::Exclusions::read("/srv/work")?);
 //!
 //! let first = syncer.sync("/srv/work", "/tmp/work").await?;
 //! assert!(first.transferred());
@@ -37,8 +39,10 @@
 //! agent on the far side to negotiate with; the skip is the win that matters
 //! for an edit-run loop, and it is the one available without either.
 
+mod exclude;
 mod fingerprint;
 mod transfer;
 
+pub use exclude::{BOXIGNORE, Exclusions, GITIGNORE};
 pub use fingerprint::Fingerprint;
 pub use transfer::{MARKER, Sync, Syncer, default_destination};

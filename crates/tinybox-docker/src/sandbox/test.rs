@@ -729,3 +729,21 @@ async fn containers_are_named_under_the_sandboxs_namespace() -> Result<()> {
     assert_eq!(flag_value(&argv, "--name"), Some("tinybox-team-a-box-0"));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_new_container_records_when_it_was_created() -> Result<()> {
+    let clock = Arc::new(tinybox_core::clock::FixedClock::at_epoch());
+    let sandbox = DockerSandbox::new(ScriptedHost::silent(), Arc::new(MemoryStore::new()))
+        .with_clock(clock.clone());
+
+    let first = sandbox.create(&spec()?).await?;
+    clock.advance(std::time::Duration::from_secs(45));
+    let second = sandbox.create(&spec()?).await?;
+
+    assert_eq!(first.created_at, Some(std::time::SystemTime::UNIX_EPOCH));
+    assert_eq!(
+        second.created_at,
+        Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(45))
+    );
+    Ok(())
+}

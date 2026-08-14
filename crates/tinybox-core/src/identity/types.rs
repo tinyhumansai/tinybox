@@ -102,6 +102,15 @@ identifier!(
 );
 
 identifier!(
+    /// Names a saved template.
+    ///
+    /// A template is a named snapshot, so this is the only thing a template
+    /// really is beyond the snapshot it points at.
+    TemplateName,
+    "template name"
+);
+
+identifier!(
     /// Names a registered [`Host`](crate::runtime::Host) — the machine a
     /// process runs on, such as `local` or `ssh-builder-01`.
     HostRef,

@@ -32,6 +32,10 @@ clap = { version = "4", features = ["derive"] }
 # Boxes outlive the process that created them, so the store is a JSON file.
 serde_json.workspace = true
 serde.workspace = true
+# Advisory file locking, so two invocations cannot lose each other's writes.
+# Already in the tree via tempfile, and a real lock is released by the kernel on
+# process exit — a hand-rolled lockfile would strand one behind a crash.
+rustix = { version = "1", features = ["fs"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]

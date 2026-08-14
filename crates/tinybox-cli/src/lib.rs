@@ -18,7 +18,10 @@
 //! run self-contained.
 
 mod command;
+mod document;
 mod store;
+mod templates;
 
 pub use command::{Cli, run, run_with_host};
 pub use store::FileStore;
+pub use templates::FileTemplates;

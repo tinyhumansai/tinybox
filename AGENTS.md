@@ -81,9 +81,14 @@ variants in `tinybox-core`'s `src/error/mod.rs` and return the crate-wide
    through a native protocol client bound to a local socket. That is what keeps
    rule 2 true in practice, and it keeps command construction pure and
    testable. See ADR 0004.
-4. **Adding a field to a stored type needs `#[serde(default)]`.** `BoxSpec` and
-   `ExecRequest` are written to a user's box store; a field without a default
-   makes an older store unreadable and orphans every box in it.
+4. **Adding a field to a stored type needs `#[serde(default)]`.** `BoxSpec`,
+   `BoxInfo`, and `ExecRequest` are written to a user's box store; a field
+   without a default makes an older store unreadable and orphans every box in
+   it. Think about what the default *means*, too — `BoxInfo::created_at`
+   defaults to `None` rather than the epoch, because "unknown age" must not read
+   as "ancient" to the reaper.
+5. **Time comes from a `Clock`, never `SystemTime::now`.** A test that waits an
+   hour for a box to expire is not a test anyone will run.
 
 ## Build And Test
 

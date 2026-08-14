@@ -54,6 +54,13 @@ pub enum Error {
         id: String,
     },
 
+    /// A template name was used that has never been saved.
+    #[error("no template named {name}")]
+    UnknownTemplate {
+        /// The name that did not resolve.
+        name: String,
+    },
+
     /// A snapshot was referenced that the sandbox does not know about.
     #[error("no snapshot with id {id}")]
     UnknownSnapshot {

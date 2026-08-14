@@ -5,6 +5,7 @@ use std::path::Path;
 
 use tinybox_core::{Error, Result};
 
+use crate::exclude::Exclusions;
 use crate::fingerprint::{Fingerprint, entries};
 
 use super::MARKER;
@@ -24,7 +25,11 @@ use super::MARKER;
 ///
 /// Returns [`Error::Io`] when the tree cannot be read, or when a file changes
 /// size while it is being packed.
-pub(super) fn pack(root: &Path, exclude: &[String], fingerprint: &Fingerprint) -> Result<Vec<u8>> {
+pub(super) fn pack(
+    root: &Path,
+    exclude: &Exclusions,
+    fingerprint: &Fingerprint,
+) -> Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
     // Reproducible archives: no unstable metadata, so packing the same tree
     // twice yields the same bytes.

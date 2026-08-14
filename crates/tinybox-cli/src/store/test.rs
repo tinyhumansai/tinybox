@@ -310,3 +310,95 @@ fn an_unwritable_directory_is_reported_rather_than_silently_dropping_the_box() -
     assert!(matches!(outcome, Err(Error::Store { .. }) | Ok(())));
     Ok(())
 }
+
+#[test]
+fn concurrent_writers_do_not_lose_each_others_records() -> Result<()> {
+    use std::thread;
+
+    let (store, _dir) = store()?;
+    let path = store.path().to_path_buf();
+
+    // The bug this fixes: without a lock covering the read and the write, each
+    // writer reads the same document, adds its own box, and the last rename
+    // discards everyone else's. Twenty writers make that near-certain.
+    let writers = (0..20)
+        .map(|index| {
+            let path = path.clone();
+            thread::spawn(move || -> Result<()> {
+                let store = FileStore::new(path);
+                store.insert(&info(&format!("box-{index}"))?)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for writer in writers {
+        writer.join().map_err(|_| Error::Store {
+            operation: "join",
+            message: "a writer panicked".to_owned(),
+        })??;
+    }
+
+    assert_eq!(store.list()?.len(), 20);
+    Ok(())
+}
+
+#[test]
+fn concurrent_allocation_gives_every_box_its_own_identifier() -> Result<()> {
+    use std::thread;
+    use tinybox_core::{BoxState, insert_new};
+
+    let (store, _dir) = store()?;
+    let path = store.path().to_path_buf();
+    let spec = info("box-0")?.spec;
+
+    // Allocating and inserting are two operations, so two processes can pick
+    // the same name; `insert_new` retries rather than failing the create.
+    let creators = (0..12)
+        .map(|_| {
+            let path = path.clone();
+            let spec = spec.clone();
+            thread::spawn(move || -> Result<String> {
+                let store = FileStore::new(path);
+                Ok(insert_new(
+                    &store,
+                    BoxState::Ready,
+                    &spec,
+                    std::time::SystemTime::UNIX_EPOCH,
+                )?
+                .id
+                .into_string())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut ids = Vec::new();
+    for creator in creators {
+        ids.push(creator.join().map_err(|_| Error::Store {
+            operation: "join",
+            message: "a creator panicked".to_owned(),
+        })??);
+    }
+    ids.sort();
+    ids.dedup();
+
+    assert_eq!(ids.len(), 12, "identifiers collided: {ids:?}");
+    assert_eq!(store.list()?.len(), 12);
+    Ok(())
+}
+
+#[test]
+fn the_lock_lives_beside_the_store_and_not_inside_it() -> Result<()> {
+    let (store, _dir) = store()?;
+
+    store.insert(&info("box-0")?)?;
+
+    // Locking the store file itself would mean opening it for write before
+    // knowing there is anything to write, and the lock has to outlive the
+    // rename that replaces it.
+    let lock = store.path().with_extension("lock");
+    assert!(lock.exists());
+    assert_ne!(lock, store.path());
+    // The lock is not mistaken for a record.
+    assert_eq!(store.list()?.len(), 1);
+    Ok(())
+}

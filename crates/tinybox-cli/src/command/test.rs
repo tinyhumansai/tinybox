@@ -1027,14 +1027,46 @@ async fn syncing_reports_what_it_did_and_skips_an_unchanged_tree() -> Result<()>
 }
 
 #[tokio::test]
-async fn syncing_can_leave_directories_behind() -> Result<()> {
+async fn syncing_honours_the_workspaces_own_ignore_rules() -> Result<()> {
     let state = temp_dir()?;
     let source = temp_dir()?;
     let destination = temp_dir()?;
     std::fs::write(source.path().join("a.txt"), "alpha")
         .map_err(|error| Error::io("write", &error))?;
-    std::fs::create_dir(source.path().join(".git")).map_err(|error| Error::io("mkdir", &error))?;
-    std::fs::write(source.path().join(".git/HEAD"), "ref")
+    // Nobody names these on the command line: the project already said so.
+    std::fs::write(source.path().join(".gitignore"), "target/\n")
+        .map_err(|error| Error::io("write", &error))?;
+    std::fs::create_dir(source.path().join("target"))
+        .map_err(|error| Error::io("mkdir", &error))?;
+    std::fs::write(source.path().join("target/huge"), "artifact")
+        .map_err(|error| Error::io("write", &error))?;
+
+    let target = destination.path().join("work").display().to_string();
+    let args = [
+        "sync",
+        "--dir",
+        &source.path().display().to_string(),
+        "--to",
+        &target,
+    ];
+    let outcome = invoke(state.path(), &args).await;
+
+    assert_eq!(outcome.code, 0, "{}", outcome.err);
+    assert!(Path::new(&target).join("a.txt").exists());
+    assert!(!Path::new(&target).join("target").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn syncing_can_be_told_to_send_everything() -> Result<()> {
+    let state = temp_dir()?;
+    let source = temp_dir()?;
+    let destination = temp_dir()?;
+    std::fs::write(source.path().join(".gitignore"), "keep-out/\n")
+        .map_err(|error| Error::io("write", &error))?;
+    std::fs::create_dir(source.path().join("keep-out"))
+        .map_err(|error| Error::io("mkdir", &error))?;
+    std::fs::write(source.path().join("keep-out/file"), "data")
         .map_err(|error| Error::io("write", &error))?;
 
     let target = destination.path().join("work").display().to_string();
@@ -1046,13 +1078,223 @@ async fn syncing_can_leave_directories_behind() -> Result<()> {
             &source.path().display().to_string(),
             "--to",
             &target,
-            "--exclude",
-            ".git",
+            "--no-ignore",
         ],
     )
     .await;
 
-    assert!(Path::new(&target).join("a.txt").exists());
-    assert!(!Path::new(&target).join(".git").exists());
+    // Overriding the project's own rules has to be explicit, and it has to work.
+    assert!(Path::new(&target).join("keep-out/file").exists());
     Ok(())
+}
+
+#[tokio::test]
+async fn a_box_can_be_saved_as_a_template_and_started_from() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["create", "--sandbox", "docker", "--image", "alpine:3"],
+    )
+    .await;
+
+    host.push_ok("sha256:9f2c0e1b7a4d5e6f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f");
+    let saved = invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["template", "save", "rust-ci", "--from", "box-0"],
+    )
+    .await;
+    assert_eq!(saved.code, 0, "{}", saved.err);
+    assert!(saved.out.contains("rust-ci"));
+    assert!(saved.out.contains("sha-9f2c0e1b7a4d"));
+
+    // Starting from the name rather than the digest is the whole point: the
+    // digest is not something anyone should have to keep track of.
+    let created = invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["create", "--sandbox", "docker", "--template", "rust-ci"],
+    )
+    .await;
+    assert_eq!(created.code, 0, "{}", created.err);
+
+    let argv = host.commands().last().cloned().unwrap_or_default();
+    assert!(argv.contains(&"9f2c0e1b7a4d".to_owned()), "{argv:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn templates_can_be_listed_and_forgotten() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["create", "--sandbox", "docker", "--image", "alpine:3"],
+    )
+    .await;
+    host.push_ok("sha256:9f2c0e1b7a4d5e6f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f");
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["template", "save", "ci", "--from", "box-0"],
+    )
+    .await;
+
+    let listed = invoke(dir.path(), &["template", "ls"]).await;
+    assert!(listed.out.contains("ci"));
+    assert!(listed.out.contains("sha-9f2c0e1b7a4d"));
+
+    assert_eq!(invoke(dir.path(), &["template", "rm", "ci"]).await.code, 0);
+    assert!(invoke(dir.path(), &["template", "ls"]).await.out.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn starting_from_an_unsaved_template_is_refused() -> Result<()> {
+    let dir = temp_dir()?;
+
+    let outcome = invoke(
+        dir.path(),
+        &["create", "--sandbox", "docker", "--template", "never-saved"],
+    )
+    .await;
+
+    assert_eq!(outcome.code, EXIT_TINYBOX_ERROR);
+    assert!(outcome.err.contains("no template named never-saved"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_template_lives_beside_the_boxes_it_came_from() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["create", "--sandbox", "docker", "--image", "alpine:3"],
+    )
+    .await;
+    host.push_ok("sha256:9f2c0e1b7a4d5e6f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f");
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["template", "save", "ci", "--from", "box-0"],
+    )
+    .await;
+
+    // A separate file, so adding templates could not break a store written
+    // before they existed.
+    assert!(dir.path().join("templates.json").exists());
+    assert!(dir.path().join("boxes.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_template_and_an_image_are_alternatives() -> Result<()> {
+    let dir = temp_dir()?;
+
+    let outcome = invoke(
+        dir.path(),
+        &[
+            "create",
+            "--sandbox",
+            "docker",
+            "--template",
+            "ci",
+            "--image",
+            "alpine:3",
+        ],
+    )
+    .await;
+
+    // Three answers to the same question; accepting two would leave it
+    // ambiguous which won.
+    assert_eq!(outcome.code, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reaping_destroys_only_what_has_expired() -> Result<()> {
+    let dir = temp_dir()?;
+    // A box created long ago with the default one-hour ttl, and one created now.
+    let old = std::time::SystemTime::UNIX_EPOCH;
+    let recent = std::time::SystemTime::now();
+    write_boxes(dir.path(), &[("box-0", Some(old)), ("box-1", Some(recent))])?;
+
+    let reaped = invoke(dir.path(), &["reap"]).await;
+
+    assert_eq!(reaped.code, 0, "{}", reaped.err);
+    assert!(reaped.out.contains("reaped\tbox-0"), "{}", reaped.out);
+    assert!(!reaped.out.contains("box-1"), "{}", reaped.out);
+
+    let listed = invoke(dir.path(), &["ls"]).await;
+    assert!(!listed.out.contains("box-0"));
+    assert!(listed.out.contains("box-1"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dry_run_reaps_nothing() -> Result<()> {
+    let dir = temp_dir()?;
+    write_boxes(
+        dir.path(),
+        &[("box-0", Some(std::time::SystemTime::UNIX_EPOCH))],
+    )?;
+
+    let reaped = invoke(dir.path(), &["reap", "--dry-run"]).await;
+
+    assert!(reaped.out.contains("would reap\tbox-0"), "{}", reaped.out);
+    // Still there.
+    assert!(invoke(dir.path(), &["ls"]).await.out.contains("box-0"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_box_with_no_recorded_creation_time_is_never_reaped() -> Result<()> {
+    let dir = temp_dir()?;
+    // What a store written before tinybox tracked time contains.
+    write_boxes(dir.path(), &[("box-0", None)])?;
+
+    let reaped = invoke(dir.path(), &["reap"]).await;
+
+    assert!(reaped.out.is_empty(), "{}", reaped.out);
+    assert!(invoke(dir.path(), &["ls"]).await.out.contains("box-0"));
+    Ok(())
+}
+
+/// Write a box store containing the given boxes and creation times.
+///
+/// Written as JSON rather than created through the CLI, because the point is to
+/// control the timestamps exactly — including the case where there is none.
+fn write_boxes(dir: &Path, boxes: &[(&str, Option<std::time::SystemTime>)]) -> Result<()> {
+    let mut records = Vec::new();
+    for (id, created) in boxes {
+        let created = match created {
+            Some(at) => {
+                let since = at
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default();
+                format!(
+                    r#","created_at":{{"secs_since_epoch":{},"nanos_since_epoch":{}}}"#,
+                    since.as_secs(),
+                    since.subsec_nanos()
+                )
+            }
+            None => String::new(),
+        };
+        records.push(format!(
+            r#""{id}":{{"id":"{id}","state":"Ready","spec":{{
+                "runner":{{"host":"local","sandbox":"passthrough"}},
+                "workspace":{{"host":"local","sandbox":"passthrough"}},
+                "source":{{"LocalDir":"/tmp"}},
+                "resources":{{"cpu_millis":2000,"memory_bytes":2147483648,"pids_max":512,"disk_bytes":8589934592}},
+                "lifecycle":{{"Ephemeral":{{"ttl":{{"secs":3600,"nanos":0}}}}}},
+                "network":"Denied","ports":[],"env":{{}}}}{created}}}"#
+        ));
+    }
+    std::fs::write(dir.join("boxes.json"), format!("{{{}}}", records.join(",")))
+        .map_err(|error| Error::io("write", &error))
 }

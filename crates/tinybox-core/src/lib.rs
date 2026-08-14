@@ -62,19 +62,23 @@
 //! trusted local work and unsuitable for anything else — and it says so.
 
 pub mod capability;
+pub mod clock;
 pub mod error;
 pub mod identity;
 pub mod passthrough;
 pub mod runtime;
 pub mod spec;
 pub mod store;
+pub mod template;
 
 pub use capability::{Capability, IsolationLevel, SandboxCapabilities, SnapshotSupport};
+pub use clock::{Clock, SystemClock};
 pub use error::{Error, Result};
-pub use identity::{BoxId, HostRef, SandboxRef, SnapshotId};
+pub use identity::{BoxId, HostRef, SandboxRef, SnapshotId, TemplateName};
 pub use passthrough::PassthroughSandbox;
 pub use runtime::{BoxInfo, BoxState, ExecOutput, ExecRequest, Host, Sandbox};
 pub use spec::{
     BoxSpec, Lifecycle, NetworkPolicy, Placement, PortMapping, Resources, WorkspaceSource,
 };
-pub use store::{MemoryStore, Store};
+pub use store::{MemoryStore, Store, insert_new};
+pub use template::{MemoryTemplates, Templates};

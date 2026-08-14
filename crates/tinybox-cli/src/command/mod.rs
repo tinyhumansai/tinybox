@@ -7,15 +7,17 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tinybox_core::{
-    BoxId, BoxInfo, BoxSpec, Error, ExecRequest, Host, HostRef, NetworkPolicy, PassthroughSandbox,
-    Placement, PortMapping, Sandbox, SandboxRef, SnapshotId, Store, WorkspaceSource, passthrough,
+    BoxId, BoxInfo, BoxSpec, Clock, Error, ExecRequest, Host, HostRef, NetworkPolicy,
+    PassthroughSandbox, Placement, PortMapping, Sandbox, SandboxRef, SnapshotId, Store,
+    SystemClock, TemplateName, Templates, WorkspaceSource, passthrough,
 };
 use tinybox_docker::DockerSandbox;
 use tinybox_host::LocalHost;
 use tinybox_ssh::{SshHost, SshTarget};
-use tinybox_sync::Syncer;
+use tinybox_sync::{Exclusions, Syncer};
 
 use crate::store::FileStore;
+use crate::templates::FileTemplates;
 
 /// Encapsulate a box and run code in it.
 #[derive(Debug, Parser)]
@@ -91,6 +93,10 @@ enum Command {
         /// Start from an OCI image instead of a directory. Docker only.
         #[arg(long, value_name = "REF", conflicts_with = "dir")]
         image: Option<String>,
+        /// Start from a saved template, skipping whatever provisioning went
+        /// into it.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["dir", "image"])]
+        template: Option<String>,
         /// The directory the box's commands run in. Defaults to the working
         /// directory.
         #[arg(long, value_name = "PATH")]
@@ -105,7 +111,9 @@ enum Command {
     },
     /// Send a local directory to the machine a box will run on.
     ///
-    /// Sends nothing when the far side already has this exact tree.
+    /// Reads the workspace's own `.gitignore` and `.boxignore`, so build output
+    /// stays behind without anyone listing it. Sends nothing when the far side
+    /// already has this exact tree.
     Sync {
         /// The directory to send. Defaults to the working directory.
         #[arg(long, value_name = "PATH")]
@@ -113,9 +121,24 @@ enum Command {
         /// Where it lands on the far side.
         #[arg(long, value_name = "PATH")]
         to: String,
-        /// Leave a directory behind, by name, anywhere in the tree. Repeatable.
-        #[arg(long = "exclude", value_name = "NAME")]
-        exclude: Vec<String>,
+        /// Send everything, ignoring `.gitignore` and `.boxignore`.
+        #[arg(long)]
+        no_ignore: bool,
+    },
+    /// Save, list, and forget templates.
+    ///
+    /// A template is a named snapshot, so starting from one skips whatever
+    /// provisioning went into it.
+    #[command(subcommand)]
+    Template(TemplateCommand),
+    /// Destroy every box whose lifetime has run out.
+    ///
+    /// An explicit command rather than a background timer, because tinybox has
+    /// no long-running process to hold one. Run it from cron or by hand.
+    Reap {
+        /// Report what would be destroyed without destroying it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Capture a box's filesystem.
     Snapshot {
@@ -163,6 +186,10 @@ enum Command {
         /// Start from an OCI image instead of a directory. Docker only.
         #[arg(long, value_name = "REF", conflicts_with = "dir")]
         image: Option<String>,
+        /// Start from a saved template, skipping whatever provisioning went
+        /// into it.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["dir", "image"])]
+        template: Option<String>,
         /// The directory the command runs in. Defaults to the working
         /// directory.
         #[arg(long, value_name = "PATH")]
@@ -176,6 +203,30 @@ enum Command {
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
         argv: Vec<String>,
+    },
+}
+
+/// What to do with templates.
+#[derive(Debug, Subcommand)]
+enum TemplateCommand {
+    /// Capture a box and remember the snapshot under a name.
+    Save {
+        /// The name to remember it as.
+        name: String,
+        /// The box to capture.
+        #[arg(long, value_name = "ID")]
+        from: String,
+    },
+    /// List every saved template.
+    #[command(alias = "list")]
+    Ls,
+    /// Forget a template.
+    ///
+    /// The snapshot it pointed at is left alone; this retires a name.
+    #[command(alias = "remove")]
+    Rm {
+        /// The name to forget.
+        name: String,
     },
 }
 
@@ -207,14 +258,15 @@ impl Cli {
     ///
     /// Returns [`Error::Store`] when no store location can be determined, and
     /// [`Error::InvalidIdentifier`] when the SSH destination is unusable.
-    fn resolve(
-        &self,
-        local: Arc<dyn Host>,
-    ) -> tinybox_core::Result<(Arc<dyn Store>, Arc<dyn Host>)> {
+    fn resolve(&self, local: Arc<dyn Host>) -> tinybox_core::Result<Context> {
         let path = match &self.store {
             Some(path) => path.clone(),
             None => FileStore::default_path()?,
         };
+        // Templates live beside the boxes they were made from, so pointing
+        // `--store` elsewhere moves both rather than mixing one directory's
+        // boxes with another's names.
+        let templates: Arc<dyn Templates> = Arc::new(FileTemplates::beside(&path));
         let store: Arc<dyn Store> = Arc::new(FileStore::new(path));
 
         // `--host` chooses reach; the sandbox chooses confinement. They are
@@ -229,7 +281,11 @@ impl Cli {
                 accept_new_host_key: self.accept_new_host_key,
             },
         )?;
-        Ok((store, reach))
+        Ok(Context {
+            store,
+            templates,
+            reach,
+        })
     }
 
     /// Run the parsed command, writing output to `out` and errors to `err`.
@@ -250,7 +306,11 @@ impl Cli {
         out: &mut dyn Write,
         err: &mut dyn Write,
     ) -> tinybox_core::Result<u8> {
-        let (store, reach) = self.resolve(host)?;
+        let Context {
+            store,
+            templates,
+            reach,
+        } = self.resolve(host)?;
         let namespace = self.namespace;
         let build =
             |kind: SandboxKind| build_sandbox(kind, reach.clone(), &store, namespace.as_deref());
@@ -259,54 +319,59 @@ impl Cli {
             Command::Create {
                 sandbox: kind,
                 image,
+                template,
                 dir,
                 env,
                 publish,
             } => {
                 let sandbox = build(kind)?;
-                let info = sandbox
-                    .create(&spec(kind, reach.name(), image, dir, &env, &publish)?)
-                    .await?;
-                write(out, format!("{}\n", info.id).as_bytes())?;
-                warn_if_unconfined(err, sandbox.as_ref())?;
-                Ok(0)
+                let spec = new_spec(
+                    kind, &reach, &templates, template, image, dir, &env, &publish,
+                )?;
+                announce(&sandbox.create(&spec).await?, sandbox.as_ref(), out, err)
             }
             Command::Exec { id, argv } => {
                 let id = BoxId::new(id)?;
                 let sandbox = build(sandbox_of(&store, &id)?)?;
                 let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
-                write(out, &output.stdout)?;
-                write(err, &output.stderr)?;
-                Ok(exit_code(output.exit_code))
+                report(&output, out, err)
             }
-            Command::Ls => {
-                // Listing is the store's business, not the sandbox's: the
-                // store is what owns the set of records.
-                write(out, render_listing(&store.list()?).as_bytes())?;
-                Ok(0)
-            }
+            // Listing is the store's business, not the sandbox's: the store is
+            // what owns the set of records.
+            Command::Ls => text(out, &render_listing(&store.list()?)),
             Command::Inspect { id } => {
                 let id = BoxId::new(id)?;
                 let sandbox = build(sandbox_of(&store, &id)?)?;
                 let info = sandbox.inspect(&id).await?;
-                write(out, render_inspect(&info, sandbox.as_ref()).as_bytes())?;
-                Ok(0)
+                text(out, &render_inspect(&info, sandbox.as_ref()))
             }
+
             Command::Rm { id } => {
                 let id = BoxId::new(id)?;
                 build(sandbox_of(&store, &id)?)?.destroy(&id).await?;
-                write(out, format!("{id}\n").as_bytes())?;
+                line(out, id.as_ref())
+            }
+            Command::Sync { dir, to, no_ignore } => {
+                write(out, sync(reach, dir, &to, no_ignore).await?.as_bytes())?;
                 Ok(0)
             }
-            Command::Sync { dir, to, exclude } => {
-                write(out, sync(reach, dir, &to, exclude).await?.as_bytes())?;
+            Command::Template(command) => {
+                write(
+                    out,
+                    template(&templates, &store, &build, command)
+                        .await?
+                        .as_bytes(),
+                )?;
                 Ok(0)
+            }
+            Command::Reap { dry_run } => {
+                let now = SystemClock::new().now();
+                text(out, &reap(&store, &build, now, dry_run).await?)
             }
             Command::Snapshot { id } => {
                 let id = BoxId::new(id)?;
                 let snapshot = build(sandbox_of(&store, &id)?)?.snapshot(&id).await?;
-                write(out, format!("{snapshot}\n").as_bytes())?;
-                Ok(0)
+                line(out, snapshot.as_ref())
             }
             Command::Fork {
                 snapshot,
@@ -316,35 +381,30 @@ impl Cli {
                 let snapshot = SnapshotId::new(snapshot)?;
                 // The snapshot supplies the filesystem, so the spec only has to
                 // name where the fork runs.
-                let spec = spec(kind, reach.name(), None, Some(PathBuf::from(".")), &[], &[])?
-                    .with_source(WorkspaceSource::Snapshot(snapshot.clone()));
-                let info = sandbox.fork(&snapshot, &spec).await?;
-                write(out, format!("{}\n", info.id).as_bytes())?;
-                warn_if_unconfined(err, sandbox.as_ref())?;
-                Ok(0)
+                let source = WorkspaceSource::Snapshot(snapshot.clone());
+                let spec = spec(kind, reach.name(), source, &[], &[])?;
+                announce(
+                    &sandbox.fork(&snapshot, &spec).await?,
+                    sandbox.as_ref(),
+                    out,
+                    err,
+                )
             }
             Command::Run {
                 sandbox: kind,
                 image,
+                template,
                 dir,
                 env,
                 publish,
                 argv,
             } => {
                 let sandbox = build(kind)?;
-                let info = sandbox
-                    .create(&spec(kind, reach.name(), image, dir, &env, &publish)?)
-                    .await?;
-                let outcome = sandbox.exec(&info.id, &ExecRequest::new(argv)).await;
-                // Destroy the box whether or not the command succeeded, so a
-                // failing run leaves no record behind.
-                let destroyed = sandbox.destroy(&info.id).await;
-
-                let output = outcome?;
-                destroyed?;
-                write(out, &output.stdout)?;
-                write(err, &output.stderr)?;
-                Ok(exit_code(output.exit_code))
+                let spec = new_spec(
+                    kind, &reach, &templates, template, image, dir, &env, &publish,
+                )?;
+                let output = run_once(sandbox.as_ref(), &spec, argv).await?;
+                report(&output, out, err)
             }
         }
     }
@@ -392,6 +452,18 @@ fn reach(
     Ok(Arc::new(SshHost::new(local, target)))
 }
 
+/// What every command needs before it can do anything.
+///
+/// The three are resolved together because they are decided together: the store
+/// location determines where templates live, and `--host` decides reach for all
+/// of them.
+#[derive(Debug)]
+struct Context {
+    store: Arc<dyn Store>,
+    templates: Arc<dyn Templates>,
+    reach: Arc<dyn Host>,
+}
+
 /// The SSH settings a caller can override from the command line.
 #[derive(Debug, Default)]
 struct SshOptions {
@@ -430,6 +502,223 @@ fn working_directory() -> tinybox_core::Result<PathBuf> {
     })
 }
 
+/// Build the spec for a box named on the command line.
+///
+/// Shared by `create` and `run`, which differ only in what happens to the box
+/// afterwards.
+///
+/// # Errors
+///
+/// Returns whatever resolving the source, the placement, or the ports failed
+/// with.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one distinct command-line option, and grouping \
+              them into a struct would only move the same list somewhere else"
+)]
+fn new_spec(
+    kind: SandboxKind,
+    reach: &Arc<dyn Host>,
+    templates: &Arc<dyn Templates>,
+    template: Option<String>,
+    image: Option<String>,
+    dir: Option<PathBuf>,
+    env: &[String],
+    publish: &[String],
+) -> tinybox_core::Result<BoxSpec> {
+    spec(
+        kind,
+        reach.name(),
+        source(templates, template, image, dir)?,
+        env,
+        publish,
+    )
+}
+
+/// Write an already-rendered block and succeed.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when the stream cannot be written to.
+fn text(out: &mut dyn Write, rendered: &str) -> tinybox_core::Result<u8> {
+    write(out, rendered.as_bytes())?;
+    Ok(0)
+}
+
+/// Write one line and succeed.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when the stream cannot be written to.
+fn line(out: &mut dyn Write, value: &str) -> tinybox_core::Result<u8> {
+    text(out, &format!("{value}\n"))
+}
+
+/// Forward a finished command's output and status to the caller.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when either stream cannot be written to.
+fn report(
+    output: &tinybox_core::ExecOutput,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    write(out, &output.stdout)?;
+    write(err, &output.stderr)?;
+    Ok(exit_code(output.exit_code))
+}
+
+/// Report a newly created box, warning if its sandbox confines nothing.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when either stream cannot be written to.
+fn announce(
+    info: &BoxInfo,
+    sandbox: &dyn Sandbox,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    write(out, format!("{}\n", info.id).as_bytes())?;
+    warn_if_unconfined(err, sandbox)?;
+    Ok(0)
+}
+
+/// Create a box, run one command in it, and destroy it.
+///
+/// # Errors
+///
+/// Returns whatever creating, running, or destroying failed with. The box is
+/// destroyed whether or not the command succeeded, so a failing run leaves no
+/// record behind.
+async fn run_once(
+    sandbox: &dyn Sandbox,
+    spec: &BoxSpec,
+    argv: Vec<String>,
+) -> tinybox_core::Result<tinybox_core::ExecOutput> {
+    let info = sandbox.create(spec).await?;
+    let outcome = sandbox.exec(&info.id, &ExecRequest::new(argv)).await;
+    // Unconditional: a command that failed must not leak the box it ran in.
+    let destroyed = sandbox.destroy(&info.id).await;
+
+    let output = outcome?;
+    destroyed?;
+    Ok(output)
+}
+
+/// Resolve where a new box's filesystem comes from.
+///
+/// A template, an image, or a directory — never more than one, which clap
+/// already enforces, because they are three answers to the same question.
+///
+/// # Errors
+///
+/// Returns [`Error::UnknownTemplate`] when the named template has never been
+/// saved, and [`Error::Store`] when the working directory is needed but
+/// unreadable.
+fn source(
+    templates: &Arc<dyn Templates>,
+    template: Option<String>,
+    image: Option<String>,
+    dir: Option<PathBuf>,
+) -> tinybox_core::Result<WorkspaceSource> {
+    if let Some(name) = template {
+        return Ok(WorkspaceSource::Snapshot(
+            templates.get(&TemplateName::new(name)?)?,
+        ));
+    }
+    if let Some(image) = image {
+        return Ok(WorkspaceSource::OciImage(image));
+    }
+    Ok(WorkspaceSource::LocalDir(match dir {
+        Some(dir) => dir,
+        None => working_directory()?,
+    }))
+}
+
+/// Save, list, or forget a template.
+///
+/// # Errors
+///
+/// Returns whatever the snapshot or the template index failed with.
+async fn template<F>(
+    templates: &Arc<dyn Templates>,
+    store: &Arc<dyn Store>,
+    build: &F,
+    command: TemplateCommand,
+) -> tinybox_core::Result<String>
+where
+    F: Fn(SandboxKind) -> tinybox_core::Result<Arc<dyn Sandbox>>,
+{
+    match command {
+        TemplateCommand::Save { name, from } => {
+            let name = TemplateName::new(name)?;
+            let id = BoxId::new(from)?;
+            // Capturing and naming in one step: a snapshot nobody named is a
+            // digest somebody has to keep track of by hand.
+            let snapshot = build(sandbox_of(store, &id)?)?.snapshot(&id).await?;
+            templates.save(&name, &snapshot)?;
+            Ok(format!("{name}\t{snapshot}\n"))
+        }
+        TemplateCommand::Ls => {
+            let mut rendered = String::new();
+            for (name, snapshot) in templates.list()? {
+                let _ = writeln!(rendered, "{name}\t{snapshot}");
+            }
+            Ok(rendered)
+        }
+        TemplateCommand::Rm { name } => {
+            let name = TemplateName::new(name)?;
+            templates.remove(&name)?;
+            Ok(format!("{name}\n"))
+        }
+    }
+}
+
+/// Destroy every box whose lifetime has run out.
+///
+/// Reports what it did rather than staying silent, because a command that
+/// deletes things should say which ones.
+///
+/// # Errors
+///
+/// Returns whatever the store or a sandbox failed with. One box failing to
+/// destroy does not stop the rest: a container someone removed by hand should
+/// not block reaping everything else.
+async fn reap<F>(
+    store: &Arc<dyn Store>,
+    build: &F,
+    now: std::time::SystemTime,
+    dry_run: bool,
+) -> tinybox_core::Result<String>
+where
+    F: Fn(SandboxKind) -> tinybox_core::Result<Arc<dyn Sandbox>>,
+{
+    let mut rendered = String::new();
+    for info in store.list()? {
+        if !info.is_expired(now) {
+            continue;
+        }
+        if dry_run {
+            let _ = writeln!(rendered, "would reap\t{}", info.id);
+            continue;
+        }
+
+        match build(sandbox_of(store, &info.id)?)?.destroy(&info.id).await {
+            Ok(()) => {
+                let _ = writeln!(rendered, "reaped\t{}", info.id);
+            }
+            // Keep going: one unreachable box must not strand every other
+            // expired one.
+            Err(error) => {
+                let _ = writeln!(rendered, "failed\t{}\t{error}", info.id);
+            }
+        }
+    }
+    Ok(rendered)
+}
+
 /// Send a workspace and report what happened.
 ///
 /// # Errors
@@ -440,11 +729,17 @@ async fn sync(
     reach: Arc<dyn Host>,
     dir: Option<PathBuf>,
     to: &str,
-    exclude: Vec<String>,
+    no_ignore: bool,
 ) -> tinybox_core::Result<String> {
     let source = match dir {
         Some(dir) => dir,
         None => working_directory()?,
+    };
+    // The workspace's own rules, unless the caller explicitly wants everything.
+    let exclude = if no_ignore {
+        Exclusions::none()
+    } else {
+        Exclusions::read(&source)?
     };
     let outcome = Syncer::new(reach)
         .excluding(exclude)
@@ -540,19 +835,10 @@ fn warn_if_unconfined(err: &mut dyn Write, sandbox: &dyn Sandbox) -> tinybox_cor
 fn spec(
     kind: SandboxKind,
     reach: &str,
-    image: Option<String>,
-    dir: Option<PathBuf>,
+    source: WorkspaceSource,
     env: &[String],
     publish: &[String],
 ) -> tinybox_core::Result<BoxSpec> {
-    let source = match image {
-        Some(image) => WorkspaceSource::OciImage(image),
-        None => WorkspaceSource::LocalDir(match dir {
-            Some(dir) => dir,
-            None => working_directory()?,
-        }),
-    };
-
     // The recorded host is where the box actually runs, so `ls` and `inspect`
     // report the truth rather than always claiming the local machine.
     let placement = Placement::new(HostRef::new(reach)?, SandboxRef::new(kind.name())?);

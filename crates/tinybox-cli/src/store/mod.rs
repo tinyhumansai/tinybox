@@ -13,16 +13,26 @@
 //!
 //! # Concurrency
 //!
-//! Writes are atomic: the document is written to a temporary file in the same
-//! directory and renamed over the target, so a reader sees either the old file
-//! or the new one and never a half-written document. Two processes writing at
-//! the same moment can still lose one update — last writer wins. Locking is
-//! deferred until there is a reason to believe concurrent CLI invocations
-//! matter; the failure is a lost record, not a corrupt file.
+//! Two things protect the file, and they solve different problems.
+//!
+//! Writes are **atomic**: the document goes to a temporary file in the same
+//! directory and is renamed over the target, so a reader sees either the old
+//! file or the new one and never a half-written document.
+//!
+//! Read-modify-write sequences are **locked**: every mutation takes an
+//! exclusive advisory lock on a sibling lockfile for its whole duration. Atomic
+//! writes alone do not prevent two processes from both reading the same
+//! document, each adding a different box, and the second rename discarding the
+//! first — a lost record rather than a corrupt file, but lost all the same, and
+//! `tinybox create` running in two terminals is not an unusual thing to do.
+//!
+//! The lock is advisory and held by the kernel, so a process that crashes
+//! releases it. A hand-rolled lockfile would strand one behind a crash and need
+//! stale-lock detection that is itself a source of bugs.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use tinybox_core::{BoxId, BoxInfo, BoxState, Error, Result, Store};
@@ -102,63 +112,68 @@ impl FileStore {
         &self.path
     }
 
-    /// Read the whole document.
+    /// Where the lock guarding this store lives.
     ///
-    /// A missing file is an empty store, not an error: that is what makes the
-    /// first run work without a setup step.
-    fn read(&self) -> Result<Records> {
-        let text = match fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Records::new()),
-            Err(error) => {
-                return Err(Error::Store {
-                    operation: "read",
-                    message: error.to_string(),
-                });
-            }
-        };
+    /// A sibling file rather than the store itself: locking the store would
+    /// mean opening it for write before knowing whether there is anything to
+    /// write, and the lock has to outlive the rename that replaces it.
+    fn lock_path(&self) -> PathBuf {
+        self.path.with_extension("lock")
+    }
 
-        serde_json::from_str(&text).map_err(|error| Error::Store {
-            operation: "parse",
-            message: format!("{} is not a valid box store: {error}", self.path.display()),
-        })
+    /// Take the exclusive lock for a read-modify-write sequence.
+    ///
+    /// Blocks until it is available. The alternative — failing immediately —
+    /// would turn two people running `tinybox create` at once into an error
+    /// rather than a short wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Store`] when the lockfile cannot be created or locked.
+    fn lock(&self) -> Result<Lock> {
+        let path = self.lock_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| Error::Store {
+                operation: "create",
+                message: error.to_string(),
+            })?;
+        }
+
+        let file = File::options()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| Error::Store {
+                operation: "open the lock",
+                message: error.to_string(),
+            })?;
+
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).map_err(|error| {
+            Error::Store {
+                operation: "lock",
+                message: error.to_string(),
+            }
+        })?;
+        Ok(Lock { _file: file })
+    }
+
+    /// Read the whole document.
+    fn read(&self) -> Result<Records> {
+        crate::document::read(&self.path, "box store")
     }
 
     /// Replace the whole document atomically.
-    ///
-    /// Writes a sibling temporary file and renames it over the target, so a
-    /// concurrent reader never observes a partial document. The temporary file
-    /// must share a directory with the target for the rename to stay within one
-    /// filesystem.
     fn write(&self, records: &Records) -> Result<()> {
-        let parent = self.path.parent().ok_or_else(|| Error::Store {
-            operation: "write",
-            message: format!("{} has no parent directory", self.path.display()),
-        })?;
-        fs::create_dir_all(parent).map_err(|error| Error::Store {
-            operation: "create",
-            message: error.to_string(),
-        })?;
-
-        let text = serde_json::to_string_pretty(records).map_err(|error| Error::Store {
-            operation: "encode",
-            message: error.to_string(),
-        })?;
-
-        let temporary = self.path.with_extension("json.tmp");
-        fs::write(&temporary, text).map_err(|error| Error::Store {
-            operation: "write",
-            message: error.to_string(),
-        })?;
-        fs::rename(&temporary, &self.path).map_err(|error| Error::Store {
-            operation: "rename",
-            message: error.to_string(),
-        })
+        crate::document::write(&self.path, records)
     }
 }
 
 impl Store for FileStore {
     fn insert(&self, info: &BoxInfo) -> Result<()> {
+        // Held until this method returns, covering the read and the write: two
+        // processes that both read first would otherwise each write a document
+        // missing the other's box.
+        let _lock = self.lock()?;
         let mut records = self.read()?;
         if records.contains_key(info.id.as_str()) {
             return Err(Error::DuplicateBox {
@@ -182,6 +197,7 @@ impl Store for FileStore {
     }
 
     fn set_state(&self, id: &BoxId, state: BoxState) -> Result<()> {
+        let _lock = self.lock()?;
         let mut records = self.read()?;
         let info = records
             .get_mut(id.as_str())
@@ -193,6 +209,7 @@ impl Store for FileStore {
     }
 
     fn remove(&self, id: &BoxId) -> Result<()> {
+        let _lock = self.lock()?;
         let mut records = self.read()?;
         if records.remove(id.as_str()).is_none() {
             return Err(Error::UnknownBox {
@@ -201,6 +218,15 @@ impl Store for FileStore {
         }
         self.write(&records)
     }
+}
+
+/// An exclusive advisory lock, released when this is dropped.
+///
+/// The file handle is the lock: closing it releases, which is also what the
+/// kernel does if the process dies holding it.
+#[derive(Debug)]
+struct Lock {
+    _file: File,
 }
 
 #[cfg(test)]

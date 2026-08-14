@@ -89,9 +89,31 @@ snapshot, fork. Only the reaper and the autosnapshot timer read `Lifecycle`:
 - `Persistent { autosnapshot }` — snapshot on a cadence; stop captures and
   archives; resume forks the newest snapshot.
 
-A **template is a named snapshot**. No separate type or storage path exists,
-which is why `WorkspaceSource::Snapshot` covers both resuming a box and
-starting from a template.
+A **template is a named snapshot**. No separate type exists, which is why
+`WorkspaceSource::Snapshot` covers both resuming a box and starting from a
+template — the whole feature is a name-to-digest index.
+
+Templates live in their own file rather than in the box document. Extending
+that document would change its shape and stop an older store from loading,
+orphaning every box in it; a second file needs no migration and cannot break
+the first.
+
+## Time and expiry
+
+Expiry needs to know when a box was created, so time enters the model through a
+`Clock` trait rather than `SystemTime::now` scattered through the code — a test
+that waits an hour for a box to expire is not a test anyone will run.
+
+`BoxInfo::created_at` is an `Option`. A store written before tinybox tracked
+time has no timestamp, and defaulting to the epoch would make every existing box
+look decades old and be destroyed by the first reap — exactly the failure a
+compatibility default is supposed to prevent. A box whose creation time is
+unknown never expires.
+
+Reaping is an explicit `tinybox reap` rather than a background timer, because
+tinybox has no long-running process to hold one. Claiming otherwise would leave
+boxes alive that the model says are gone. One box failing to destroy does not
+stop the rest.
 
 ## Defaults
 
@@ -261,6 +283,33 @@ side, so the only things that have to exist over there are `tar` and `mkdir` —
 not rsync, and not a tinybox agent. That matters because the far side is
 frequently a container image somebody else built.
 
+### What is left behind
+
+Exclusions come from the workspace's own `.gitignore`, plus a `.boxignore` read
+afterwards so its rules win — including `!` lines that put back something git
+ignores but a running box needs, such as a `.env`.
+
+The list is not invented. A repository already records what it considers
+derived, maintained by people who care about it. A Rust checkout's `target/` or
+a Node one's `node_modules/` is usually most of its bytes and none of its value,
+and every one of those bytes would otherwise cross the network once and be
+hashed on every run after.
+
+Gitignore semantics are more than globs — negation, anchoring, directory-only
+patterns, `**` spanning directories, and precedence between all of it. A subset
+that is *nearly* right silently drops files a caller expected to send, which is
+worse than sending too many, so the `ignore` crate is used rather than a
+hand-rolled matcher.
+
+Only the ignore files at the workspace root are read. Git also honors one in
+every subdirectory; tinybox does not, because the transfer is of one tree to one
+destination and a nested rule set would make the fingerprint depend on files
+that are themselves being filtered.
+
+The exclusions are part of the fingerprint's identity: two runs excluding
+different things describe different trees, and must not be mistaken for the same
+one.
+
 **This is whole-tree transfer with a skip, not a per-file delta.** When a tree
 does change, all of it is sent. A real delta needs rsync's rolling checksum or
 an agent on the far side to negotiate with; the skip is the win that matters for
@@ -307,9 +356,20 @@ Adding a field to a stored type is a compatibility question: `ports` and
 `stdin` are `#[serde(default)]` so a store written by an earlier build still
 loads. Failing to read it would orphan every box a user already had.
 
-Concurrent writers can still lose an update — last writer wins. Locking is
-deferred until there is reason to believe concurrent CLI invocations matter; the
-failure mode is a lost record, not a corrupt file.
+Two things protect the file, and they solve different problems. Writes are
+**atomic** via a temporary file and a rename, so a reader never sees a partial
+document. Read-modify-write sequences are **locked**, because atomicity alone
+does not stop two processes from both reading the same document, each adding a
+box, and the second rename discarding the first.
+
+The lock is advisory and held by the kernel, so a crashed process releases it —
+a hand-rolled lockfile would strand one behind a crash and need stale-lock
+detection that is its own source of bugs.
+
+Allocating an identifier and recording it are still two operations, and the lock
+covers each but not the gap between them. `store::insert_new` catches the
+resulting collision and retries with the next free name, so a race becomes a
+retry rather than a spurious failure to whoever was creating a box.
 
 ## Adopted optimizations
 

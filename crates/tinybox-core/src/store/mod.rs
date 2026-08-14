@@ -110,6 +110,49 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     }
 }
 
+/// How many times to retry when another process takes the identifier first.
+///
+/// A collision means two processes allocated the same name in the window
+/// between choosing it and recording it. Each retry sees the other's box and
+/// picks the next free name, so the loop converges immediately in practice; the
+/// bound exists so a pathological store cannot spin forever.
+const ALLOCATION_ATTEMPTS: usize = 16;
+
+/// Record a new box under a freshly allocated identifier.
+///
+/// [`Store::allocate_id`] and [`Store::insert`] are two operations, and a
+/// second process can take the name in between. A store lock covers each call
+/// but not the gap between them, so the collision is caught here and retried
+/// rather than surfacing as a spurious failure to the person creating a box.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`] when no identifier could be claimed within
+/// a bounded number of tries, and whatever the store returns for a failure
+/// that is not a collision.
+pub fn insert_new(
+    store: &dyn Store,
+    state: BoxState,
+    spec: &crate::spec::BoxSpec,
+    created_at: std::time::SystemTime,
+) -> Result<BoxInfo> {
+    for _ in 0..ALLOCATION_ATTEMPTS {
+        let info = BoxInfo::new(store.allocate_id()?, state, spec.clone()).created_at(created_at);
+        match store.insert(&info) {
+            Ok(()) => return Ok(info),
+            // Someone else took the name; fall through to look again and pick
+            // the next free one.
+            Err(Error::DuplicateBox { .. }) => {}
+            Err(other) => return Err(other),
+        }
+    }
+
+    Err(Error::Store {
+        operation: "allocate",
+        message: format!("no identifier was free after {ALLOCATION_ATTEMPTS} attempts"),
+    })
+}
+
 /// A [`Store`] that keeps records in memory for the life of the process.
 ///
 /// Correct for tests and for a single-process run, and wrong for anything that

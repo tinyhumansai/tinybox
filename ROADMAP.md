@@ -31,18 +31,31 @@ these milestones build out.
 - `tinybox-sync`: blake3 fingerprinting and tar-over-stdin transfer, so a
   repeated sync with no edits sends nothing.
 - Published ports on the spec, and `stdin` on `ExecRequest`.
+- Named templates, so provisioning happens once rather than on every create.
+- Box expiry with `tinybox reap`, and an injectable `Clock` so it is testable.
+- Exclusions read from a workspace's own `.gitignore` and `.boxignore`.
+- A real advisory lock on the box store, closing the lost-record race carried
+  since M2.
 
 ## Next
-- **M5** — content-addressed snapshots, `.boxignore` derived from `.gitignore`,
-  named templates, the TTL reaper, autosnapshot cadence, and a warm pool.
-  Also where three deferred pieces land: locking for the box store (today two
-  concurrent CLI invocations can lose a record), forwarding a remote box's port
-  back to the local machine (needs a lifetime-bearing handle `Host::run` cannot
-  express), and per-file delta sync (needs rsync or a remote agent).
 - **M6** — `NamespaceSandbox`: rootless user namespaces, cgroup v2, overlayfs,
   seccomp, and landlock, confined to `tinybox-linux`.
 
 ## Deferred
+
+- **A warm pool, and an autosnapshot cadence.** Both need a long-running process
+  to keep the pool full and the timer running, and tinybox has none. `reap` is
+  an explicit command for the same reason. The prerequisite is a daemon, which
+  is its own decision rather than a detail of either feature.
+- **Forwarding a remote box's port back to the local machine.** Needs `ssh -L`,
+  a long-running process with a lifetime that `Host::run`'s run-to-completion
+  shape cannot express. Publishing a port at creation, which backends *can*
+  honor, shipped in M4.
+- **Per-file delta sync.** Needs rsync's rolling checksum or an agent on the far
+  side to negotiate with. The skip-when-unchanged win shipped in M4 and is the
+  one that matters for an edit-run loop.
+- **Nested `.gitignore` files.** Only the workspace root is read; see the spec
+  for why a nested rule set and a tree fingerprint interact badly.
 
 - **M7 — `MicroVmSandbox`.** Firecracker, vsock guest agent, and memory
   snapshots. The `Sandbox` trait is shaped to accommodate it; nothing is built.

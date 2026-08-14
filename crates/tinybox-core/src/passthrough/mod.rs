@@ -34,6 +34,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::capability::{Capability, SandboxCapabilities};
+use crate::clock::{Clock, SystemClock};
 use crate::error::{Error, Result};
 use crate::identity::{BoxId, SnapshotId};
 use crate::runtime::{BoxInfo, BoxState, ExecOutput, ExecRequest, Host, Sandbox};
@@ -48,13 +49,23 @@ pub const NAME: &str = "passthrough";
 pub struct PassthroughSandbox {
     host: Arc<dyn Host>,
     store: Arc<dyn Store>,
+    clock: Arc<dyn Clock>,
 }
 
 impl PassthroughSandbox {
     /// Run unconfined commands on `host`, recording boxes in `store`.
+    ///
+    /// Stamps creation times from the real clock; use
+    /// [`PassthroughSandbox::with_clock`] to supply another.
     #[must_use]
     pub fn new(host: Arc<dyn Host>, store: Arc<dyn Store>) -> Self {
-        Self { host, store }
+        Self::with_clock(host, store, Arc::new(SystemClock::new()))
+    }
+
+    /// Run unconfined commands, reading the time from `clock`.
+    #[must_use]
+    pub fn with_clock(host: Arc<dyn Host>, store: Arc<dyn Store>, clock: Arc<dyn Clock>) -> Self {
+        Self { host, store, clock }
     }
 
     /// The directory a box's commands run in.
@@ -123,9 +134,7 @@ impl Sandbox for PassthroughSandbox {
         // behind for a later command to trip over.
         Self::workspace_dir(spec)?;
 
-        let info = BoxInfo::new(self.store.allocate_id()?, BoxState::Ready, spec.clone());
-        self.store.insert(&info)?;
-        Ok(info)
+        crate::store::insert_new(self.store.as_ref(), BoxState::Ready, spec, self.clock.now())
     }
 
     async fn exec(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecOutput> {

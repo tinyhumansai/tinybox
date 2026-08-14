@@ -20,6 +20,10 @@ blake3 = "1"
 # The workspace is packed in-process and piped to the far side, so only `tar`
 # has to exist there — not a tinybox agent.
 tar = "0.4"
+# Real `.gitignore` semantics — negation, anchoring, nesting, directory-only
+# patterns. Hand-rolling a subset silently mismatches git and drops files a
+# caller expected to send; this is the crate that already gets it right.
+ignore = "0.4"
 
 [dev-dependencies]
 tokio.workspace = true
