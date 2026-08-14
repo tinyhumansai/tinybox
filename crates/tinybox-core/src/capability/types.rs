@@ -91,7 +91,7 @@ impl fmt::Display for SnapshotSupport {
 /// verbatim in [`Error::Unsupported`](crate::error::Error::Unsupported) messages.
 ///
 /// [`SandboxCapabilities::require`]: crate::capability::SandboxCapabilities::require
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Capability {
     /// Capturing and restoring the box filesystem.
@@ -104,6 +104,36 @@ pub enum Capability {
     PauseResume,
     /// Publishing a guest port to the host.
     PortForward,
+    /// Applying the limits in [`Resources`](crate::spec::Resources).
+    ResourceLimits,
+}
+
+impl Capability {
+    /// Every capability, in declaration order.
+    ///
+    /// Used to render a declared set; keep it in step with the enum.
+    pub const ALL: [Self; 6] = [
+        Self::FilesystemSnapshot,
+        Self::MemorySnapshot,
+        Self::Fork,
+        Self::PauseResume,
+        Self::PortForward,
+        Self::ResourceLimits,
+    ];
+
+    /// This capability's bit within a [`SandboxCapabilities`] feature set.
+    ///
+    /// [`SandboxCapabilities`]: crate::capability::SandboxCapabilities
+    pub(crate) const fn bit(self) -> u8 {
+        match self {
+            Self::FilesystemSnapshot => 1 << 0,
+            Self::MemorySnapshot => 1 << 1,
+            Self::Fork => 1 << 2,
+            Self::PauseResume => 1 << 3,
+            Self::PortForward => 1 << 4,
+            Self::ResourceLimits => 1 << 5,
+        }
+    }
 }
 
 impl fmt::Display for Capability {
@@ -114,6 +144,7 @@ impl fmt::Display for Capability {
             Self::Fork => "forking",
             Self::PauseResume => "pause and resume",
             Self::PortForward => "port forwarding",
+            Self::ResourceLimits => "resource limits",
         };
         formatter.write_str(text)
     }

@@ -1,0 +1,39 @@
+[package]
+name = "tinybox-cli"
+description = "The tinybox command-line interface."
+documentation = "https://docs.rs/tinybox-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[[bin]]
+name = "tinybox"
+path = "src/main.rs"
+# The module crate's cdylib is also called `tinybox`, and rustdoc would write
+# both to `target/doc/tinybox`. The binary is an entry point with no API worth
+# publishing, so it yields the name; `tinybox-cli`'s library is still documented.
+doc = false
+
+[dependencies]
+tinybox-core.workspace = true
+tinybox-host.workspace = true
+# Argument parsing, help text, and shell-facing errors. The derive API keeps the
+# command surface declared next to the types it produces.
+clap = { version = "4", features = ["derive"] }
+# Boxes outlive the process that created them, so the store is a JSON file.
+serde_json.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+# End-to-end tests drive the real binary against a throwaway state directory.
+tempfile = "3"
+
+[lints]
+workspace = true

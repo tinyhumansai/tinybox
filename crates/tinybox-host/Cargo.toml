@@ -1,0 +1,28 @@
+[package]
+name = "tinybox-host"
+description = "Hosts that give tinybox reach: the local machine, and later SSH."
+documentation = "https://docs.rs/tinybox-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+tinybox-core.workspace = true
+async-trait.workspace = true
+# `LocalHost` spawns a child and reads both its output streams concurrently,
+# which is what `tokio::process` is for; doing it by hand risks deadlocking on a
+# full pipe buffer.
+tokio = { workspace = true, features = ["process", "io-util"] }
+
+[dev-dependencies]
+# Command tests run against real temporary directories rather than the CWD.
+tempfile = "3"
+
+[lints]
+workspace = true

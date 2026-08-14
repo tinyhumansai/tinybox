@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::identity::BoxId;
 use crate::spec::BoxSpec;
 
@@ -12,7 +14,7 @@ use crate::spec::BoxSpec;
 /// Sandboxes drive boxes through these states; core uses them to reject
 /// operations that make no sense yet, reporting
 /// [`Error::InvalidState`](crate::error::Error::InvalidState).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BoxState {
     /// Resources are being allocated and the workspace populated.
@@ -61,7 +63,7 @@ impl fmt::Display for BoxState {
 }
 
 /// A box as the sandbox currently sees it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BoxInfo {
     /// The box's identifier within its sandbox.
@@ -81,7 +83,7 @@ impl BoxInfo {
 }
 
 /// One command to run, in a box or directly on a host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecRequest {
     /// The program and its arguments, unshelled.
@@ -137,7 +139,7 @@ impl ExecRequest {
 }
 
 /// What a finished command produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecOutput {
     /// The process exit status. A non-zero value is a result, not an error.

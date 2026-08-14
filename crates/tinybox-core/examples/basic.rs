@@ -36,13 +36,10 @@ fn main() -> tinybox_core::Result<()> {
     println!("autosnapshot: {:?}", spec.lifecycle.autosnapshot_interval());
 
     // A backend declares what it really does, and refuses the rest by name.
-    let docker = SandboxCapabilities::new(
-        IsolationLevel::Kernel,
-        SnapshotSupport::Filesystem,
-        true,
-        false,
-        true,
-    );
+    let docker = SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::Filesystem)
+        .with_fork()
+        .with_port_forward()
+        .with_resource_limits();
     println!(
         "docker suits untrusted code: {}",
         docker.is_suitable_for_untrusted_code()

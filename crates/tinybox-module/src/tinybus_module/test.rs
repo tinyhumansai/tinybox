@@ -7,13 +7,11 @@ use tinybus::transport::memory::MemoryBus;
 use tinybus::{Connection, Interface};
 
 /// A container-class backend, standing in for one a later milestone registers.
-const CONTAINER: SandboxCapabilities = SandboxCapabilities::new(
-    IsolationLevel::Kernel,
-    SnapshotSupport::Filesystem,
-    true,
-    false,
-    true,
-);
+const CONTAINER: SandboxCapabilities =
+    SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::Filesystem)
+        .with_fork()
+        .with_port_forward()
+        .with_resource_limits();
 
 /// A backend too weak to be trusted with untrusted code.
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;

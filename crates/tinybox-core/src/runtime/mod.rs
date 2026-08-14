@@ -7,7 +7,9 @@
 //! the other.
 //!
 //! Both traits are object-safe and used as `Arc<dyn _>` in a provider registry,
-//! which is why they carry `async_trait` rather than native `async fn`.
+//! which is why they carry `async_trait` rather than native `async fn`. Both
+//! also require `Debug`, because the types holding them derive it and
+//! `missing_debug_implementations` is denied workspace-wide.
 //!
 //! # Implementing a sandbox honestly
 //!
@@ -34,7 +36,7 @@ pub use types::{BoxInfo, BoxState, ExecOutput, ExecRequest};
 /// `ssh` opens a channel to another machine. Confinement is the [`Sandbox`]'s
 /// job, layered on top.
 #[async_trait]
-pub trait Host: Send + Sync + 'static {
+pub trait Host: std::fmt::Debug + Send + Sync + 'static {
     /// The name this host is registered under, matching
     /// [`HostRef`](crate::identity::HostRef).
     fn name(&self) -> &str;
@@ -56,7 +58,7 @@ pub trait Host: Send + Sync + 'static {
 /// Implementations range from [`SandboxCapabilities::PASSTHROUGH`], which wraps
 /// nothing at all, to a hypervisor-backed sandbox with its own kernel.
 #[async_trait]
-pub trait Sandbox: Send + Sync + 'static {
+pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     /// The name this sandbox is registered under, matching
     /// [`SandboxRef`](crate::identity::SandboxRef).
     fn name(&self) -> &str;

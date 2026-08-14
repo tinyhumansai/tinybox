@@ -54,15 +54,25 @@
 //! assert!(caps.require("passthrough", Capability::Fork).is_err());
 //! # Ok::<(), tinybox_core::Error>(())
 //! ```
+//!
+//! # What ships today
+//!
+//! [`PassthroughSandbox`] is the only backend in this crate. It runs commands
+//! unconfined on whatever [`Host`] it is given, which makes it useful for
+//! trusted local work and unsuitable for anything else — and it says so.
 
 pub mod capability;
 pub mod error;
 pub mod identity;
+pub mod passthrough;
 pub mod runtime;
 pub mod spec;
+pub mod store;
 
 pub use capability::{Capability, IsolationLevel, SandboxCapabilities, SnapshotSupport};
 pub use error::{Error, Result};
 pub use identity::{BoxId, HostRef, SandboxRef, SnapshotId};
+pub use passthrough::PassthroughSandbox;
 pub use runtime::{BoxInfo, BoxState, ExecOutput, ExecRequest, Host, Sandbox};
 pub use spec::{BoxSpec, Lifecycle, NetworkPolicy, Placement, Resources, WorkspaceSource};
+pub use store::{MemoryStore, Store};

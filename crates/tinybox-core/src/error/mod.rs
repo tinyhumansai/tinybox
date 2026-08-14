@@ -72,6 +72,72 @@ pub enum Error {
         /// The state the operation required.
         expected: crate::runtime::BoxState,
     },
+
+    /// A sandbox was handed a workspace source it cannot materialize.
+    ///
+    /// Distinct from [`Error::Unsupported`], which is about a capability the
+    /// caller asked for. This is about the *input*: a passthrough sandbox runs
+    /// a bare host process and has nowhere to unpack an OCI image to.
+    #[error("sandbox {sandbox} cannot materialize a {kind} workspace")]
+    UnsupportedWorkspaceSource {
+        /// The sandbox that refused the source.
+        sandbox: String,
+        /// What kind of source it was, such as `OCI image`. Named `kind`
+        /// rather than `source` because thiserror reserves that field name for
+        /// a nested error.
+        kind: &'static str,
+    },
+
+    /// A command was submitted with no program to run.
+    #[error("sandbox {sandbox} was given a command with no program")]
+    EmptyCommand {
+        /// The sandbox that refused the command.
+        sandbox: String,
+    },
+
+    /// A box already exists under the requested identifier.
+    #[error("a box with id {id} already exists")]
+    DuplicateBox {
+        /// The identifier that was already taken.
+        id: String,
+    },
+
+    /// An operating-system call failed.
+    ///
+    /// Carries the message rather than the [`std::io::Error`] itself so the
+    /// crate-wide error stays comparable, which every test in this crate
+    /// depends on.
+    #[error("{operation} failed: {message}")]
+    Io {
+        /// What was being attempted, such as `spawn`.
+        operation: &'static str,
+        /// The operating system's description of the failure.
+        message: String,
+    },
+
+    /// Reading or writing the box store failed, or its contents were not
+    /// valid.
+    #[error("box store {operation} failed: {message}")]
+    Store {
+        /// What was being attempted, such as `read`.
+        operation: &'static str,
+        /// What went wrong.
+        message: String,
+    },
+}
+
+impl Error {
+    /// Wrap an operating-system failure, naming the operation that failed.
+    ///
+    /// Backend crates construct this, which is why it is public: `LocalHost`
+    /// spawning a process is the first caller.
+    #[must_use]
+    pub fn io(operation: &'static str, error: &std::io::Error) -> Self {
+        Self::Io {
+            operation,
+            message: error.to_string(),
+        }
+    }
 }
 
 /// The crate's standard result type.

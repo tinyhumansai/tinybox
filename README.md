@@ -67,15 +67,37 @@ assert!(bare.require("passthrough", Capability::Fork).is_err());
 | Milestone | State |
 | --- | --- |
 | M1 — workspace, core model, provider traits, bus adapter | shipped |
-| M2 — `LocalHost` + passthrough, CLI | next |
-| M3 — `DockerSandbox` + OCI images | planned |
+| M2 — `LocalHost` + passthrough sandbox, `tinybox` CLI | shipped |
+| M3 — `DockerSandbox` + OCI images | next |
 | M4 — `SshHost`, fingerprint sync, port forwarding | planned |
 | M5 — snapshots, templates, lifecycle policy, warm pool | planned |
 | M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | planned |
 | M7 — `MicroVmSandbox` (Firecracker) | deferred |
 
-No backend is registered yet, and `Describe` reports `sandboxes: none` rather
-than implying otherwise.
+The only sandbox that exists is `passthrough`, which confines nothing — so
+`tinybox create` warns, `tinybox inspect` prints `UNSAFE`, and the TinyBus
+module's `Describe` reports no untrusted-capable backend. None of that changes
+until M6.
+
+## Try it
+
+```sh
+cargo build -p tinybox-cli
+export TINYBOX_STATE_DIR=$(mktemp -d)
+
+tinybox create --dir /path/to/project --env CI=true   # -> box-0
+tinybox exec box-0 -- echo hello
+tinybox inspect box-0
+tinybox rm box-0
+
+# or, without leaving a box behind
+tinybox run --dir /path/to/project -- cargo test
+```
+
+Boxes outlive the process that made them, so `create` and `exec` are separate
+invocations. Records live in `$TINYBOX_STATE_DIR`, `$XDG_STATE_HOME/tinybox`, or
+`~/.local/state/tinybox`. A command that fails sets tinybox's exit code to its
+own; a tinybox failure uses `70`, so the two are never confused.
 
 ## Layout
 
@@ -88,8 +110,16 @@ crates/
 │   ├── src/capability/      # SandboxCapabilities, IsolationLevel, SnapshotSupport
 │   ├── src/spec/            # BoxSpec, Placement, Resources, Lifecycle
 │   ├── src/runtime/         # the Host and Sandbox traits
+│   ├── src/passthrough/     # the sandbox that confines nothing
+│   ├── src/store/           # the Store trait and an in-memory one
 │   ├── tests/public_api.rs  # consumer-perspective regression suite
 │   └── examples/basic.rs
+├── tinybox-host/            # reach: LocalHost today, SshHost in M4
+│   └── src/local/           # the only M2 code that touches the OS
+├── tinybox-cli/             # the `tinybox` binary
+│   ├── src/command/         # argument parsing and dispatch
+│   ├── src/store/           # the JSON box store, written atomically
+│   └── tests/binary.rs      # drives the real binary end to end
 └── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
     ├── src/tinybus_module/  # bus interface, setup, ABI exports
     └── examples/            # verify_module, verify_github_release

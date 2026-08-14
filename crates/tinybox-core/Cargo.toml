@@ -15,6 +15,10 @@ publish = false
 [dependencies]
 thiserror.workspace = true
 async-trait.workspace = true
+# A `BoxSpec` is inert data that has to survive between CLI invocations and
+# inside snapshot manifests, so the model types are serializable. TinyBus
+# already links serde, so this costs the module nothing.
+serde.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

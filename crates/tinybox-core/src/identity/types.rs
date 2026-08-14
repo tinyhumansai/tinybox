@@ -7,6 +7,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Deserializer, Serialize};
+
 use crate::error::Result;
 use crate::identity::validate;
 
@@ -18,8 +20,22 @@ use crate::identity::validate;
 macro_rules! identifier {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        #[serde(transparent)]
         pub struct $name(String);
+
+        impl<'de> Deserialize<'de> for $name {
+            /// Applies the same validation as the constructor, so a
+            /// hand-edited store file cannot reintroduce an identifier that
+            /// would otherwise have been rejected.
+            fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
 
         impl $name {
             #[doc = concat!("Validate `value` as a ", $kind, ".")]

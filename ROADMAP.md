@@ -15,16 +15,22 @@ these milestones build out.
   exports, released as `libtinybox.so`
 - CI: format, clippy, build, test, 90% line coverage in every file, rustdoc with
   `-D warnings`, an MSRV build, and a `cargo-deny` supply-chain check
+- `PassthroughSandbox`: a sandbox that confines nothing and says so. It delegates
+  to whatever `Host` it is given, so it is already generic over reach — pairing
+  it with SSH in M4 needs no new code.
+- `tinybox-host` with `LocalHost`, the only component that touches the OS
+- `tinybox-cli`: `create`, `exec`, `ls`, `inspect`, `rm`, and a one-shot `run`,
+  over a JSON box store that survives between invocations
 
 ## Next
 
-- **M2** — `LocalHost` and the passthrough sandbox: exec with streamed output,
-  file operations, and the `tinybox` CLI. The first end-to-end box.
 - **M3** — `DockerSandbox` and OCI image sources, with snapshots via commit.
 - **M4** — `SshHost`, blake3 fingerprint sync that skips unchanged trees, and
   port forwarding. Composes with M3 at no cost.
 - **M5** — content-addressed snapshots, `.boxignore` derived from `.gitignore`,
   fork, named templates, the TTL reaper, autosnapshot cadence, and a warm pool.
+  Also where the box store grows locking: today two concurrent CLI invocations
+  can lose a record, which is acceptable while boxes are created by hand.
 - **M6** — `NamespaceSandbox`: rootless user namespaces, cgroup v2, overlayfs,
   seccomp, and landlock, confined to `tinybox-linux`.
 

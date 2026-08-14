@@ -20,8 +20,12 @@ crates/
 │   ├── src/capability/      # SandboxCapabilities, IsolationLevel, SnapshotSupport
 │   ├── src/spec/            # BoxSpec, Placement, Resources, Lifecycle
 │   ├── src/runtime/         # the Host and Sandbox traits
+│   ├── src/passthrough/     # the sandbox that confines nothing
+│   ├── src/store/           # the Store trait and an in-memory one
 │   ├── tests/               # integration tests against the public API only
 │   └── examples/
+├── tinybox-host/            # reach: LocalHost today, SshHost in M4
+├── tinybox-cli/             # the `tinybox` binary
 └── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
     ├── src/lib.rs           # crate docs; the adapter itself is private
     ├── src/tinybus_module/  # bus interface, setup, and ABI exports
@@ -33,9 +37,8 @@ docs/
 └── adr/                     # immutable architecture decision records
 ```
 
-Crates named in the spec but not listed above — `tinybox-host`,
-`tinybox-docker`, `tinybox-linux`, `tinybox-cli` — arrive with the milestone
-that gives them real content. Do not scaffold an empty crate; that is a
+Crates named in the spec but not listed above — `tinybox-docker`,
+`tinybox-linux` — arrive with the milestone that gives them real content. Do not scaffold an empty crate; that is a
 placeholder.
 
 Each feature area is a directory module under a crate's `src/`. A module root

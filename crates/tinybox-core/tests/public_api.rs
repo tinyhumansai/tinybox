@@ -63,13 +63,10 @@ fn a_backend_refuses_capabilities_it_does_not_declare() {
 
 #[test]
 fn a_container_backend_snapshots_disk_but_not_memory() {
-    let docker = SandboxCapabilities::new(
-        IsolationLevel::Kernel,
-        SnapshotSupport::Filesystem,
-        true,
-        false,
-        true,
-    );
+    let docker = SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::Filesystem)
+        .with_fork()
+        .with_port_forward()
+        .with_resource_limits();
 
     assert!(docker.is_suitable_for_untrusted_code());
     assert!(docker.supports(Capability::FilesystemSnapshot));

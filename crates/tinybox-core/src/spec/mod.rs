@@ -40,6 +40,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 mod types;
 
 pub use types::{Lifecycle, NetworkPolicy, Placement, Resources, WorkspaceSource};
@@ -49,7 +51,7 @@ pub use types::{Lifecycle, NetworkPolicy, Placement, Resources, WorkspaceSource}
 /// A spec is inert data: it says what is wanted, never how to build it. That
 /// keeps it serializable, comparable, and safe to store as part of a snapshot
 /// manifest or a template.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BoxSpec {
     /// Where the tinybox agent driving this box runs.

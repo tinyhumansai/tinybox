@@ -62,7 +62,13 @@ Every sandbox returns a `SandboxCapabilities`:
 - `snapshot`: `None` / `Filesystem` / `FilesystemAndMemory`. A container can
   freeze a filesystem but not live memory; only a hypervisor-backed sandbox
   does both.
-- `fork`, `pause_resume`, `port_forward`.
+- a set of the remaining capabilities: `Fork`, `PauseResume`, `PortForward`,
+  and `ResourceLimits`.
+
+`ResourceLimits` deserves naming explicitly. A sandbox that cannot cap memory
+must decline it rather than accept a `Resources` and ignore it — accepting a
+limit that is never applied is the same class of dishonesty as reporting
+isolation that does not exist. The passthrough sandbox declines it.
 
 Core checks the declaration before dispatching and returns
 `Error::Unsupported { sandbox, capability }`. **A backend must never emulate a
@@ -125,15 +131,50 @@ than relaxing the lint everywhere — see ADR 0003.
 
 ```text
 crates/
-├── tinybox-core/     # this specification; unsafe forbidden
-├── tinybox-host/     # LocalHost, SshHost               (M2, M4)
+├── tinybox-core/     # this specification; unsafe forbidden      (M1, M2)
+├── tinybox-host/     # LocalHost (M2), SshHost (M4)
 ├── tinybox-docker/   # DockerSandbox                    (M3)
 ├── tinybox-linux/    # NamespaceSandbox; unsafe allowed (M6)
 ├── tinybox-cli/      # bin `tinybox`                    (M2)
-└── tinybox-module/   # cdylib, TinyBus ABI v1
+└── tinybox-module/   # cdylib, TinyBus ABI v1                    (M1)
 ```
 
 Crates appear when they have real content. An empty crate is a placeholder.
+
+## Where a sandbox implementation lives
+
+`PassthroughSandbox` is in `tinybox-core` rather than a backend crate, which
+looks like a layering violation and is not. It holds an `Arc<dyn Host>` and
+delegates every command to it, so it performs no I/O and adds no dependency.
+That delegation is the point: passthrough is generic over reach, so pairing it
+with an SSH host in M4 yields "run it over there, unconfined" with no code
+naming that combination.
+
+A backend that genuinely touches the operating system — Docker, namespaces, a
+VMM — belongs in its own crate, both to keep its dependencies out of the
+released `cdylib` and to keep the impure surface small enough that the per-file
+coverage gate stays reachable.
+
+## Persistence of box records
+
+A `Sandbox` does not own the fact that a box exists; a `Store` does. The CLI
+creates a box in one process and executes in it from another, so the record has
+to outlive both.
+
+`Store` is synchronous — every implementation is a memory map or a small local
+file, and making it async would push executor choice onto every caller for no
+gain. `MemoryStore` serves tests and single-process runs; the CLI's `FileStore`
+writes a JSON document atomically, via a sibling temporary file and a rename, so
+a reader never observes a partial document.
+
+Identifiers are the lowest free `box-N`. That is reproducible, which the tests
+depend on and randomness would destroy, and it keeps names short enough to type.
+Deserializing a record re-validates every identifier, so hand-editing the store
+cannot introduce a name the constructor would have rejected.
+
+Concurrent writers can still lose an update — last writer wins. Locking is
+deferred until there is reason to believe concurrent CLI invocations matter; the
+failure mode is a lost record, not a corrupt file.
 
 ## Adopted optimizations
 

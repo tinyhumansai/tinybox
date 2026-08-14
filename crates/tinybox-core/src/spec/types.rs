@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::identity::{HostRef, SandboxRef, SnapshotId};
 
@@ -10,7 +12,7 @@ use crate::identity::{HostRef, SandboxRef, SnapshotId};
 ///
 /// See the [module documentation](crate::spec) for why these two are separate
 /// choices rather than a single backend enum.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     /// Which machine the process runs on.
     pub host: HostRef,
@@ -36,7 +38,7 @@ impl Placement {
 }
 
 /// Where a workspace filesystem comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum WorkspaceSource {
     /// A directory on the host, mounted or synced into the box.
@@ -58,7 +60,7 @@ pub enum WorkspaceSource {
 ///
 /// Every limit is positive; [`Resources::validate`] rejects zero because a zero
 /// limit reads as "unlimited" to some backends and "deny everything" to others.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resources {
     /// CPU allowance in thousandths of a core, so `1500` is one and a half.
     pub cpu_millis: u32,
@@ -120,7 +122,7 @@ impl Default for Resources {
 /// Ephemeral and persistent boxes are policy over the same primitives, not
 /// separate machinery: both create, exec, snapshot, and fork identically. Only
 /// the reaper and the autosnapshot timer read this field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Lifecycle {
     /// Discarded once `ttl` elapses, with no snapshots taken on the way.
@@ -186,7 +188,7 @@ impl Default for Lifecycle {
 /// The default is [`NetworkPolicy::Denied`] because the common case is running
 /// code that has no business making outbound connections, and an accidental
 /// default of "open" is the kind of mistake that is only noticed afterwards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NetworkPolicy {
     /// No network access at all.
