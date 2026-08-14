@@ -93,10 +93,15 @@ jobs:
         id: msrv
         run: |
           set -euo pipefail
+          # Members inherit `rust-version` from `[workspace.package]`, and
+          # `packages[0]` is arbitrary in a workspace, so take the highest
+          # declared MSRV across every member.
           msrv="$(cargo metadata --format-version 1 --no-deps \
-            | jq -r '.packages[0].rust_version')"
+            | jq -r '[.packages[].rust_version | select(. != null)]
+                     | sort_by(split(".") | map(tonumber))
+                     | last // ""')"
           if [[ -z "$msrv" || "$msrv" == "null" ]]; then
-            echo "package.rust-version is not set in Cargo.toml" >&2
+            echo "workspace.package.rust-version is not set in Cargo.toml" >&2
             exit 1
           fi
           echo "version=$msrv" >> "$GITHUB_OUTPUT"

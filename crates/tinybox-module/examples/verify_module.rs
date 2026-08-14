@@ -9,8 +9,8 @@ use tinybus::broker::Broker;
 use tinybus::module::ModuleHost;
 use tinybus::transport::memory::MemoryBus;
 
-const INTERFACE: &str = "ai.tinyhumans.rust_template.Greeting";
-const OBJECT_PATH: &str = "/ai/tinyhumans/rust_template/Greeting";
+const INTERFACE: &str = "ai.tinyhumans.tinybox.Box";
+const OBJECT_PATH: &str = "/ai/tinyhumans/tinybox/Box";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,10 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await??;
 
     let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
-    let greeting: String = proxy.call("Greet", ("TinyBus",)).await?;
-    if greeting != "Hello, TinyBus!" {
+    // `Describe` is the module's only method, and it must at least name the
+    // crate. Asserting the whole string would couple this verifier to the
+    // registered-sandbox list, which changes as backends land.
+    let description: String = proxy.call("Describe", ()).await?;
+    if !description.starts_with("tinybox ") {
         return Err(io::Error::other(format!(
-            "module returned an unexpected greeting: {greeting}"
+            "module returned an unexpected description: {description}"
         ))
         .into());
     }

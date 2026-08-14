@@ -4,7 +4,10 @@ set -euo pipefail
 minimum="${1:-90}"
 report="${2:-coverage.json}"
 workspace_root="$(pwd -P)/"
-source_root="${workspace_root}src/"
+# Every crate lives under `crates/<name>/src/`, so the gate walks the whole
+# workspace. Pointing this at `src/` would match nothing and trip the
+# "no files with executable lines" guard below instead of measuring anything.
+source_root="${workspace_root}crates/"
 
 cargo llvm-cov \
   --locked \

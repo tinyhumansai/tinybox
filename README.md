@@ -1,77 +1,112 @@
-# Rust Template
+# tinybox
 
-A production-ready Rust 2024 TinyBus module template used by TinyHumans AI. It
-ships the module layout, TinyBus ABI adapter, error handling, testing,
-documentation, CI, and multi-platform release workflow that every new
-integration in this organization starts from.
+A workspace containerization runtime: tinybox encapsulates a *box* — an
+isolated place where code runs — and makes the isolation something a caller can
+inspect before relying on it.
 
-## Use This Template
+TinyBus loads modules as native libraries into the host process, and is blunt
+about the consequence: *"in-process modules are trusted code with the host's
+full address-space privileges."* tinybox is where code the operator does **not**
+trust goes instead.
 
-Choose **Use this template** on GitHub, create a repository, then work through
-the checklist at the top of [`AGENTS.md`](AGENTS.md):
+Two workloads share one abstraction: ephemeral boxes for short-lived,
+untrusted, agent-generated code, and persistent boxes for developer workspaces
+that are stopped, resumed, and forked over days.
 
-- update the package name, description, repository, keywords, and categories in
-  `Cargo.toml`;
-- update this README and the crate documentation in `src/lib.rs`;
-- replace the placeholder `greeting` module with the first real feature area;
-- rename the TinyBus interface, object path, and exported methods in
-  `src/tinybus_module/`;
-- update the security contact and repository links in the community files;
-- replace `ROADMAP.md` with the real plan, or delete it;
-- change the license if GPL-3.0-only is not appropriate.
+## Reach and confinement are separate
 
-Search for `rust-template` and `rust_template` to find every remaining
-template-specific value.
+SSH answers *which machine* a process runs on. Docker answers *what confines
+it*. tinybox keeps them as independent axes joined by a `Placement`:
 
-## What You Get
+```text
+Host — reach                 Sandbox — confinement
+├── local                    ├── passthrough
+└── ssh                      ├── docker
+                             ├── namespace
+                             └── microvm
+```
 
-| Area | What is configured |
+Pairings then cost nothing: `ssh` + `docker` is Docker on a remote machine with
+no code dedicated to that combination. A box names *two* placements — one for
+the runner driving the work, one for the workspace where code executes — so a
+local runner can drive a remote workspace.
+
+```rust
+use tinybox_core::{BoxSpec, HostRef, Placement, SandboxRef, WorkspaceSource};
+
+let workspace = Placement::new(HostRef::new("builder-01")?, SandboxRef::new("docker")?);
+let runner = Placement::new(HostRef::new("local")?, SandboxRef::new("passthrough")?);
+
+let spec = BoxSpec::new(workspace, WorkspaceSource::OciImage("alpine:3".into()))
+    .with_runner(runner);
+
+assert!(!spec.is_colocated());
+# Ok::<(), tinybox_core::Error>(())
+```
+
+## Backends declare what they do
+
+Every sandbox returns a `SandboxCapabilities`, and core refuses undeclared
+requests with `Error::Unsupported` rather than degrading silently. A
+passthrough sandbox that reported the shape of a microVM would leave a caller
+believing untrusted code had been contained when it had not.
+
+```rust
+use tinybox_core::{Capability, IsolationLevel, SandboxCapabilities};
+
+let bare = SandboxCapabilities::PASSTHROUGH;
+assert_eq!(bare.isolation, IsolationLevel::None);
+assert!(!bare.is_suitable_for_untrusted_code());
+assert!(bare.require("passthrough", Capability::Fork).is_err());
+```
+
+`IsolationLevel::Kernel` is the floor for untrusted code.
+
+## Status
+
+| Milestone | State |
 | --- | --- |
-| Layout | Directory modules with `mod.rs` / `types.rs` / `test.rs`, a crate-wide error type, integration tests, and a runnable example |
-| Lints | `unsafe_code` forbidden, `missing_docs`, clippy `all` + `pedantic`, no `unwrap`/`expect`/`panic`/`todo` in library code — all declared in `[lints]` so local and CI runs agree |
-| CI | Format, clippy, build, test (default and all features), at least 90% line coverage in every source file, rustdoc with `-D warnings`, an MSRV build, and a `cargo-deny` supply-chain check |
-| Release | Manual `workflow_dispatch` bump that validates, versions, tags, and creates installable native module packages for every supported platform |
-| Community | Issue and pull request templates, Dependabot, contributing, security, support, and code of conduct docs |
-| Agents | [`AGENTS.md`](AGENTS.md) as the single source of truth, symlinked as `CLAUDE.md`, plus a `.claude/settings.json` allowlist for the standard commands |
-| Vendor | TinyBus host types and module SDK pinned as the `vendor/tinybus` build-time submodule |
+| M1 — workspace, core model, provider traits, bus adapter | shipped |
+| M2 — `LocalHost` + passthrough, CLI | next |
+| M3 — `DockerSandbox` + OCI images | planned |
+| M4 — `SshHost`, fingerprint sync, port forwarding | planned |
+| M5 — snapshots, templates, lifecycle policy, warm pool | planned |
+| M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | planned |
+| M7 — `MicroVmSandbox` (Firecracker) | deferred |
+
+No backend is registered yet, and `Describe` reports `sandboxes: none` rather
+than implying otherwise.
 
 ## Layout
 
 ```text
-src/
-├── lib.rs              # crate docs + the entire public re-export surface
-├── error/
-│   ├── mod.rs          # crate-wide `Error` and `Result<T>`
-│   └── test.rs
-├── greeting/           # one directory per feature area
-    ├── mod.rs          # module docs, wiring, smallest useful public API
-    └── test.rs         # module-local unit tests
-└── tinybus_module/
-    ├── mod.rs          # bus interface, setup, and ABI v1 exports
-    └── test.rs         # real in-memory TinyBus integration tests
-tests/
-└── public_api.rs       # integration tests against the public API only
-examples/
-├── basic.rs                    # ordinary library API usage
-├── verify_module.rs            # local dynamic-module verification
-└── verify_github_release.rs    # tagged-release download and bus call
-vendor/
-└── tinybus/            # pinned TinyBus git submodule
+crates/
+├── tinybox-core/            # the model, provider traits, and policy
+│   ├── src/lib.rs           # crate docs + the entire public re-export surface
+│   ├── src/error/           # crate-wide `Error` and `Result<T>`
+│   ├── src/identity/        # validated BoxId, SnapshotId, HostRef, SandboxRef
+│   ├── src/capability/      # SandboxCapabilities, IsolationLevel, SnapshotSupport
+│   ├── src/spec/            # BoxSpec, Placement, Resources, Lifecycle
+│   ├── src/runtime/         # the Host and Sandbox traits
+│   ├── tests/public_api.rs  # consumer-perspective regression suite
+│   └── examples/basic.rs
+└── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
+    ├── src/tinybus_module/  # bus interface, setup, ABI exports
+    └── examples/            # verify_module, verify_github_release
+vendor/tinybus/              # pinned TinyBus git submodule (build-time SDK)
 docs/
-├── README.md           # documentation index and conventions
-├── specs/              # behavior and architecture specifications
-├── plans/              # implementation-ordered delivery plans
-└── adr/                # immutable architecture decision records
+├── specs/tinybox-runtime.md # the runtime specification
+├── plans/                   # implementation-ordered delivery plans
+└── adr/                     # immutable architecture decision records
 ```
 
-Feature areas use directory modules: implementation and exports live in
-`mod.rs`, substantial types move to `types.rs`, and unit tests live in
-`test.rs`. [`AGENTS.md`](AGENTS.md) holds the complete repository guidance, and
-`CLAUDE.md` is a symlink to it so every coding agent reads one source of truth.
+`unsafe` is forbidden across the workspace. When the namespaces backend lands it
+will be confined to `tinybox-linux`, the only crate permitted to relax that —
+see [ADR 0003](docs/adr/0003-workspace-split-to-contain-unsafe.md).
 
 ## Development
 
-Clone with submodules, or initialize them before building:
+Nothing compiles until the submodule is initialized:
 
 ```sh
 git submodule update --init --recursive
@@ -82,47 +117,53 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
 cargo test --all-features
-cargo run --example basic
-cargo build --release --lib            # produces the installable cdylib
 ```
 
-Those four checks are exactly what CI runs. Optional extras:
+Those four are exactly what CI runs. Extras:
 
 ```sh
-cargo doc --no-deps --all-features   # CI builds this with RUSTDOCFLAGS="-D warnings"
-cargo deny check all                 # supply-chain check; see deny.toml
-cargo install cargo-llvm-cov         # once, before running the coverage gate
-.github/scripts/check-file-coverage.sh 90 target/coverage.json
+cargo run -p tinybox-core --example basic
+cargo build --release -p tinybox-module --lib   # produces libtinybox.so
+cargo doc --no-deps --all-features              # CI adds RUSTDOCFLAGS="-D warnings"
+cargo deny check all                            # supply-chain check; see deny.toml
+cargo install cargo-llvm-cov                    # once, before the coverage gate
+.github/scripts/check-file-coverage.sh 90 coverage.json
 ```
+
+The coverage gate requires **90% line coverage in every file individually**, not
+in aggregate.
 
 ## Releasing
 
 Run the **Release** workflow from the Actions tab with a `patch`, `minor`, or
-`major` bump. Use `current` only to resume an interrupted release whose version
-commit and tag already exist. The workflow revalidates the crate, versions and
-tags it, builds this crate as a TinyBus `cdylib`, and creates a GitHub release.
-Assets follow `rust-template-<version>-<platform>.<tar.gz|zip>` and contain the
-native module, its SHA-256 `modules.toml`, license, and
-[`MODULE.md`](MODULE.md). Every release also publishes `checksum.toml`, which
-TinyBus uses to verify an archive before extraction. The workflow loads the
-published Ubuntu archive through TinyBus's GitHub release API and calls its
-`Greet` method before declaring the release successful. TinyBus itself is not
-shipped by this repository; the pinned submodule is the build-time SDK. The stable native
-matrix covers Ubuntu 22.04 and 24.04 on x86_64 and ARM64; Fedora 43 and 44 on
-x86_64 and ARM64; rolling Arch Linux on its officially supported x86_64
-architecture; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022
-and 2025 on x86_64; and Windows 11 on ARM64. Preview, deprecated, and unofficial
-architecture images are not release gates. Do not hand-edit the version in
-`Cargo.toml`.
+`major` bump; use `current` only to resume an interrupted release whose version
+commit and tag already exist. The workflow revalidates the workspace, versions
+and tags it, builds `tinybox-module` as a TinyBus `cdylib`, and creates a GitHub
+release.
+
+Assets follow `tinybox-<version>-<platform>.<tar.gz|zip>` and contain the native
+module, its SHA-256 `modules.toml`, the license, and [`MODULE.md`](MODULE.md).
+Every release also publishes `checksum.toml`, which TinyBus uses to verify an
+archive before extraction. The workflow loads the published Ubuntu archive
+through TinyBus's GitHub release API and calls `Describe` before declaring the
+release successful.
+
+TinyBus itself is not shipped here; the pinned submodule is the build-time SDK.
+The native matrix covers Ubuntu 22.04 and 24.04, Fedora 43 and 44, and rolling
+Arch Linux; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022 and
+2025 on x86_64; and Windows 11 on ARM64. Do not hand-edit the version in
+`Cargo.toml` — the workflow owns it.
 
 ## Documentation
 
-- [`AGENTS.md`](AGENTS.md) — repository guidelines for humans and agents
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to propose a change
-- [`docs/specs/`](docs/specs/README.md) — behavior and architecture specs
-- [`docs/plans/`](docs/plans/README.md) — test-first implementation plans
+- [`docs/specs/tinybox-runtime.md`](docs/specs/tinybox-runtime.md) — the runtime
+  specification: the model, the capability contract, and the adopted
+  optimizations
 - [`docs/adr/`](docs/adr/0001-record-architecture-decisions.md) — architecture
   decision records
+- [`AGENTS.md`](AGENTS.md) — repository guidelines for humans and agents
+  (`CLAUDE.md` is a symlink to it)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to propose a change
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability
 
 ## License

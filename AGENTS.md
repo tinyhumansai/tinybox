@@ -4,54 +4,45 @@ This file is the single source of truth for how humans and coding agents work
 in this repository. `CLAUDE.md` is a symlink to this file, so every agent reads
 the same instructions.
 
-When you generate a new project from this template, keep this file and adapt
-the project-specific parts (crate name, module map, feature flags, commands).
-Delete guidance that no longer applies rather than leaving it to rot.
-
-## Template Checklist
-
-Do this once, in a single commit, before writing feature code:
-
-- [ ] Set `name`, `description`, `repository`, `keywords`, and `categories` in
-      `Cargo.toml`.
-- [ ] Rename the crate references in `README.md`, `src/lib.rs`, `examples/`,
-      and `tests/` (search for `rust_template` and `rust-template`).
-- [ ] Replace the placeholder `greeting` module with the first real feature
-      area, keeping the `mod.rs` / `types.rs` / `test.rs` layout.
-- [ ] Confirm `license` and `LICENSE` match the project's intended license.
-- [ ] Update the security contact in `SECURITY.md`.
-- [ ] Replace `ROADMAP.md` with the real plan, or delete it.
-- [ ] Rename the TinyBus interface, object path, and declared methods in
-      `src/tinybus_module/` while keeping `vendor/tinybus` pinned.
-- [ ] Rewrite the "Project Structure" section below to describe this crate.
+This repository is a Rust 2024 Cargo **workspace** implementing tinybox, a
+workspace containerization runtime. See
+[`docs/specs/tinybox-runtime.md`](docs/specs/tinybox-runtime.md) for the model
+and [`ROADMAP.md`](ROADMAP.md) for what is built and what is next.
 
 ## Project Structure
 
-This is a Rust 2024 library crate rooted at `Cargo.toml`.
-
 ```text
-src/
-├── lib.rs              # crate docs + the entire public re-export surface
-├── error/mod.rs        # crate-wide `Error` and `Result<T>`
-├── tinybus_module/     # TinyBus interface, ABI exports, and integration tests
-└── <feature>/          # one directory per feature area
-    ├── mod.rs          # module docs, wiring, smallest useful public API
-    ├── types.rs        # substantial type definitions
-    └── test.rs         # module-local unit tests
-tests/                  # integration tests against the public API only
-examples/               # runnable, compiled-in-CI usage examples
-vendor/tinybus/         # pinned TinyBus host types and module SDK
+crates/
+├── tinybox-core/            # the model, provider traits, and policy
+│   ├── src/lib.rs           # crate docs + the entire public re-export surface
+│   ├── src/error/           # crate-wide `Error` and `Result<T>`
+│   ├── src/identity/        # validated BoxId, SnapshotId, HostRef, SandboxRef
+│   ├── src/capability/      # SandboxCapabilities, IsolationLevel, SnapshotSupport
+│   ├── src/spec/            # BoxSpec, Placement, Resources, Lifecycle
+│   ├── src/runtime/         # the Host and Sandbox traits
+│   ├── tests/               # integration tests against the public API only
+│   └── examples/
+└── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
+    ├── src/lib.rs           # crate docs; the adapter itself is private
+    ├── src/tinybus_module/  # bus interface, setup, and ABI exports
+    └── examples/            # verify_module, verify_github_release
+vendor/tinybus/              # pinned TinyBus host types and module SDK
 docs/
-├── specs/              # behavior and architecture specifications
-├── plans/              # test-first implementation plans
-└── adr/                # immutable architecture decision records
+├── specs/                   # behavior and architecture specifications
+├── plans/                   # test-first implementation plans
+└── adr/                     # immutable architecture decision records
 ```
 
-Each feature area belongs in a focused module directory under `src/`. A module
-root explains the module, wires its pieces together, and exposes the smallest
-useful API. Move substantial type definitions into `types.rs` and put
-module-local unit tests in a dedicated `test.rs`, wired from the bottom of the
-module root with:
+Crates named in the spec but not listed above — `tinybox-host`,
+`tinybox-docker`, `tinybox-linux`, `tinybox-cli` — arrive with the milestone
+that gives them real content. Do not scaffold an empty crate; that is a
+placeholder.
+
+Each feature area is a directory module under a crate's `src/`. A module root
+explains the module, wires its pieces together, and exposes the smallest useful
+API. Move substantial type definitions into `types.rs` and put module-local
+unit tests in a dedicated `test.rs`, wired from the bottom of the module root
+with:
 
 ```rust
 #[cfg(test)]
@@ -63,9 +54,23 @@ let a general-purpose `utils.rs` or `helpers.rs` grow — those are a symptom of
 missing module. Prefer many small modules that each do one thing well over few
 broad ones.
 
-Keep public exports centralized in `src/lib.rs` so downstream users have one
-predictable surface. Put shared error variants in `src/error/mod.rs` and return
-the crate-wide `Result<T>` from fallible public APIs.
+Keep public exports centralized in each crate's `src/lib.rs`. Put shared error
+variants in `tinybox-core`'s `src/error/mod.rs` and return the crate-wide
+`Result<T>` from fallible public APIs.
+
+## Two rules specific to this runtime
+
+1. **A backend never emulates a capability it has not declared.** Every
+   `Sandbox` returns a `SandboxCapabilities`; core checks it and returns
+   `Error::Unsupported`. Approximating a capability — copying a filesystem
+   because real forking is unavailable, or running a bare process where
+   isolation was requested — is the one failure mode that silently converts
+   "contained" into "not contained". Add a capability and declare it, or return
+   the error.
+2. **Reach and confinement stay orthogonal.** `Host` answers which machine,
+   `Sandbox` answers what confines the process. Do not add a backend that
+   merges the two (`DockerOverSsh` and its relatives); compose a `Placement`
+   instead. See ADR 0002.
 
 ## Build And Test
 
@@ -83,7 +88,9 @@ Supporting commands:
 
 - `cargo fmt --all` — format before committing.
 - `cargo test <filter>` — run a focused subset while iterating.
-- `cargo run --example basic` — run the bundled example.
+- `cargo run -p tinybox-core --example basic` — run the bundled example.
+- `cargo build --release -p tinybox-module --lib` — build the installable
+  cdylib. A virtual workspace needs the explicit `-p`.
 - `cargo doc --no-deps --all-features` — build the rustdoc CI also builds with
   `RUSTDOCFLAGS="-D warnings"`.
 - `cargo test --doc` — run doctests alone when editing documentation examples.
@@ -105,19 +112,24 @@ Use standard `rustfmt` output and Rust 2024 idioms. Do not hand-format around
   `impl Into<String>` at boundaries; return owned, concrete types.
 - Keep the public surface minimal: default to private, and export deliberately
   from `src/lib.rs`.
-- `unsafe` is forbidden crate-wide by the lint configuration in `Cargo.toml`.
-  If a project genuinely needs it, relax the lint in its own commit and document
-  every invariant with a `// SAFETY:` comment.
+- `unsafe` is forbidden across the workspace by `[workspace.lints]` in the root
+  `Cargo.toml`, which every crate inherits with `[lints] workspace = true`.
+  Exactly one crate may relax it — `tinybox-linux`, when it lands — and only to
+  `deny`, with every invariant documented in a `// SAFETY:` comment. Do not
+  relax it anywhere else; that is what the workspace split exists for (ADR
+  0003).
 
 ### Errors
 
-- One crate-wide `Error` enum in `src/error/mod.rs`, built with `thiserror`.
+- One workspace-wide `Error` enum in `crates/tinybox-core/src/error/mod.rs`,
+  built with `thiserror`.
 - Fallible public functions return `Result<T>`, the crate alias.
 - Add a specific variant instead of stuffing context into a string; error
   messages are lowercase, without trailing punctuation.
-- Do not `unwrap()`, `expect()`, or `panic!` in library code paths. They are
-  fine in tests, examples, and genuinely unreachable states — where `expect`
-  must carry a message explaining the invariant.
+- Do not `unwrap()`, `expect()`, or `panic!` anywhere the lints reach, which is
+  every target — library, tests, examples, and benches alike. Examples return
+  `Result` from `main`; tests return `Result` and use `?`. See the Testing
+  section for how to assert a failure without panicking.
 - Document a `# Errors` section on every public fallible function and a
   `# Panics` section on anything that can panic.
 
@@ -155,8 +167,11 @@ new module capability requires more.
 
 ## Testing
 
-- Module-local unit tests live in `src/<feature>/test.rs` and may touch private
-  items.
+- Module-local unit tests live in `crates/<crate>/src/<feature>/test.rs` and may
+  touch private items.
+- `unwrap_used`, `expect_used`, and `panic` are denied in **test** targets too.
+  Return `Result` from a test and use `?` for paths that should succeed; assert
+  failures with `.err()` against an expected variant, or `assert!(matches!(..))`.
 - Integration tests live in `tests/` and exercise only the public API — they are
   the regression suite for the crate's contract.
 - Use descriptive, behavioral test names: `rejects_an_empty_name`, not
@@ -168,7 +183,10 @@ new module capability requires more.
 - Tests must be deterministic and independent of network, wall-clock time, and
   execution order. Gate any live/network test behind a feature or an env var and
   name it `live_*` so it is easy to exclude.
-- Maintain at least 90% line coverage in every source file. Add or update tests
+- Maintain at least 90% line coverage in every source file **individually** —
+  the gate is per file, not aggregate, and it is the dominant cost on new code.
+  Keep impure I/O behind a narrow injectable trait so the logic around it is
+  unit-testable without a live daemon. Add or update tests
   with every behavior change, and note any deliberately untested edge case in
   the pull request description.
 
@@ -240,8 +258,8 @@ release with installable native packages.
 
 Consequently:
 
-- Do not hand-edit the `version` field in `Cargo.toml`; the release workflow
-  owns it.
+- Do not hand-edit the `version` field in `[workspace.package]`; the release
+  workflow owns it, and every member inherits it.
 - Follow semantic versioning. Any change to the public surface that is not
   purely additive is a breaking change and needs a major bump (pre-1.0: a minor
   bump).

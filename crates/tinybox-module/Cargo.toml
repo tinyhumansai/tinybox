@@ -1,0 +1,36 @@
+[package]
+name = "tinybox-module"
+description = "TinyBus module exposing the tinybox workspace runtime over the bus."
+documentation = "https://docs.rs/tinybox-module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[lib]
+# The released artifact must stay `libtinybox.so` / `libtinybox.dylib` /
+# `tinybox.dll` regardless of the package name, because `release.yml` derives
+# the packaged file name from this.
+name = "tinybox"
+# Keep the ordinary Rust library for tests and downstream reuse while also
+# producing the native module artifact that TinyBus loads at runtime.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+tinybox-core.workspace = true
+tinybus.workspace = true
+tinybus-module.workspace = true
+
+[dev-dependencies]
+# Module integration tests exercise the real asynchronous in-memory TinyBus.
+tokio.workspace = true
+# The GitHub release verifier passes an explicit empty module configuration.
+serde_json.workspace = true
+
+[lints]
+workspace = true

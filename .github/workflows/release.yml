@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       crate_name: ${{ steps.version.outputs.crate_name }}
+      library_name: ${{ steps.version.outputs.library_name }}
       next_version: ${{ steps.version.outputs.next_version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -66,14 +67,32 @@ jobs:
       - name: Compute next version
         id: version
         shell: bash
+        env:
+          # The workspace member that builds the released cdylib. Naming it
+          # explicitly is what keeps the release independent of member ordering.
+          MODULE_PACKAGE: tinybox-module
         run: |
           set -euo pipefail
 
           metadata="$(cargo metadata --format-version 1 --no-deps)"
-          crate_name="$(jq -r '.packages[0].name' <<< "$metadata")"
-          current_version="$(jq -r '.packages[0].version' <<< "$metadata")"
-          if [[ -z "$crate_name" || "$crate_name" == "null" ]]; then
-            echo "Could not resolve the crate name" >&2
+          # This is a workspace, so `packages[0]` is arbitrary. Select the
+          # package that produces the released module, and take the artifact
+          # name from its cdylib target rather than transliterating the package
+          # name -- `[lib] name` and the package name differ deliberately.
+          library_name="$(
+            jq -r --arg pkg "$MODULE_PACKAGE" '
+              .packages[] | select(.name == $pkg)
+              | .targets[] | select(.kind | index("cdylib")) | .name
+            ' <<< "$metadata"
+          )"
+          crate_name="$library_name"
+          current_version="$(
+            jq -r --arg pkg "$MODULE_PACKAGE" '
+              .packages[] | select(.name == $pkg) | .version
+            ' <<< "$metadata"
+          )"
+          if [[ -z "$library_name" || "$library_name" == "null" ]]; then
+            echo "Could not resolve the cdylib target of ${MODULE_PACKAGE}" >&2
             exit 1
           fi
           if [[ -z "$current_version" || "$current_version" == "null" ]]; then
@@ -128,6 +147,7 @@ jobs:
 
           {
             echo "crate_name=${crate_name}"
+            echo "library_name=${library_name}"
             echo "current_version=${current_version}"
             echo "next_version=${next_version}"
             echo "tag=${tag}"
@@ -140,8 +160,10 @@ jobs:
           NEXT_VERSION: ${{ steps.version.outputs.next_version }}
         run: |
           set -euo pipefail
-          perl -0pi -e 's/(\[package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
-          cargo update -p "$CRATE_NAME" --precise "$NEXT_VERSION"
+          perl -0pi -e 's/(\[workspace\.package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
+          # Members inherit `version.workspace`, so refresh every member entry
+          # in the lockfile rather than naming one package.
+          cargo update --workspace
 
       - name: Commit version bump and tag
         if: ${{ inputs.bump != 'current' }}
@@ -222,33 +244,35 @@ jobs:
           fi
 
       - name: Build installable module
-        run: cargo build --locked --release --lib
+        run: cargo build --locked --release -p tinybox-module --lib
 
       - name: Verify Unix module through TinyBus loader
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
         run: |
           set -euo pipefail
-          library_name="${CRATE_NAME//-/_}"
+          library_name="${LIBRARY_NAME}"
           case "$RUNNER_OS" in
             Linux) module="target/release/lib${library_name}.so" ;;
             macOS) module="target/release/lib${library_name}.dylib" ;;
             *) echo "unsupported Unix runner: ${RUNNER_OS}" >&2; exit 1 ;;
           esac
-          cargo run --locked --example verify_module -- "$module"
+          cargo run --locked -p tinybox-module --example verify_module -- "$module"
 
       - name: Verify Windows module through TinyBus loader
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         env:
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $libraryName = $env:CRATE_NAME.Replace('-', '_')
+          $libraryName = $env:LIBRARY_NAME
           $module = "target/release/$libraryName.dll"
-          $verifyRoot = Join-Path $env:RUNNER_TEMP 'rust-template-module-verify'
+          $verifyRoot = Join-Path $env:RUNNER_TEMP 'tinybox-module-verify'
           New-Item -ItemType Directory -Force $verifyRoot | Out-Null
 
           $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -278,7 +302,7 @@ jobs:
 
           $verifiedModule = Join-Path $verifyRoot "$libraryName.dll"
           Copy-Item -LiteralPath $module -Destination $verifiedModule
-          cargo run --locked --example verify_module -- $verifiedModule
+          cargo run --locked -p tinybox-module --example verify_module -- $verifiedModule
 
       - name: Assemble Unix module package
         if: ${{ runner.os != 'Windows' }}
@@ -287,11 +311,12 @@ jobs:
         env:
           BUNDLE_ID: ${{ matrix.id }}
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
           VERSION: ${{ needs.prepare.outputs.next_version }}
         run: |
           set -euo pipefail
 
-          library_name="${CRATE_NAME//-/_}"
+          library_name="${LIBRARY_NAME}"
           case "$RUNNER_OS" in
             Linux) module="target/release/lib${library_name}.so" ;;
             macOS) module="target/release/lib${library_name}.dylib" ;;
@@ -323,11 +348,12 @@ jobs:
         env:
           BUNDLE_ID: ${{ matrix.id }}
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
           VERSION: ${{ needs.prepare.outputs.next_version }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $libraryName = $env:CRATE_NAME.Replace('-', '_')
+          $libraryName = $env:LIBRARY_NAME
           $module = "target/release/$libraryName.dll"
           if (-not (Test-Path -LiteralPath $module -PathType Leaf)) {
             throw "module artifact is missing: $module"
@@ -430,18 +456,19 @@ jobs:
           fi
 
       - name: Build installable module
-        run: cargo build --locked --release --lib
+        run: cargo build --locked --release -p tinybox-module --lib
 
       - name: Verify module through TinyBus loader
         env:
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
         run: |
           set -euo pipefail
-          library_name="${CRATE_NAME//-/_}"
+          library_name="${LIBRARY_NAME}"
           verify_root="/opt/${CRATE_NAME}-module-verify"
           install -d -m 700 "$verify_root"
           install -m 755 "target/release/lib${library_name}.so" "$verify_root/"
-          cargo run --locked --example verify_module -- \
+          cargo run --locked -p tinybox-module --example verify_module -- \
             "$verify_root/lib${library_name}.so"
 
       - name: Assemble distribution module package
@@ -449,11 +476,12 @@ jobs:
         env:
           BUNDLE_ID: ${{ matrix.id }}
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
           VERSION: ${{ needs.prepare.outputs.next_version }}
         run: |
           set -euo pipefail
 
-          library_name="${CRATE_NAME//-/_}"
+          library_name="${LIBRARY_NAME}"
           module="target/release/lib${library_name}.so"
           if [[ ! -f "$module" ]]; then
             echo "module artifact is missing: ${module}" >&2
@@ -548,6 +576,7 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           REPOSITORY: ${{ github.repository }}
           CRATE_NAME: ${{ needs.prepare.outputs.crate_name }}
+          LIBRARY_NAME: ${{ needs.prepare.outputs.library_name }}
           VERSION: ${{ needs.prepare.outputs.next_version }}
         run: |
           set -euo pipefail
@@ -565,5 +594,5 @@ jobs:
           cargo run --manifest-path vendor/tinybus/Cargo.toml --locked \
             --package tinybus --all-features --example github_module_host -- \
             "$release_url" "$archive" "$sha256"
-          cargo run --locked --example verify_github_release -- \
+          cargo run --locked -p tinybox-module --example verify_github_release -- \
             "$release_url" "$archive" "$sha256"
