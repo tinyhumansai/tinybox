@@ -132,7 +132,9 @@ than relaxing the lint everywhere — see ADR 0003.
 ```text
 crates/
 ├── tinybox-core/     # this specification; unsafe forbidden      (M1, M2)
-├── tinybox-host/     # LocalHost (M2), SshHost (M4)
+├── tinybox-host/     # LocalHost                       (M2)
+├── tinybox-ssh/      # SshHost                         (M4)
+├── tinybox-sync/     # fingerprinting and transfer     (M4)
 ├── tinybox-docker/   # DockerSandbox                    (M3)
 ├── tinybox-linux/    # NamespaceSandbox; unsafe allowed (M6)
 ├── tinybox-cli/      # bin `tinybox`                    (M2)
@@ -199,6 +201,91 @@ named `tinybox-<namespace>-<box id>`, with the namespace defaulting to
 This was found by the live suite rather than by review, and it is a real
 multi-user constraint, not a test artifact.
 
+## Reaching another machine
+
+`SshHost` wraps an inner host — normally `LocalHost` — and prefixes commands
+with `ssh`. That inherits the user's existing configuration, keys, agent, jump
+hosts, and connection multiplexing, none of which an embedded SSH client would
+get for free. It also composes: an `SshHost` over another reaches through a jump
+box with no code that knows what a jump box is.
+
+### Quoting is the one place the guarantee is rebuilt by hand
+
+tinybox passes argument vectors precisely so no backend has to quote and no
+caller can inject through a filename. **SSH breaks that**: its exec channel
+carries a command *string* which the remote login shell then parses. That is
+true of the protocol, not of shelling out — an SSH library would face it too.
+
+So `crates/tinybox-ssh/src/host/quote.rs` is the one place in tinybox where a
+bug is a command-injection bug. It is a pure function for that reason, pinned by
+an exhaustive unit suite, a property test that round-trips every metacharacter
+through a local `sh`, and a live test that round-trips the same strings through
+a real SSH connection and a real remote login shell.
+
+Two smaller decisions worth recording:
+
+- `BatchMode=yes` always. Without it a missing or rejected key makes `ssh`
+  prompt, and a prompt in a program nobody is watching is a hang rather than a
+  failure.
+- `cd <dir> && <command>` rather than `;`. A missing directory fails the command
+  instead of running a build somewhere unexpected.
+- Host key checking is never disabled. `accepting_new_host_key` is opt-in and
+  accepts an *unknown* key; it does not ignore a *changed* one, which is the
+  case that means something is actually wrong.
+
+`ssh` exits `255` when it fails and otherwise passes the remote status through,
+so a remote command that genuinely exits `255` is indistinguishable from a
+connection failure. That is a property of the protocol, and it is why connection
+problems are read from stderr rather than inferred from the code.
+
+## Moving a workspace
+
+`Fingerprint` is a blake3 merkle over a tree: every file's relative path, its
+executable bit, and its contents, folded in sorted path order. Sorting is what
+makes it reproducible — directory iteration order is not stable, and an unstable
+fingerprint would report a change every run and defeat the point.
+
+Modification times are deliberately **not** hashed. A checkout, a rebase, or a
+`touch` changes them without changing content, and treating that as a change
+would resend an identical tree.
+
+The fingerprint is recorded **on the far side**, in a `.tinybox-fingerprint`
+file beside the workspace, rather than in local bookkeeping. Local bookkeeping
+goes stale the moment the remote machine is rebuilt or the directory is deleted,
+and a stale record causes the one failure that matters: a skipped transfer that
+should have happened. An unreadable or missing marker reads as "nothing", so an
+unrecognizable state fails towards sending.
+
+Transfer is an uncompressed tar built in-process and piped to `tar` on the far
+side, so the only things that have to exist over there are `tar` and `mkdir` —
+not rsync, and not a tinybox agent. That matters because the far side is
+frequently a container image somebody else built.
+
+**This is whole-tree transfer with a skip, not a per-file delta.** When a tree
+does change, all of it is sent. A real delta needs rsync's rolling checksum or
+an agent on the far side to negotiate with; the skip is the win that matters for
+an edit-run loop and the one available without either.
+
+Symbolic links are skipped rather than followed: following them can leave the
+tree entirely — a link to `/etc` would pull host configuration into the transfer
+— and can loop forever on a cycle.
+
+## Ports
+
+Ports are named in `BoxSpec` and applied at creation, because that is the only
+moment a container can gain one. Modelling them as a later operation would
+promise something no backend can deliver, so `PortForward` is declared by Docker
+on that basis.
+
+Nothing is published when the network is denied: a container with no network has
+nowhere for a published port to lead, and Docker refuses the combination. The
+denial wins, being the stricter of the two.
+
+Forwarding a **remote** box's port back to the local machine is deferred. It
+needs `ssh -L`, a long-running process with a lifetime, which `Host::run`'s
+run-to-completion shape cannot express — that is a real design question, not an
+oversight, and it belongs with the warm-pool work in M5.
+
 ## Persistence of box records
 
 A `Sandbox` does not own the fact that a box exists; a `Store` does. The CLI
@@ -215,6 +302,10 @@ Identifiers are the lowest free `box-N`. That is reproducible, which the tests
 depend on and randomness would destroy, and it keeps names short enough to type.
 Deserializing a record re-validates every identifier, so hand-editing the store
 cannot introduce a name the constructor would have rejected.
+
+Adding a field to a stored type is a compatibility question: `ports` and
+`stdin` are `#[serde(default)]` so a store written by an earlier build still
+loads. Failing to read it would orphan every box a user already had.
 
 Concurrent writers can still lose an update — last writer wins. Locking is
 deferred until there is reason to believe concurrent CLI invocations matter; the

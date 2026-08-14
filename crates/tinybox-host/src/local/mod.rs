@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
+use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
 /// The name this host registers under.
@@ -46,9 +47,14 @@ impl LocalHost {
         if let Some(cwd) = &request.cwd {
             command.current_dir(cwd);
         }
-        // Nothing here reads from the terminal, and a child inheriting stdin
-        // would block forever on a prompt no one can answer.
-        command.stdin(std::process::Stdio::null());
+        command.stdin(if request.stdin.is_some() {
+            // A payload has to reach the child through a pipe.
+            std::process::Stdio::piped()
+        } else {
+            // Nothing to feed it, and a child inheriting the terminal would
+            // block forever on a prompt no one is there to answer.
+            std::process::Stdio::null()
+        });
         Ok(command)
     }
 }
@@ -73,18 +79,51 @@ impl Host for LocalHost {
     /// and exits non-zero is **not** an error: that status is reported in
     /// [`ExecOutput::exit_code`], because a failing command is a result.
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
-        let output = Self::command(request)?
-            .output()
-            .await
+        let mut command = Self::command(request)?;
+        let Some(payload) = request.stdin.as_deref() else {
+            let output = command
+                .output()
+                .await
+                .map_err(|error| Error::io("spawn", &error))?;
+            return Ok(Self::collect(&output));
+        };
+
+        // With a payload the child has to be spawned rather than run in one
+        // call, so the pipe can be written and then closed. Closing it is not
+        // optional: a child reading to end-of-file would otherwise wait forever
+        // for input that has already all been sent.
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        let mut child = command
+            .spawn()
             .map_err(|error| Error::io("spawn", &error))?;
 
-        Ok(ExecOutput::new(
+        if let Some(mut pipe) = child.stdin.take() {
+            pipe.write_all(payload)
+                .await
+                .map_err(|error| Error::io("write to stdin", &error))?;
+            // Dropping the handle closes the pipe, signalling end-of-file.
+            drop(pipe);
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|error| Error::io("wait", &error))?;
+        Ok(Self::collect(&output))
+    }
+}
+
+impl LocalHost {
+    /// Turn a finished process into an [`ExecOutput`].
+    fn collect(output: &std::process::Output) -> ExecOutput {
+        ExecOutput::new(
             // A process killed by a signal has no exit code. Report the shell's
             // convention of 128 + signal rather than inventing a success.
             output.status.code().unwrap_or(EXIT_CODE_UNAVAILABLE),
-            output.stdout,
-            output.stderr,
-        ))
+            output.stdout.clone(),
+            output.stderr.clone(),
+        )
     }
 }
 

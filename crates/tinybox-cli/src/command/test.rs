@@ -480,6 +480,30 @@ async fn a_boxs_sandbox_is_read_from_its_record_not_a_flag() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_store_written_before_ports_existed_still_loads() -> Result<()> {
+    let dir = temp_dir()?;
+    // Exactly the JSON an M3 build wrote: no `ports` field at all. Failing to
+    // read it would orphan every box a user already had.
+    std::fs::write(
+        dir.path().join("boxes.json"),
+        r#"{"box-0":{"id":"box-0","state":"Ready","spec":{
+            "runner":{"host":"local","sandbox":"passthrough"},
+            "workspace":{"host":"local","sandbox":"passthrough"},
+            "source":{"LocalDir":"/tmp"},
+            "resources":{"cpu_millis":2000,"memory_bytes":2147483648,"pids_max":512,"disk_bytes":8589934592},
+            "lifecycle":{"Ephemeral":{"ttl":{"secs":3600,"nanos":0}}},
+            "network":"Denied","env":{}}}}"#,
+    )
+    .map_err(|error| Error::io("write", &error))?;
+
+    let listed = invoke(dir.path(), &["ls"]).await;
+
+    assert_eq!(listed.code, 0);
+    assert!(listed.out.contains("box-0"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_record_naming_an_unknown_sandbox_is_refused() -> Result<()> {
     let dir = temp_dir()?;
     // A store written by a newer build, naming a backend this one lacks.
@@ -760,7 +784,7 @@ async fn inspecting_a_docker_box_reports_kernel_isolation() -> Result<()> {
     assert!(
         inspected
             .out
-            .contains("filesystem snapshots, forking, resource limits")
+            .contains("filesystem snapshots, forking, port forwarding, resource limits")
     );
     // The workspace column shows the image, not a Debug dump.
     assert!(inspected.out.contains("workspace:  alpine:3"));
@@ -827,5 +851,208 @@ async fn a_one_shot_docker_run_leaves_nothing_behind() -> Result<()> {
             .out
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_remote_host_makes_every_command_cross_the_connection() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &[
+            "--host",
+            "ssh://builder@example.invalid",
+            "create",
+            "--sandbox",
+            "docker",
+            "--image",
+            "alpine:3",
+        ],
+    )
+    .await;
+
+    // The local machine ran `ssh`; the far machine ran `docker`. No CLI code
+    // knows what that pairing is called.
+    let argv = host.commands().first().cloned().unwrap_or_default();
+    assert_eq!(argv.first().map(String::as_str), Some("ssh"));
+    assert!(argv.contains(&"builder@example.invalid".to_owned()));
+    assert!(
+        argv.last()
+            .is_some_and(|remote| remote.starts_with("'docker' 'run'"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_remote_box_records_where_it_actually_runs() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &[
+            "--host",
+            "builder",
+            "create",
+            "--sandbox",
+            "docker",
+            "--image",
+            "alpine:3",
+        ],
+    )
+    .await;
+
+    host.push_ok("running");
+    let inspected = invoke_scripted(dir.path(), host.clone(), &["inspect", "box-0"]).await;
+
+    // Recording "local" here would make `inspect` lie about where the box is.
+    assert!(inspected.out.contains("runner:     ssh / docker"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_ssh_destination_that_would_be_read_as_an_option_is_refused() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+
+    // `--host=` rather than `--host ` so clap does not reject it as a stray
+    // option first; the point is that tinybox refuses it too.
+    let outcome = invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &["--host=-oProxyCommand=touch /tmp/pwned", "ls"],
+    )
+    .await;
+
+    assert_eq!(outcome.code, EXIT_TINYBOX_ERROR);
+    assert!(outcome.err.contains("ssh destination"));
+    assert!(host.commands().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn published_ports_reach_the_backend_and_open_the_network() -> Result<()> {
+    let dir = temp_dir()?;
+    let host = Arc::new(ScriptedHost::default());
+
+    invoke_scripted(
+        dir.path(),
+        host.clone(),
+        &[
+            "create",
+            "--sandbox",
+            "docker",
+            "--image",
+            "alpine:3",
+            "-p",
+            "8080",
+            "-p",
+            "18080:80",
+        ],
+    )
+    .await;
+
+    let argv = host.commands().first().cloned().unwrap_or_default();
+    // Publishing implies a network; leaving the default denial in place would
+    // make `--publish` silently do nothing.
+    assert!(!argv.contains(&"none".to_owned()), "{argv:?}");
+
+    let published = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| part.as_str() == "--publish")
+        .filter_map(|(index, _)| argv.get(index + 1).cloned())
+        .collect::<Vec<_>>();
+    // Ordered by guest port, because the spec holds them in a set.
+    assert_eq!(published, ["18080:80", "8080"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_malformed_port_is_rejected_with_the_expected_form() -> Result<()> {
+    let dir = temp_dir()?;
+
+    for bad in ["notaport", "70000", "80:", ":80", "a:b"] {
+        let outcome = invoke(
+            dir.path(),
+            &[
+                "create",
+                "--sandbox",
+                "docker",
+                "--image",
+                "alpine:3",
+                "-p",
+                bad,
+            ],
+        )
+        .await;
+        assert_eq!(outcome.code, EXIT_TINYBOX_ERROR, "for {bad:?}");
+        assert!(outcome.err.contains("GUEST or HOST:GUEST"), "for {bad:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn syncing_reports_what_it_did_and_skips_an_unchanged_tree() -> Result<()> {
+    let state = temp_dir()?;
+    let source = temp_dir()?;
+    let destination = temp_dir()?;
+    std::fs::write(source.path().join("a.txt"), "alpha")
+        .map_err(|error| Error::io("write", &error))?;
+
+    let target = destination.path().join("work").display().to_string();
+    let args = [
+        "sync",
+        "--dir",
+        &source.path().display().to_string(),
+        "--to",
+        &target,
+    ];
+
+    let first = invoke(state.path(), &args).await;
+    assert_eq!(first.code, 0);
+    assert!(first.out.starts_with("sent\t"), "{}", first.out);
+
+    let second = invoke(state.path(), &args).await;
+    assert!(second.out.starts_with("unchanged\t"), "{}", second.out);
+    // The same fingerprint both times, so the report is checkable.
+    assert_eq!(
+        first.out.split('\t').nth(1),
+        second.out.trim_end().split('\t').nth(1)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn syncing_can_leave_directories_behind() -> Result<()> {
+    let state = temp_dir()?;
+    let source = temp_dir()?;
+    let destination = temp_dir()?;
+    std::fs::write(source.path().join("a.txt"), "alpha")
+        .map_err(|error| Error::io("write", &error))?;
+    std::fs::create_dir(source.path().join(".git")).map_err(|error| Error::io("mkdir", &error))?;
+    std::fs::write(source.path().join(".git/HEAD"), "ref")
+        .map_err(|error| Error::io("write", &error))?;
+
+    let target = destination.path().join("work").display().to_string();
+    invoke(
+        state.path(),
+        &[
+            "sync",
+            "--dir",
+            &source.path().display().to_string(),
+            "--to",
+            &target,
+            "--exclude",
+            ".git",
+        ],
+    )
+    .await;
+
+    assert!(Path::new(&target).join("a.txt").exists());
+    assert!(!Path::new(&target).join(".git").exists());
     Ok(())
 }

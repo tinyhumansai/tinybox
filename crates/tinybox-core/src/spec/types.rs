@@ -183,6 +183,37 @@ impl Default for Lifecycle {
     }
 }
 
+/// One published port: a guest port made reachable from the host.
+///
+/// Ports live on the spec rather than behind a handle because that is when they
+/// can actually be applied — a container publishes ports at creation and cannot
+/// gain one afterwards. Modelling them as a later operation would promise
+/// something no backend can deliver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PortMapping {
+    /// The port inside the box.
+    pub guest: u16,
+    /// The port on the host, or `None` to let the host choose a free one.
+    pub host: Option<u16>,
+}
+
+impl PortMapping {
+    /// Publish `guest` on an automatically chosen host port.
+    #[must_use]
+    pub const fn dynamic(guest: u16) -> Self {
+        Self { guest, host: None }
+    }
+
+    /// Publish `guest` on exactly `host`.
+    #[must_use]
+    pub const fn fixed(guest: u16, host: u16) -> Self {
+        Self {
+            guest,
+            host: Some(host),
+        }
+    }
+}
+
 /// What a workspace may reach over the network.
 ///
 /// The default is [`NetworkPolicy::Denied`] because the common case is running

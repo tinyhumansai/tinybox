@@ -24,6 +24,8 @@ doc = false
 tinybox-core.workspace = true
 tinybox-host.workspace = true
 tinybox-docker.workspace = true
+tinybox-ssh.workspace = true
+tinybox-sync.workspace = true
 # Argument parsing, help text, and shell-facing errors. The derive API keeps the
 # command surface declared next to the types it produces.
 clap = { version = "4", features = ["derive"] }

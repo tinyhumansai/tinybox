@@ -1,0 +1,31 @@
+[package]
+name = "tinybox-sync"
+description = "Fingerprinting and transferring a tinybox workspace to where it will run."
+documentation = "https://docs.rs/tinybox-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+tinybox-core.workspace = true
+# Content addressing for the skip-when-unchanged check. Fast enough that
+# fingerprinting a tree costs less than the transfer it avoids.
+blake3 = "1"
+# The workspace is packed in-process and piped to the far side, so only `tar`
+# has to exist there — not a tinybox agent.
+tar = "0.4"
+
+[dev-dependencies]
+tokio.workspace = true
+async-trait.workspace = true
+tempfile = "3"
+tinybox-host.workspace = true
+
+[lints]
+workspace = true

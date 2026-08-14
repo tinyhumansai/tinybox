@@ -38,13 +38,13 @@
 //! # Ok::<(), tinybox_core::Error>(())
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 mod types;
 
-pub use types::{Lifecycle, NetworkPolicy, Placement, Resources, WorkspaceSource};
+pub use types::{Lifecycle, NetworkPolicy, Placement, PortMapping, Resources, WorkspaceSource};
 
 /// The complete description of a box, before any sandbox acts on it.
 ///
@@ -66,6 +66,15 @@ pub struct BoxSpec {
     pub lifecycle: Lifecycle,
     /// What the workspace may reach over the network.
     pub network: NetworkPolicy,
+    /// Guest ports published to the host.
+    ///
+    /// Ordered and deduplicated, so two specs differing only in the order the
+    /// ports were named compare equal — which keeps template identity stable.
+    ///
+    /// Defaulted on read: a store written before ports existed must still load,
+    /// or upgrading tinybox would orphan every box already recorded in it.
+    #[serde(default)]
+    pub ports: BTreeSet<PortMapping>,
     /// Environment variables set for every command in the workspace.
     ///
     /// Ordered so that two specs differing only in insertion order compare
@@ -88,6 +97,7 @@ impl BoxSpec {
             resources: Resources::DEFAULT,
             lifecycle: Lifecycle::default(),
             network: NetworkPolicy::default(),
+            ports: BTreeSet::new(),
             env: BTreeMap::new(),
         }
     }
@@ -130,6 +140,13 @@ impl BoxSpec {
     #[must_use]
     pub const fn with_network(mut self, network: NetworkPolicy) -> Self {
         self.network = network;
+        self
+    }
+
+    /// Publish one guest port to the host.
+    #[must_use]
+    pub fn with_port(mut self, port: PortMapping) -> Self {
+        self.ports.insert(port);
         self
     }
 

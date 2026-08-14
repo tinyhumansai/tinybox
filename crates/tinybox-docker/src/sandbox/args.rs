@@ -106,6 +106,7 @@ pub(super) fn run(namespace: &str, id: &BoxId, spec: &BoxSpec) -> Result<Vec<Str
 
     argv.extend(resource_flags(&spec.resources));
     argv.extend(network_flags(spec.network));
+    argv.extend(port_flags(spec));
 
     if let WorkspaceSource::LocalDir(path) = &spec.source {
         argv.push("--volume".to_owned());
@@ -158,6 +159,31 @@ fn network_flags(policy: NetworkPolicy) -> Vec<String> {
         // cannot be walked back.
         _ => vec!["--network".to_owned(), "none".to_owned()],
     }
+}
+
+/// Publish the spec's ports.
+///
+/// Nothing is published when the network is denied: a container with no network
+/// has nowhere for a published port to lead, and Docker refuses the
+/// combination outright. Dropping the flags rather than failing keeps
+/// `NetworkPolicy::Denied` the safe default it is meant to be — a spec that
+/// names ports and then denies the network gets the denial, which is the
+/// stricter of the two.
+fn port_flags(spec: &BoxSpec) -> Vec<String> {
+    if !spec.network.allows_egress() {
+        return Vec::new();
+    }
+
+    let mut flags = Vec::new();
+    for port in &spec.ports {
+        flags.push("--publish".to_owned());
+        flags.push(match port.host {
+            // Docker picks a free host port when only the guest side is named.
+            None => port.guest.to_string(),
+            Some(host) => format!("{host}:{}", port.guest),
+        });
+    }
+    flags
 }
 
 /// The `docker exec` command that runs `request` inside a box.

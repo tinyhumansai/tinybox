@@ -25,15 +25,20 @@ these milestones build out.
   enforced CPU/memory/process limits, filesystem snapshots, and forking. It
   drives `docker` through its `Host` rather than a socket, so Docker-over-SSH
   arrives free in M4 (ADR 0004).
+- `SshHost`: reach another machine, inheriting the user's SSH config, keys, and
+  agent. Docker-over-SSH needed **no Docker-side code**, as ADR 0004 predicted —
+  `crates/tinybox-ssh/tests/composition.rs` is the receipt.
+- `tinybox-sync`: blake3 fingerprinting and tar-over-stdin transfer, so a
+  repeated sync with no edits sends nothing.
+- Published ports on the spec, and `stdin` on `ExecRequest`.
 
 ## Next
-
-- **M4** — `SshHost`, blake3 fingerprint sync that skips unchanged trees, and
-  port forwarding. Docker-over-SSH needs no Docker-side code (ADR 0004).
 - **M5** — content-addressed snapshots, `.boxignore` derived from `.gitignore`,
-  fork, named templates, the TTL reaper, autosnapshot cadence, and a warm pool.
-  Also where the box store grows locking: today two concurrent CLI invocations
-  can lose a record, which is acceptable while boxes are created by hand.
+  named templates, the TTL reaper, autosnapshot cadence, and a warm pool.
+  Also where three deferred pieces land: locking for the box store (today two
+  concurrent CLI invocations can lose a record), forwarding a remote box's port
+  back to the local machine (needs a lifetime-bearing handle `Host::run` cannot
+  express), and per-file delta sync (needs rsync or a remote agent).
 - **M6** — `NamespaceSandbox`: rootless user namespaces, cgroup v2, overlayfs,
   seccomp, and landlock, confined to `tinybox-linux`.
 

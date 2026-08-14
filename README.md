@@ -69,8 +69,8 @@ assert!(bare.require("passthrough", Capability::Fork).is_err());
 | M1 — workspace, core model, provider traits, bus adapter | shipped |
 | M2 — `LocalHost` + passthrough sandbox, `tinybox` CLI | shipped |
 | M3 — `DockerSandbox`, OCI images, snapshots, forking | shipped |
-| M4 — `SshHost`, fingerprint sync, port forwarding | next |
-| M5 — snapshots, templates, lifecycle policy, warm pool | planned |
+| M4 — `SshHost`, fingerprint sync, published ports | shipped |
+| M5 — templates, lifecycle policy, warm pool, `.boxignore` | next |
 | M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | planned |
 | M7 — `MicroVmSandbox` (Firecracker) | deferred |
 
@@ -122,6 +122,44 @@ Or run one command and leave nothing behind:
 tinybox run --sandbox docker --image alpine:3 -- echo once
 ```
 
+## Somewhere else
+
+`--host` changes *where*, and nothing else. Every sandbox already works
+remotely, because reach and confinement were never entangled:
+
+```sh
+# A container on another machine. No Docker-side code exists for this pairing.
+tinybox --host ssh://builder@example.com create --sandbox docker --image alpine:3
+tinybox --host ssh://builder@example.com exec box-0 -- hostname
+```
+
+Send a working tree over, and watch the second send cost nothing:
+
+```sh
+tinybox --host ssh://builder@example.com sync --to /srv/work --exclude .git --exclude target
+# sent       9f2c0e1b…   184320 bytes
+tinybox --host ssh://builder@example.com sync --to /srv/work --exclude .git --exclude target
+# unchanged  9f2c0e1b…
+```
+
+Everything not named on the command line is left to your `~/.ssh/config`, which
+is where jump hosts and multiplexing already live. A throwaway machine has no
+config entry, so the few settings it needs are flags:
+
+```sh
+tinybox --host root@10.0.0.5 --ssh-port 2222 --ssh-identity ~/keys/builder \
+        --accept-new-host-key exec box-0 -- uname -a
+```
+
+`--accept-new-host-key` trusts an *unknown* key; it never ignores a *changed*
+one, which is the case that means something is wrong.
+
+Publish a port with `-p`:
+
+```sh
+tinybox create --sandbox docker --image nginx -p 8080:80
+```
+
 Boxes outlive the process that made them, so `create` and `exec` are separate
 invocations, and a box remembers which sandbox it belongs to — there is no
 `--sandbox` on `exec`. Records live in `$TINYBOX_STATE_DIR`,
@@ -153,6 +191,11 @@ crates/
 ├── tinybox-docker/          # confinement: containers, snapshots, forking
 │   ├── src/sandbox/args.rs  # pure `docker` command construction
 │   └── tests/live_docker.rs # gated behind TINYBOX_LIVE_DOCKER
+├── tinybox-ssh/             # reach: another machine
+│   ├── src/host/quote.rs    # the one place a bug is an injection bug
+│   ├── tests/composition.rs # the receipt for "Docker over SSH costs nothing"
+│   └── tests/live_ssh.rs    # gated behind TINYBOX_LIVE_SSH
+├── tinybox-sync/            # fingerprinting and tar-over-stdin transfer
 ├── tinybox-cli/             # the `tinybox` binary
 │   ├── src/command/         # argument parsing and dispatch
 │   ├── src/store/           # the JSON box store, written atomically
@@ -205,11 +248,18 @@ ordinary `cargo test` skips them:
 
 ```sh
 TINYBOX_LIVE_DOCKER=1 cargo test -p tinybox-docker --test live_docker
+TINYBOX_LIVE_SSH=1    cargo test -p tinybox-ssh    --test live_ssh
 ```
 
-They assert isolation *negatively* — that a box cannot see host processes, that
-a denied network really has only loopback — because a positive assertion would
-pass just as happily against a sandbox that confines nothing.
+The Docker suite asserts isolation *negatively* — that a box cannot see host
+processes, that a denied network really has only loopback — because a positive
+assertion would pass just as happily against a sandbox that confines nothing.
+
+The SSH suite starts a throwaway `sshd` in a container with a generated key and
+round-trips every shell metacharacter through a real connection and a real
+remote login shell. That is the assertion that matters, because SSH carries a
+command *string* rather than an argument vector, making quoting the one place in
+tinybox where a bug is a command-injection bug.
 
 ## Releasing
 

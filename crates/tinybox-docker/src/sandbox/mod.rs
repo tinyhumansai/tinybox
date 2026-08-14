@@ -101,11 +101,16 @@ impl DockerSandbox {
     /// `PauseResume` is absent even though `docker pause` exists, because the
     /// [`Sandbox`] trait has no method that would reach it. Declaring a
     /// capability no caller can invoke would be a claim with nothing behind it.
+    ///
+    /// `PortForward` **is** declared, because ports are named in the
+    /// [`BoxSpec`] and applied at creation — which is the only moment a
+    /// container can gain one.
     #[must_use]
     pub const fn declared_capabilities() -> SandboxCapabilities {
         SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::Filesystem)
             .with_fork()
             .with_resource_limits()
+            .with_port_forward()
     }
 
     /// Run a `docker` command, treating a non-zero exit as a failure.

@@ -74,5 +74,7 @@ pub use error::{Error, Result};
 pub use identity::{BoxId, HostRef, SandboxRef, SnapshotId};
 pub use passthrough::PassthroughSandbox;
 pub use runtime::{BoxInfo, BoxState, ExecOutput, ExecRequest, Host, Sandbox};
-pub use spec::{BoxSpec, Lifecycle, NetworkPolicy, Placement, Resources, WorkspaceSource};
+pub use spec::{
+    BoxSpec, Lifecycle, NetworkPolicy, Placement, PortMapping, Resources, WorkspaceSource,
+};
 pub use store::{MemoryStore, Store};

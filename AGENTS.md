@@ -24,8 +24,10 @@ crates/
 │   ├── src/store/           # the Store trait and an in-memory one
 │   ├── tests/               # integration tests against the public API only
 │   └── examples/
-├── tinybox-host/            # reach: LocalHost today, SshHost in M4
+├── tinybox-host/            # reach: the local machine
 ├── tinybox-docker/          # confinement: containers, snapshots, forking
+├── tinybox-ssh/             # reach: another machine, over SSH
+├── tinybox-sync/            # fingerprinting and workspace transfer
 ├── tinybox-cli/             # the `tinybox` binary
 └── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
     ├── src/lib.rs           # crate docs; the adapter itself is private
@@ -79,6 +81,9 @@ variants in `tinybox-core`'s `src/error/mod.rs` and return the crate-wide
    through a native protocol client bound to a local socket. That is what keeps
    rule 2 true in practice, and it keeps command construction pure and
    testable. See ADR 0004.
+4. **Adding a field to a stored type needs `#[serde(default)]`.** `BoxSpec` and
+   `ExecRequest` are written to a user's box store; a field without a default
+   makes an older store unreadable and orphans every box in it.
 
 ## Build And Test
 

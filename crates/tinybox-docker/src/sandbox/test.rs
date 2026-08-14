@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use tinybox_core::{
     BoxId, BoxSpec, BoxState, Capability, Error, ExecOutput, ExecRequest, Host, HostRef,
-    IsolationLevel, MemoryStore, NetworkPolicy, Placement, Resources, Result, Sandbox, SandboxRef,
-    SnapshotId, SnapshotSupport, Store, WorkspaceSource,
+    IsolationLevel, MemoryStore, NetworkPolicy, Placement, PortMapping, Resources, Result, Sandbox,
+    SandboxRef, SnapshotId, SnapshotSupport, Store, WorkspaceSource,
 };
 
 use super::{DockerSandbox, NAME, args, state};
@@ -126,6 +126,69 @@ fn it_declares_kernel_isolation_and_filesystem_snapshots() {
     // claimed.
     assert!(!caps.supports(Capability::PauseResume));
     assert!(!caps.supports(Capability::MemorySnapshot));
+    // Ports are named in the spec and applied at creation, which is the only
+    // moment a container can gain one — so this is a real claim.
+    assert!(caps.supports(Capability::PortForward));
+}
+
+#[tokio::test]
+async fn published_ports_reach_docker() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    let spec = spec()?
+        .with_network(NetworkPolicy::Egress)
+        .with_port(PortMapping::fixed(8080, 18080))
+        .with_port(PortMapping::dynamic(9090));
+
+    sandbox.create(&spec).await?;
+
+    let argv = host.command(0).unwrap_or_default();
+    let published = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| part.as_str() == "--publish")
+        .filter_map(|(index, _)| argv.get(index + 1).cloned())
+        .collect::<Vec<_>>();
+
+    // Ordered, because the spec holds them in a set: two specs differing only
+    // in the order the ports were named produce the same command.
+    assert_eq!(published, ["18080:8080", "9090"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_denied_network_publishes_nothing() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    // Denied is the default, so this is the spec someone gets by accident.
+    let spec = spec()?.with_port(PortMapping::fixed(8080, 18080));
+
+    sandbox.create(&spec).await?;
+
+    let argv = host.command(0).unwrap_or_default();
+    // A container with no network has nowhere for a published port to lead, and
+    // Docker refuses the combination. The denial wins, being the stricter half.
+    assert!(!argv.contains(&"--publish".to_owned()));
+    assert_eq!(flag_value(&argv, "--network"), Some("none"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn naming_the_same_port_twice_publishes_it_once() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    let spec = spec()?
+        .with_network(NetworkPolicy::Open)
+        .with_port(PortMapping::fixed(8080, 18080))
+        .with_port(PortMapping::fixed(8080, 18080));
+
+    sandbox.create(&spec).await?;
+
+    let argv = host.command(0).unwrap_or_default();
+    assert_eq!(
+        argv.iter()
+            .filter(|part| part.as_str() == "--publish")
+            .count(),
+        1
+    );
+    Ok(())
 }
 
 #[tokio::test]

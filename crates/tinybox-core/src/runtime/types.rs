@@ -95,6 +95,16 @@ pub struct ExecRequest {
     pub cwd: Option<PathBuf>,
     /// Variables layered over the box's own environment.
     pub env: BTreeMap<String, String>,
+    /// Bytes to feed the command on standard input.
+    ///
+    /// `None` means the command gets nothing and sees end-of-file immediately.
+    /// That is the default because a command inheriting a terminal would block
+    /// forever on a prompt nobody is there to answer.
+    ///
+    /// Defaulted on read, for the same reason as
+    /// [`BoxSpec::ports`](crate::BoxSpec::ports).
+    #[serde(default)]
+    pub stdin: Option<Vec<u8>>,
 }
 
 impl ExecRequest {
@@ -114,6 +124,7 @@ impl ExecRequest {
             argv: argv.into_iter().map(Into::into).collect(),
             cwd: None,
             env: BTreeMap::new(),
+            stdin: None,
         }
     }
 
@@ -128,6 +139,17 @@ impl ExecRequest {
     #[must_use]
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Feed `stdin` to the command.
+    ///
+    /// This is how a workspace is synced: a tar stream is piped into a command
+    /// on the far side rather than staged through a temporary file that would
+    /// have to be cleaned up on a machine tinybox may not reach again.
+    #[must_use]
+    pub fn with_stdin(mut self, stdin: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(stdin.into());
         self
     }
 

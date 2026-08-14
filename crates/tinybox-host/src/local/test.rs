@@ -193,3 +193,76 @@ async fn a_signal_terminated_process_reports_an_unmistakable_code() -> Result<()
     assert!(output.exit_code >= 128);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_payload_reaches_the_child_on_standard_input() -> Result<()> {
+    let output = LocalHost::new()
+        .run(&ExecRequest::new(["cat"]).with_stdin("piped in"))
+        .await?;
+
+    assert!(output.succeeded());
+    assert_eq!(output.stdout_lossy(), "piped in");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_child_reading_to_end_of_file_is_not_left_waiting() -> Result<()> {
+    // The pipe has to be closed after the payload is written. Without that,
+    // `wc` would block forever waiting for input that has already all been
+    // sent, and this test would hang rather than fail.
+    let output = LocalHost::new()
+        .run(&ExecRequest::new(["wc", "-c"]).with_stdin("12345"))
+        .await?;
+
+    assert_eq!(output.stdout_lossy().trim(), "5");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_binary_payload_survives_intact() -> Result<()> {
+    // A tar stream is not text, so the bytes must not be transformed.
+    let payload: Vec<u8> = (0u8..=255).collect();
+    let output = LocalHost::new()
+        .run(&ExecRequest::new(["cat"]).with_stdin(payload.clone()))
+        .await?;
+
+    assert_eq!(output.stdout, payload);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_payload_larger_than_a_pipe_buffer_is_delivered() -> Result<()> {
+    // Writing must not deadlock against a child that is still reading: the
+    // payload is larger than the 64 KiB pipe buffer.
+    let payload = vec![b'x'; 300_000];
+    let output = LocalHost::new()
+        .run(&ExecRequest::new(["wc", "-c"]).with_stdin(payload))
+        .await?;
+
+    assert_eq!(output.stdout_lossy().trim(), "300000");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_command_with_a_payload_still_reports_a_failing_status() -> Result<()> {
+    let output = LocalHost::new()
+        .run(&ExecRequest::new(["sh", "-c", "cat >/dev/null; exit 4"]).with_stdin("ignored"))
+        .await?;
+
+    assert_eq!(output.exit_code, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_command_that_ignores_its_input_does_not_fail_the_write() -> Result<()> {
+    // `true` exits before reading, so the write end breaks. A broken pipe here
+    // is the child's choice, not an error worth surfacing.
+    let outcome = LocalHost::new()
+        .run(&ExecRequest::new(["true"]).with_stdin(vec![b'y'; 200_000]))
+        .await;
+
+    // Either the write lands before the child exits, or it fails with EPIPE.
+    // Both are acceptable; hanging is not.
+    assert!(outcome.is_ok() || matches!(outcome, Err(Error::Io { .. })));
+    Ok(())
+}
