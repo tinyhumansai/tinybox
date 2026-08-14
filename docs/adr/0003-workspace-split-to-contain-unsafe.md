@@ -1,7 +1,13 @@
 # 3. Split the crate into a workspace to contain `unsafe`
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by [ADR 0005](0005-namespaces-through-bubblewrap.md)
 - **Date:** 2026-08-14
+
+> **Amendment.** The `unsafe` reservation described below was never needed.
+> Modern Ubuntu blocks unprivileged user namespaces for unconfined binaries, so
+> the namespace backend drives `bwrap` instead of calling `clone` directly and
+> `unsafe_code = "forbid"` holds across the whole workspace with no exception.
+> The rest of this decision — the split itself, and why — stands.
 
 ## Context
 

@@ -147,9 +147,10 @@ filename.
 
 ## Workspace layout
 
-`unsafe` is forbidden crate-wide. A namespaces backend needs `clone`,
-`unshare`, `pivot_root`, and seccomp, so it is confined to its own crate rather
-than relaxing the lint everywhere — see ADR 0003.
+`unsafe` is forbidden across the whole workspace, with **no exception**. ADR
+0003 expected the namespace backend to need it; ADR 0005 records why it did
+not. The split still earns its keep by keeping backend dependencies out of the
+released `cdylib` and each backend independently testable.
 
 ```text
 crates/
@@ -158,7 +159,7 @@ crates/
 ├── tinybox-ssh/      # SshHost                         (M4)
 ├── tinybox-sync/     # fingerprinting and transfer     (M4)
 ├── tinybox-docker/   # DockerSandbox                    (M3)
-├── tinybox-linux/    # NamespaceSandbox; unsafe allowed (M6)
+├── tinybox-linux/    # NamespaceSandbox                (M6)
 ├── tinybox-cli/      # bin `tinybox`                    (M2)
 └── tinybox-module/   # cdylib, TinyBus ABI v1                    (M1)
 ```
@@ -334,6 +335,53 @@ Forwarding a **remote** box's port back to the local machine is deferred. It
 needs `ssh -L`, a long-running process with a lifetime, which `Host::run`'s
 run-to-completion shape cannot express — that is a real design question, not an
 oversight, and it belongs with the warm-pool work in M5.
+
+## The namespace backend
+
+Rootless kernel isolation with no daemon, no root, and no privileged component
+of tinybox's own. It declares `IsolationLevel::Kernel`, and nothing else.
+
+| Concern | How |
+| --- | --- |
+| Namespaces | user, pid, ipc, uts, cgroup always; net unless the policy allows egress |
+| Root filesystem | `/usr` read-only plus merged-`/usr` symlinks, a fresh `/proc`, a `/dev`, and a `tmpfs` `/tmp` |
+| Host configuration | Four files, not all of `/etc`: `passwd`, `group`, `resolv.conf`, `ssl/certs`. Binding the whole directory would hand the box every credential and host key the user can read. |
+| Workspace | The one writable bind, mounted at `/workspace`, which is also the working directory |
+| Environment | Cleared, then rebuilt from the box's and the command's. The caller's environment routinely holds tokens. |
+| Limits | `systemd-run --user --scope`, the only route an unprivileged process has to a delegated cgroup — and therefore opt-in |
+| Sources | `LocalDir` only. There is no image machinery: this backend binds a directory the caller already has. |
+
+Two flags are part of the boundary and easy to overlook: `--die-with-parent`,
+without which a sandbox outlives the box it belongs to, and `--new-session`,
+without which the sandboxed process can inject keystrokes into the caller's
+terminal through `TIOCSTI`.
+
+### A box is a record, not a container
+
+There is no long-running sandbox process. Each command is a fresh `bwrap` over
+the same workspace, so **writes outside the workspace do not survive between
+commands**. That is why this backend declares no snapshot support and no
+forking: there is no persistent filesystem to capture.
+
+It is a real difference from Docker, and the live suite asserts it rather than
+leaving it implied.
+
+### Why bubblewrap rather than raw syscalls
+
+ADR 0003 reserved this crate as the one place `unsafe` would be allowed. It was
+not needed. Modern Ubuntu sets
+`kernel.apparmor_restrict_unprivileged_userns=1`, which stops an unconfined
+binary from creating a user namespace at all; `bwrap` ships a profile that
+permits it. A hand-written backend would fail on the most common Linux
+distribution — the worst failure mode for a security boundary, unavailable
+exactly where it is most needed. ADR 0005 records this in full.
+
+### Not shipped
+
+A seccomp allowlist and landlock were both named in the original plan for this
+backend. `bwrap --seccomp` takes a compiled BPF program that this backend does
+not build, and landlock is not reachable through `bwrap` at all. Neither
+shipped, and neither is claimed.
 
 ## Persistence of box records
 

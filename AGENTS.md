@@ -26,6 +26,7 @@ crates/
 │   └── examples/
 ├── tinybox-host/            # reach: the local machine
 ├── tinybox-docker/          # confinement: containers, snapshots, forking
+├── tinybox-linux/           # confinement: rootless namespaces, no daemon
 ├── tinybox-ssh/             # reach: another machine, over SSH
 ├── tinybox-sync/            # fingerprinting and workspace transfer
 ├── tinybox-cli/             # the `tinybox` binary
@@ -40,9 +41,8 @@ docs/
 └── adr/                     # immutable architecture decision records
 ```
 
-Crates named in the spec but not listed above — `tinybox-linux` — arrive with
-the milestone that gives them real content. Do not scaffold an empty crate; that
-is a placeholder.
+Every crate the spec names now exists. Do not scaffold an empty one; that is a
+placeholder.
 
 Each feature area is a directory module under a crate's `src/`. A module root
 explains the module, wires its pieces together, and exposes the smallest useful
@@ -132,10 +132,10 @@ Use standard `rustfmt` output and Rust 2024 idioms. Do not hand-format around
   from `src/lib.rs`.
 - `unsafe` is forbidden across the workspace by `[workspace.lints]` in the root
   `Cargo.toml`, which every crate inherits with `[lints] workspace = true`.
-  Exactly one crate may relax it — `tinybox-linux`, when it lands — and only to
-  `deny`, with every invariant documented in a `// SAFETY:` comment. Do not
-  relax it anywhere else; that is what the workspace split exists for (ADR
-  0003).
+  **No crate relaxes it.** ADR 0003 reserved `tinybox-linux` as the one that
+  might; ADR 0005 records why it did not need to. If you find yourself wanting
+  `unsafe`, check first whether an existing tool already does the dangerous part
+  correctly — that is how the namespace backend avoided it.
 
 ### Errors
 

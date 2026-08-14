@@ -71,12 +71,13 @@ assert!(bare.require("passthrough", Capability::Fork).is_err());
 | M3 — `DockerSandbox`, OCI images, snapshots, forking | shipped |
 | M4 — `SshHost`, fingerprint sync, published ports | shipped |
 | M5 — templates, expiry, `.boxignore`, store locking | shipped |
-| M6 — `NamespaceSandbox` (rootless userns, cgroup v2, seccomp) | next |
+| M6 — `NamespaceSandbox` (rootless, no daemon, no root) | shipped |
 | M7 — `MicroVmSandbox` (Firecracker) | deferred |
 
-Two sandboxes exist. `passthrough` confines nothing, so `tinybox create` warns
-and `tinybox inspect` prints `UNSAFE`. `docker` clears the isolation floor and
-is a defensible place for code you do not trust.
+Three sandboxes exist. `passthrough` confines nothing, so `tinybox create`
+warns and `tinybox inspect` prints `UNSAFE`. `docker` and `namespace` both clear
+the isolation floor and are defensible places for code you do not trust —
+`namespace` without a daemon, without root, and without an image.
 
 ## Try it
 
@@ -166,6 +167,24 @@ Publish a port with `-p`:
 tinybox create --sandbox docker --image nginx -p 8080:80
 ```
 
+## Without a daemon
+
+`namespace` isolates a directory you already have, using Linux namespaces
+directly. No daemon, no root, no image, and nothing of tinybox's own running
+privileged:
+
+```sh
+tinybox create --sandbox namespace --dir ./my-project      # -> box-0
+tinybox exec box-0 -- /bin/sh -c 'ls /proc | grep -c "^[0-9]*$"'   # a handful, not hundreds
+tinybox exec box-0 -- /bin/sh -c 'test -e /home && echo leaked || echo absent'
+```
+
+It needs `bubblewrap` installed. A box here is a record and a bound directory
+rather than a running container, so **writes outside the workspace do not
+survive between commands** — which is why it declares no snapshot support. See
+[ADR 0005](docs/adr/0005-namespaces-through-bubblewrap.md) for why it drives
+`bwrap` instead of calling `clone` directly, and why no `unsafe` was needed.
+
 ## Templates
 
 Provisioning is the slow part of making a box, so do it once and give the result
@@ -233,6 +252,8 @@ crates/
 │   ├── src/host/quote.rs    # the one place a bug is an injection bug
 │   ├── tests/composition.rs # the receipt for "Docker over SSH costs nothing"
 │   └── tests/live_ssh.rs    # gated behind TINYBOX_LIVE_SSH
+├── tinybox-linux/           # confinement: rootless namespaces, no daemon
+│   └── tests/live_namespaces.rs # gated behind TINYBOX_LIVE_NAMESPACES
 ├── tinybox-sync/            # fingerprinting, exclusions, tar-over-stdin transfer
 ├── tinybox-cli/             # the `tinybox` binary
 │   ├── src/command/         # argument parsing and dispatch
@@ -248,9 +269,10 @@ docs/
 └── adr/                     # immutable architecture decision records
 ```
 
-`unsafe` is forbidden across the workspace. When the namespaces backend lands it
-will be confined to `tinybox-linux`, the only crate permitted to relax that —
-see [ADR 0003](docs/adr/0003-workspace-split-to-contain-unsafe.md).
+`unsafe` is forbidden across the whole workspace, with **no exception**. [ADR
+0003](docs/adr/0003-workspace-split-to-contain-unsafe.md) expected the namespace
+backend to need it; [ADR
+0005](docs/adr/0005-namespaces-through-bubblewrap.md) records why it did not.
 
 ## Development
 
@@ -285,8 +307,9 @@ Tests that need a real Docker daemon are gated and named `live_*`, so an
 ordinary `cargo test` skips them:
 
 ```sh
-TINYBOX_LIVE_DOCKER=1 cargo test -p tinybox-docker --test live_docker
-TINYBOX_LIVE_SSH=1    cargo test -p tinybox-ssh    --test live_ssh
+TINYBOX_LIVE_DOCKER=1     cargo test -p tinybox-docker --test live_docker
+TINYBOX_LIVE_SSH=1        cargo test -p tinybox-ssh    --test live_ssh
+TINYBOX_LIVE_NAMESPACES=1 cargo test -p tinybox-linux  --test live_namespaces
 ```
 
 The Docker suite asserts isolation *negatively* — that a box cannot see host

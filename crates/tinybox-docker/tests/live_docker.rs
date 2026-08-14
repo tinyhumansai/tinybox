@@ -178,22 +178,38 @@ async fn live_a_memory_limit_is_actually_enforced() -> Result<()> {
     }
     let sandbox = sandbox("ns-amliae")?;
     let spec = spec()?.with_resources(tinybox_core::Resources {
-        memory_bytes: 32 * 1024 * 1024,
+        memory_bytes: 64 * 1024 * 1024,
         ..tinybox_core::Resources::DEFAULT
     });
     let info = sandbox.create(&spec).await?;
 
-    // The sandbox declares `ResourceLimits`, so this must hold: the cgroup
-    // reports the cap that was asked for.
-    let result = output_of(
+    // Reading `memory.max` would only prove the cgroup was *configured*, and an
+    // earlier version of this test did exactly that. So this allocates for
+    // real. The allocation is anonymous memory held by the shell rather than a
+    // file write: a write to `/tmp` measures disk in Docker and memory under
+    // namespaces, which made an earlier probe silently test nothing at all.
+    let over = output_of(
         &sandbox,
         &info.id,
-        &["sh", "-c", "cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes"],
+        &["sh", "-c", "x=$(yes a | head -c 100000000); echo SURVIVED"],
+    )
+    .await;
+
+    // ...and a modest allocation under the same cap still works, so this is
+    // measuring a limit rather than a broken container.
+    let under = output_of(
+        &sandbox,
+        &info.id,
+        &["sh", "-c", "x=$(yes a | head -c 8000000); echo ok"],
     )
     .await;
 
     sandbox.destroy(&info.id).await?;
-    assert_eq!(result?, (32 * 1024 * 1024).to_string());
+    assert!(
+        !over?.contains("SURVIVED"),
+        "a 100 MiB allocation was not stopped by a 64 MiB cap"
+    );
+    assert_eq!(under?, "ok");
     Ok(())
 }
 

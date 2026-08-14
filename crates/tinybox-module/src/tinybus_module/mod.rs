@@ -84,6 +84,13 @@ fn registered_sandboxes() -> Vec<(&'static str, SandboxCapabilities)> {
             tinybox_docker::NAME,
             tinybox_docker::DockerSandbox::declared_capabilities(),
         ),
+        (
+            tinybox_linux::NAME,
+            // Reported without cgroup limits: whether they are available
+            // depends on the machine, and this is a static description of the
+            // build rather than a probe of the host.
+            tinybox_linux::NamespaceSandbox::declared_capabilities(false),
+        ),
     ]
 }
 

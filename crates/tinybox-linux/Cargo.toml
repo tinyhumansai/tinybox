@@ -1,0 +1,25 @@
+[package]
+name = "tinybox-linux"
+description = "A rootless, kernel-isolated tinybox sandbox built on Linux namespaces."
+documentation = "https://docs.rs/tinybox-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+tinybox-core.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tinybox-host.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -36,10 +36,13 @@ these milestones build out.
 - Exclusions read from a workspace's own `.gitignore` and `.boxignore`.
 - A real advisory lock on the box store, closing the lost-record race carried
   since M2.
+- `NamespaceSandbox`: rootless kernel isolation with no daemon and no root,
+  built on bubblewrap. **No `unsafe` was needed** — ADR 0005 records why ADR
+  0003's expectation was wrong.
 
 ## Next
-- **M6** — `NamespaceSandbox`: rootless user namespaces, cgroup v2, overlayfs,
-  seccomp, and landlock, confined to `tinybox-linux`.
+- **M7** — `MicroVmSandbox`: Firecracker, a vsock guest agent, and memory
+  snapshots. The `Sandbox` trait is shaped to accommodate it.
 
 ## Deferred
 
@@ -57,8 +60,14 @@ these milestones build out.
 - **Nested `.gitignore` files.** Only the workspace root is read; see the spec
   for why a nested rule set and a tree fingerprint interact badly.
 
-- **M7 — `MicroVmSandbox`.** Firecracker, vsock guest agent, and memory
-  snapshots. The `Sandbox` trait is shaped to accommodate it; nothing is built.
+- **A seccomp allowlist and landlock for the namespace backend.** Both were in
+  the original M6 plan and neither shipped. `bwrap --seccomp` takes a compiled
+  BPF program this backend does not build, and landlock is not reachable
+  through `bwrap` at all.
+- **A persistent namespace sandbox.** Each command is a fresh `bwrap`, so
+  writes outside the workspace do not survive between commands — which is why
+  no snapshot or fork support is declared. Holding one open needs a supervised
+  process, the same prerequisite as the warm pool.
 - **Guest-side EROFS/VMDK rootfs.** microsandbox measured a 47× geomean here,
   but the gain came from deleting a host FUSE boundary that Docker and
   namespaces backends do not have. Relevant only under a microVM.

@@ -13,6 +13,7 @@ use tinybox_core::{
 };
 use tinybox_docker::DockerSandbox;
 use tinybox_host::LocalHost;
+use tinybox_linux::NamespaceSandbox;
 use tinybox_ssh::{SshHost, SshTarget};
 use tinybox_sync::{Exclusions, Syncer};
 
@@ -70,6 +71,9 @@ enum SandboxKind {
     Passthrough,
     /// A Docker container, with its own process table, filesystem, and limits.
     Docker,
+    /// Linux namespaces, rootless and with no daemon. Isolates a directory you
+    /// already have, rather than an image.
+    Namespace,
 }
 
 impl SandboxKind {
@@ -78,6 +82,7 @@ impl SandboxKind {
         match self {
             Self::Passthrough => passthrough::NAME,
             Self::Docker => tinybox_docker::NAME,
+            Self::Namespace => tinybox_linux::NAME,
         }
     }
 }
@@ -782,6 +787,12 @@ fn build_sandbox(
             )?),
             None => Arc::new(DockerSandbox::new(host, store.clone())),
         },
+        // Limits are opt-in on the backend because they need a systemd user
+        // session; the CLI asks for them, so a machine without one fails the
+        // command rather than quietly running unlimited.
+        SandboxKind::Namespace => {
+            Arc::new(NamespaceSandbox::new(host, store.clone()).with_cgroup_limits())
+        }
     })
 }
 
@@ -803,6 +814,9 @@ fn sandbox_of(store: &Arc<dyn Store>, id: &BoxId) -> tinybox_core::Result<Sandbo
     }
     if recorded.as_str() == passthrough::NAME {
         return Ok(SandboxKind::Passthrough);
+    }
+    if recorded.as_str() == tinybox_linux::NAME {
+        return Ok(SandboxKind::Namespace);
     }
     Err(Error::Unsupported {
         sandbox: recorded.into_string(),
