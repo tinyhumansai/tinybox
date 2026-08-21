@@ -391,11 +391,7 @@ impl Cli {
                 )?;
                 announce(&sandbox.create(&spec).await?, sandbox.as_ref(), out, err)
             }
-            Command::Exec { id, argv } => {
-                let sandbox = build(sandbox_of(&store, &BoxId::new(&id)?)?)?;
-                let output = sandbox.exec(&BoxId::new(id)?, &ExecRequest::new(argv)).await?;
-                report(&output, out, err)
-            }
+            Command::Exec { id, argv } => exec(&store, &backends, id, argv, out, err).await,
             Command::Spawn { id, argv } => spawn(&store, &backends, id, argv, out).await,
             Command::Ps { id, process } => probe(&store, &backends, id, &process, out).await,
             Command::Kill { id, process } => kill(&store, &backends, id, &process, out).await,
@@ -858,6 +854,27 @@ fn render_sync(outcome: &tinybox_sync::Sync) -> String {
 /// Returns [`Error::InvalidIdentifier`] when a Docker namespace is not a valid
 /// identifier.
 /// Destroy one box and print its identifier back.
+/// Run a command in a box, mirroring its output and exit status.
+///
+/// # Errors
+///
+/// Returns whatever the backend reports when the command could not be started.
+/// A command that runs and exits non-zero is **not** an error: its status
+/// becomes this process's.
+async fn exec(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    argv: Vec<String>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
+    report(&output, out, err)
+}
+
 /// Start a command in a box and print the identifier for asking about it.
 ///
 /// # Errors
