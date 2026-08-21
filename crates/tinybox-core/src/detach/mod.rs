@@ -67,24 +67,16 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Mint an identifier for a process about to be started.
 ///
-/// The value is opaque; callers should store it rather than parse it.
-///
-/// # Panics
-///
-/// Does not panic. The generated text is always a valid identifier — it is
-/// built from a fixed prefix and decimal digits — so the validation inside
-/// [`ProcessId::new`] cannot reject it.
+/// The value is opaque; callers should store it rather than parse it. It is
+/// infallible because the text is built here from a fixed prefix and decimal
+/// digits, which is always a valid identifier — a `Result` would hand callers
+/// an error arm that can never happen.
 #[must_use]
 pub fn mint() -> ProcessId {
     let ordinal = COUNTER.fetch_add(1, Ordering::Relaxed);
     // Two sources so that two hosts, or two runs, do not collide on a shared
     // box: a monotonic ordinal within this process, and the process's own pid.
-    let value = format!("p{}-{ordinal}", std::process::id());
-    ProcessId::new(value).unwrap_or_else(|_| {
-        // Unreachable: the format above emits only `[a-z0-9-]`. Falling back
-        // rather than panicking keeps the `panic` lint honest.
-        ProcessId::new("p0-0").unwrap_or_else(|_| unreachable!())
-    })
+    ProcessId::from_generated(format!("p{}-{ordinal}", std::process::id()))
 }
 
 /// The path of the file recording `process`'s real pid inside its box.

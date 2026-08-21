@@ -51,6 +51,23 @@ macro_rules! identifier {
                 Ok(Self(value))
             }
 
+            #[doc = concat!("Wrap a ", $kind, " this crate generated itself.")]
+            ///
+            /// Skips validation, which is sound only because the caller built
+            /// the text from a fixed pattern. It exists so that an internally
+            /// minted identifier has no impossible error arm: an
+            /// `unwrap_or_else` there would be a branch no test could reach,
+            /// and an unreachable branch in a coverage-gated crate gets
+            /// "covered" by something meaningless.
+            pub(crate) fn from_generated(value: String) -> Self {
+                debug_assert!(
+                    validate($kind, &value).is_ok(),
+                    "generated {} is not valid: {value:?}",
+                    $kind,
+                );
+                Self(value)
+            }
+
             #[doc = concat!("Borrow this ", $kind, " as a string slice.")]
             #[must_use]
             pub fn as_str(&self) -> &str {
