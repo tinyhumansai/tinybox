@@ -342,3 +342,72 @@ async fn a_new_box_records_when_it_was_created() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_spawned_process_goes_through_the_detach_wrapper() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let created = sandbox.create(&spec()?).await?;
+
+    let process = sandbox
+        .spawn(&created.id, &ExecRequest::new(["server", "--port", "7788"]))
+        .await?;
+
+    let ran = host.last().ok_or(Error::EmptyCommand {
+        sandbox: NAME.to_owned(),
+    })?;
+    // A shell, because backgrounding is a shell's job — and the box's own
+    // workspace directory, because a detached command must resolve exactly the
+    // way a foreground one does.
+    assert_eq!(ran.program(), Some("/bin/sh"));
+    assert!(ran.argv[2].contains("'server' '--port' '7788'"), "{ran:?}");
+    assert!(ran.argv[2].contains(process.as_str()), "{ran:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawning_into_an_unknown_box_fails_before_anything_runs() -> Result<()> {
+    let (sandbox, host) = sandbox();
+
+    let outcome = sandbox
+        .spawn(&BoxId::new("box-0")?, &ExecRequest::new(["server"]))
+        .await;
+
+    assert!(outcome.is_err());
+    assert!(host.seen().is_empty(), "nothing should have been run");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_probe_reports_running_only_when_the_box_says_so() -> Result<()> {
+    // `RecordingHost` always answers "ran", which is not the marker `probe`
+    // looks for — so a host that says something unexpected reads as "gone"
+    // rather than as "running". Guessing the other way would report a live
+    // server that had actually died.
+    let (sandbox, _host) = sandbox();
+    let created = sandbox.create(&spec()?).await?;
+    let process = sandbox
+        .spawn(&created.id, &ExecRequest::new(["server"]))
+        .await?;
+
+    assert!(!sandbox.is_running(&created.id, &process).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_succeeds_even_though_nothing_was_really_started() -> Result<()> {
+    // Stopping something already gone is the outcome the caller wanted, so it
+    // is not an error.
+    let (sandbox, host) = sandbox();
+    let created = sandbox.create(&spec()?).await?;
+    let process = sandbox
+        .spawn(&created.id, &ExecRequest::new(["server"]))
+        .await?;
+
+    sandbox.stop(&created.id, &process).await?;
+
+    let ran = host.last().ok_or(Error::EmptyCommand {
+        sandbox: NAME.to_owned(),
+    })?;
+    assert!(ran.argv[2].contains("kill -TERM"), "{ran:?}");
+    Ok(())
+}
