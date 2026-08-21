@@ -10,7 +10,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tinybox_core::{Capability, Error, ExecOutput, ExecRequest, Host, Result};
+use tinybox_core::{Capability, Error, ExecOutput, ExecRequest, ForwardGuard as _, Host, Result};
 
 use super::{SshTunnel, exit_diagnostic, tunnel_command, wait_until_listening};
 use super::super::{SshHost, SshTarget};
