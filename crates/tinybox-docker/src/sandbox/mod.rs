@@ -5,8 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tinybox_core::{
     BoxId, BoxInfo, BoxSpec, BoxState, Capability, Clock, Error, ExecOutput, ExecRequest, Host,
-    IsolationLevel, Result, Sandbox, SandboxCapabilities, SnapshotId, SnapshotSupport, Store,
-    SystemClock,
+    IsolationLevel, ProcessId, Result, Sandbox, SandboxCapabilities, SnapshotId, SnapshotSupport,
+    Store, SystemClock, detach,
 };
 
 mod args;
@@ -116,12 +116,18 @@ impl DockerSandbox {
     /// `PortForward` **is** declared, because ports are named in the
     /// [`BoxSpec`] and applied at creation — which is the only moment a
     /// container can gain one.
+    ///
+    /// `Detach` is declared because a container is a running machine between
+    /// commands: `args::run` starts it with `--detach` and a keepalive, so a
+    /// backgrounded process and the pid file naming it are both still there on
+    /// the next `docker exec`.
     #[must_use]
     pub const fn declared_capabilities() -> SandboxCapabilities {
         SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::Filesystem)
             .with_fork()
             .with_resource_limits()
             .with_port_forward()
+            .with_detach()
     }
 
     /// Run a `docker` command, treating a non-zero exit as a failure.
@@ -177,6 +183,30 @@ impl Sandbox for DockerSandbox {
             return Err(error);
         }
         Ok(info)
+    }
+
+    async fn spawn(&self, id: &BoxId, request: &ExecRequest) -> Result<ProcessId> {
+        let process = detach::mint();
+        let output = self.exec(id, &detach::start(&process, request)?).await?;
+        if !output.succeeded() {
+            return Err(Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "start a detached process",
+                message: output.stderr_lossy().trim().to_owned(),
+            });
+        }
+        Ok(process)
+    }
+
+    async fn is_running(&self, id: &BoxId, process: &ProcessId) -> Result<bool> {
+        let output = self.exec(id, &detach::probe(process)).await?;
+        Ok(output.stdout_lossy().trim() == detach::RUNNING)
+    }
+
+    async fn stop(&self, id: &BoxId, process: &ProcessId) -> Result<()> {
+        self.exec(id, &detach::stop(process, detach::DEFAULT_GRACE))
+            .await?;
+        Ok(())
     }
 
     async fn exec(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecOutput> {
