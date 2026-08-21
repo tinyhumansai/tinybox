@@ -8,7 +8,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tinybox_core::{
     BoxId, BoxInfo, BoxSpec, Clock, Error, ExecRequest, Host, HostRef, NetworkPolicy,
-    PassthroughSandbox, Placement, PortMapping, Sandbox, SandboxRef, SnapshotId, Store,
+    PassthroughSandbox, Placement, PortMapping, ProcessId, Sandbox, SandboxRef, SnapshotId, Store,
     SystemClock, TemplateName, Templates, WorkspaceSource, passthrough,
 };
 use tinybox_docker::DockerSandbox;
@@ -632,6 +632,36 @@ fn text(out: &mut dyn Write, rendered: &str) -> tinybox_core::Result<u8> {
 /// Returns [`Error::Io`] when the stream cannot be written to.
 fn line(out: &mut dyn Write, value: &str) -> tinybox_core::Result<u8> {
     text(out, &format!("{value}\n"))
+}
+
+/// Open a tunnel to `remote` and hold it until the process is interrupted.
+///
+/// The forward is a guard, so it exists for exactly as long as this function
+/// runs. There is no daemon to hand it to and no state file that could
+/// describe a tunnel this process is no longer holding open, so blocking is
+/// the honest shape: the command running *is* the forward existing.
+///
+/// # Errors
+///
+/// Returns whatever the host reports when the tunnel cannot be opened —
+/// [`Error::Unsupported`] from a host that cannot tunnel at all.
+async fn forward(
+    reach: &dyn Host,
+    remote: std::net::SocketAddr,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let forwarded = reach.forward(remote).await?;
+    line(out, &forwarded.local_addr().to_string())?;
+
+    if forwarded.is_direct() {
+        // Nothing is being held open, so there is nothing to hold *for*.
+        // Blocking here would look like a working tunnel and be a hang.
+        return Ok(0);
+    }
+    // Park until the terminal interrupts us; dropping `forwarded` on the way
+    // out closes the tunnel.
+    std::future::pending::<()>().await;
+    Ok(0)
 }
 
 /// Forward a finished command's output and status to the caller.
