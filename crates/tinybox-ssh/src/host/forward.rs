@@ -167,4 +167,4 @@ fn exit_diagnostic(tunnel: &mut SshTunnel) -> String {
 }
 
 #[cfg(test)]
-mod forward_test;
+mod test;
