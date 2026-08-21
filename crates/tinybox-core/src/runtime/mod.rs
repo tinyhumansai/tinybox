@@ -21,13 +21,17 @@
 
 use async_trait::async_trait;
 
-use crate::capability::SandboxCapabilities;
-use crate::error::Result;
-use crate::identity::{BoxId, SnapshotId};
+use std::net::SocketAddr;
+
+use crate::capability::{Capability, SandboxCapabilities};
+use crate::error::{Error, Result};
+use crate::identity::{BoxId, ProcessId, SnapshotId};
 use crate::spec::BoxSpec;
 
+mod forward;
 mod types;
 
+pub use forward::{Forward, ForwardGuard};
 pub use types::{BoxInfo, BoxState, ExecOutput, ExecRequest};
 
 /// A machine tinybox can reach and run commands on.
@@ -51,6 +55,32 @@ pub trait Host: std::fmt::Debug + Send + Sync + 'static {
     /// [`ExecOutput::exit_code`], because a failing command is a result, not a
     /// transport fault.
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput>;
+
+    /// Make `remote` — an address in *this host's* address space — reachable
+    /// from the machine tinybox is running on.
+    ///
+    /// A sandbox publishing a guest port
+    /// ([`PortMapping`](crate::spec::PortMapping)) puts it on its host. When
+    /// that host is another machine, the caller still cannot connect, and no
+    /// sandbox-side configuration fixes it — closing that gap is a question
+    /// about reach, which is this trait's subject. A local host answers by
+    /// handing the address straight back.
+    ///
+    /// The returned [`Forward`] is a guard: the path lasts exactly as long as
+    /// it is held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] by default, so a host that cannot tunnel
+    /// says so rather than returning an address nothing is listening on. Also
+    /// returns an error when the tunnel cannot be established.
+    async fn forward(&self, remote: SocketAddr) -> Result<Forward> {
+        let _ = remote;
+        Err(Error::Unsupported {
+            sandbox: self.name().to_owned(),
+            capability: Capability::PortForward,
+        })
+    }
 }
 
 /// A confinement that boxes are created inside.
@@ -129,6 +159,65 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     /// Returns [`Error::UnknownBox`](crate::error::Error::UnknownBox) when `id` does
     /// not resolve.
     async fn destroy(&self, id: &BoxId) -> Result<()>;
+
+    /// Start a command in a box and leave it running.
+    ///
+    /// Where [`Sandbox::exec`] waits, this returns as soon as the process is
+    /// started, handing back an identifier for asking about it later. It is how
+    /// a server gets into a box; `exec` would never return.
+    ///
+    /// See [`detach`](crate::detach) for the mechanism, and for what a backend
+    /// is promising by declaring
+    /// [`Capability::Detach`](crate::capability::Capability::Detach).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] by default. A sandbox that cannot host a
+    /// process between commands must leave it that way: a background process
+    /// that cannot be found or stopped is worse than a refusal, because it
+    /// looks like it worked.
+    async fn spawn(&self, id: &BoxId, request: &ExecRequest) -> Result<ProcessId> {
+        let (_, _) = (id, request);
+        Err(Error::Unsupported {
+            sandbox: self.name().to_owned(),
+            capability: Capability::Detach,
+        })
+    }
+
+    /// Whether a process started by [`Sandbox::spawn`] is still running.
+    ///
+    /// A process that has finished is `false`, not an error: "it exited" is an
+    /// answer, and conflating it with an unreachable box would hide a real
+    /// failure behind an ordinary one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] by default, and a backend error when the
+    /// box cannot be reached to ask.
+    async fn is_running(&self, id: &BoxId, process: &ProcessId) -> Result<bool> {
+        let (_, _) = (id, process);
+        Err(Error::Unsupported {
+            sandbox: self.name().to_owned(),
+            capability: Capability::Detach,
+        })
+    }
+
+    /// Stop a process started by [`Sandbox::spawn`].
+    ///
+    /// Succeeds when the process was already gone: stopping something that has
+    /// already stopped is the outcome the caller wanted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] by default, and a backend error when the
+    /// box cannot be reached.
+    async fn stop(&self, id: &BoxId, process: &ProcessId) -> Result<()> {
+        let (_, _) = (id, process);
+        Err(Error::Unsupported {
+            sandbox: self.name().to_owned(),
+            capability: Capability::Detach,
+        })
+    }
 }
 
 #[cfg(test)]
