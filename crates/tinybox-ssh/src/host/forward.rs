@@ -6,7 +6,7 @@
 //! created it. So this module spawns `ssh -N -L` directly and hands the child
 //! to a [`Forward`] guard, which kills it on drop.
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -68,7 +68,7 @@ fn reserve_local_port() -> Result<u16> {
 /// be started, and [`Error::Backend`] when the tunnel does not begin accepting
 /// connections within [`LISTEN_TIMEOUT`] — which is what a rejected key or a
 /// refused forward looks like from here.
-pub(super) fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forward> {
+pub(super) async fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forward> {
     let local_port = reserve_local_port()?;
     let local: SocketAddr = ([127, 0, 0, 1], local_port).into();
 
@@ -101,7 +101,7 @@ pub(super) fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forward> {
         .map_err(|error| Error::io("spawn ssh for a port forward", &error))?;
     let mut tunnel = SshTunnel { child };
 
-    match wait_until_listening(&mut tunnel, local) {
+    match wait_until_listening(&mut tunnel, local).await {
         Ok(()) => Ok(Forward::guarded(local, Box::new(tunnel))),
         Err(error) => {
             // Do not leave an `ssh` behind for a forward the caller will never
@@ -112,12 +112,16 @@ pub(super) fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forward> {
     }
 }
 
-/// Block until something accepts on `local`, or the tunnel dies, or time runs
+/// Wait until something accepts on `local`, or the tunnel dies, or time runs
 /// out.
-fn wait_until_listening(tunnel: &mut SshTunnel, local: SocketAddr) -> Result<()> {
+///
+/// Asynchronous throughout: `Host::forward` is called from a runtime worker,
+/// and a ten-second blocking poll there would stall every other task sharing
+/// that thread.
+async fn wait_until_listening(tunnel: &mut SshTunnel, local: SocketAddr) -> Result<()> {
     let deadline = Instant::now() + LISTEN_TIMEOUT;
     loop {
-        if TcpStream::connect_timeout(&local, POLL_INTERVAL).is_ok() {
+        if tokio::net::TcpStream::connect(local).await.is_ok() {
             return Ok(());
         }
         // An `ssh` that has already exited is never going to start listening,
@@ -139,7 +143,7 @@ fn wait_until_listening(tunnel: &mut SshTunnel, local: SocketAddr) -> Result<()>
                 ),
             });
         }
-        std::thread::sleep(POLL_INTERVAL);
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
