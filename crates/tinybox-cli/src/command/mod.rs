@@ -177,6 +177,47 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
         argv: Vec<String>,
     },
+    /// Start a command in a box and leave it running.
+    ///
+    /// Where `exec` waits, this returns a process id as soon as the command is
+    /// started. It is how a server gets into a box; `exec` would never return.
+    Spawn {
+        /// Which box to start it in.
+        id: String,
+        /// The command and its arguments.
+        #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
+        argv: Vec<String>,
+    },
+    /// Report whether a spawned process is still running.
+    Ps {
+        /// Which box it was started in.
+        id: String,
+        /// The process id `spawn` printed.
+        process: String,
+    },
+    /// Stop a spawned process.
+    ///
+    /// Succeeds when it has already exited: stopping something already stopped
+    /// is the outcome the caller wanted.
+    Kill {
+        /// Which box it was started in.
+        id: String,
+        /// The process id `spawn` printed.
+        process: String,
+    },
+    /// Make a port on the box's machine reachable from this one.
+    ///
+    /// Publishing a port (`create -p`) puts it on the machine the box runs on.
+    /// When that is somewhere else, this is what closes the gap. The tunnel
+    /// lasts as long as the command runs, so it holds until interrupted.
+    Forward {
+        /// The port on the box's machine.
+        port: u16,
+        /// The address to reach it at over there. Defaults to loopback, which
+        /// is where a published port lands.
+        #[arg(long, value_name = "IP", default_value = "127.0.0.1")]
+        address: std::net::IpAddr,
+    },
     /// List every box.
     #[command(alias = "list")]
     Ls,
@@ -355,6 +396,29 @@ impl Cli {
                 let sandbox = build(sandbox_of(&store, &id)?)?;
                 let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
                 report(&output, out, err)
+            }
+            Command::Spawn { id, argv } => {
+                let id = BoxId::new(id)?;
+                let sandbox = build(sandbox_of(&store, &id)?)?;
+                let process = sandbox.spawn(&id, &ExecRequest::new(argv)).await?;
+                line(out, process.as_ref())
+            }
+            Command::Ps { id, process } => {
+                let id = BoxId::new(id)?;
+                let sandbox = build(sandbox_of(&store, &id)?)?;
+                let running = sandbox.is_running(&id, &ProcessId::new(process)?).await?;
+                // A process that has exited is an answer, not a failure, so it
+                // is reported on stdout rather than as a non-zero exit.
+                line(out, if running { "running" } else { "gone" })
+            }
+            Command::Kill { id, process } => {
+                let id = BoxId::new(id)?;
+                let sandbox = build(sandbox_of(&store, &id)?)?;
+                sandbox.stop(&id, &ProcessId::new(process)?).await?;
+                line(out, "stopped")
+            }
+            Command::Forward { port, address } => {
+                forward(reach.as_ref(), (address, port).into(), out).await
             }
             // Listing is the store's business, not the sandbox's: the store is
             // what owns the set of records.
