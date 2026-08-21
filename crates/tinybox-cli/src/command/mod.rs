@@ -392,17 +392,14 @@ impl Cli {
                 announce(&sandbox.create(&spec).await?, sandbox.as_ref(), out, err)
             }
             Command::Exec { id, argv } => {
-                let id = BoxId::new(id)?;
-                let sandbox = build(sandbox_of(&store, &id)?)?;
-                let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
+                let sandbox = build(sandbox_of(&store, &BoxId::new(&id)?)?)?;
+                let output = sandbox.exec(&BoxId::new(id)?, &ExecRequest::new(argv)).await?;
                 report(&output, out, err)
             }
             Command::Spawn { id, argv } => spawn(&store, &backends, id, argv, out).await,
             Command::Ps { id, process } => probe(&store, &backends, id, &process, out).await,
             Command::Kill { id, process } => kill(&store, &backends, id, &process, out).await,
-            Command::Forward { port, address } => {
-                forward(reach.as_ref(), (address, port).into(), out).await
-            }
+            Command::Forward { port, address } => forward(reach.as_ref(), address, port, out).await,
             // Listing is the store's business, not the sandbox's: the store is
             // what owns the set of records.
             Command::Ls => text(out, &render_listing(&store.list()?)),
@@ -630,10 +627,11 @@ fn line(out: &mut dyn Write, value: &str) -> tinybox_core::Result<u8> {
 /// [`Error::Unsupported`] from a host that cannot tunnel at all.
 async fn forward(
     reach: &dyn Host,
-    remote: std::net::SocketAddr,
+    address: std::net::IpAddr,
+    port: u16,
     out: &mut dyn Write,
 ) -> tinybox_core::Result<u8> {
-    let forwarded = reach.forward(remote).await?;
+    let forwarded = reach.forward((address, port).into()).await?;
     line(out, &forwarded.local_addr().to_string())?;
 
     if forwarded.is_direct() {
