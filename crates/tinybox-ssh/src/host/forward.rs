@@ -103,14 +103,10 @@ impl ForwardGuard for SshTunnel {
 /// in that window, and `ExitOnForwardFailure` turns a lost race into an
 /// immediate failure rather than a tunnel to nowhere.
 fn reserve_local_port() -> Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| Error::io("bind a local port", &error))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| Error::io("read the local port", &error))?
-        .port();
-    drop(listener);
-    Ok(port)
+    TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|error| Error::io("reserve a local port", &error))
 }
 
 /// Open a tunnel from a local loopback port to `remote` on `target`.
@@ -127,7 +123,7 @@ pub(super) async fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forwa
 
     let mut tunnel = SshTunnel::spawn(&tunnel_command(target, local_port, remote))?;
 
-    match wait_until_listening(&mut tunnel, local).await {
+    match wait_until_listening(&mut tunnel, local, LISTEN_TIMEOUT).await {
         Ok(()) => Ok(Forward::guarded(local, Box::new(tunnel))),
         Err(error) => {
             // Do not leave an `ssh` behind for a forward the caller will never
@@ -138,14 +134,22 @@ pub(super) async fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forwa
     }
 }
 
-/// Wait until something accepts on `local`, or the tunnel dies, or time runs
-/// out.
+/// Wait until something accepts on `local`, or the tunnel dies, or `timeout`
+/// runs out.
+///
+/// The deadline is a parameter rather than a constant read here so the
+/// giving-up path is reachable in a test without waiting out
+/// [`LISTEN_TIMEOUT`]; `open` supplies that constant.
 ///
 /// Asynchronous throughout: `Host::forward` is called from a runtime worker,
 /// and a ten-second blocking poll there would stall every other task sharing
 /// that thread.
-async fn wait_until_listening(tunnel: &mut SshTunnel, local: SocketAddr) -> Result<()> {
-    let deadline = Instant::now() + LISTEN_TIMEOUT;
+async fn wait_until_listening(
+    tunnel: &mut SshTunnel,
+    local: SocketAddr,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     loop {
         if tokio::net::TcpStream::connect(local).await.is_ok() {
             return Ok(());
@@ -164,8 +168,8 @@ async fn wait_until_listening(tunnel: &mut SshTunnel, local: SocketAddr) -> Resu
                 sandbox: super::NAME.to_owned(),
                 operation: "open a port forward",
                 message: format!(
-                    "the forward did not start accepting on {local} within {}s",
-                    LISTEN_TIMEOUT.as_secs()
+                    "the forward did not start accepting on {local} within {}ms",
+                    timeout.as_millis()
                 ),
             });
         }
