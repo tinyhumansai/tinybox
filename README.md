@@ -177,6 +177,35 @@ Publish a port with `-p`:
 tinybox create --sandbox docker --image nginx -p 8080:80
 ```
 
+## Something that keeps running
+
+`exec` waits for the command, which is right for a build and wrong for a server.
+`spawn` starts one and hands back an identifier instead:
+
+```sh
+tinybox create --sandbox docker --image nginx -p 8080:80
+pid=$(tinybox spawn box-0 -- nginx -g 'daemon off;')
+tinybox ps box-0 "$pid"            # -> running
+tinybox kill box-0 "$pid"          # -> stopped
+```
+
+The process survives between commands, which is what a sandbox declaring
+`Detach` is promising — `tinybox inspect` says which ones do. `passthrough` and
+`docker` do; `namespace` and `microvm` decline rather than background something
+they could not find again.
+
+Publishing puts that port on the machine the box runs on. When that machine is
+somewhere else, `forward` closes the gap:
+
+```sh
+tinybox --host ssh://builder@example.com forward 8080
+# 127.0.0.1:54321                  # ...and the tunnel lasts as long as this runs
+```
+
+Reach was always the `Host`'s question, so a tunnel is answered there too — see
+[ADR 0007](docs/adr/0007-reach-includes-forwarding-and-detachment.md). Nothing
+in `ssh` or `docker` knows about the other, here either.
+
 ## Without a daemon
 
 `namespace` isolates a directory you already have, using Linux namespaces
