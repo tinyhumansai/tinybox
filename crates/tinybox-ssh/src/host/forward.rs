@@ -24,10 +24,63 @@ const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often to retry the local connect while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// An `ssh -N -L` child, killed when the [`Forward`] holding it is dropped.
+/// The `ssh` command that carries a forward and nothing else.
+///
+/// Pure, and separate from spawning it, for the reason ADR 0004 gives for
+/// `tinybox-docker`'s `args` module: which flags a backend chooses is the
+/// interesting part, and it should be assertable as a value rather than only
+/// observable by running the tool.
+fn tunnel_command(target: &SshTarget, local_port: u16, remote: SocketAddr) -> Vec<String> {
+    let mut argv = vec!["ssh".to_owned()];
+    argv.extend(target.connection_flags());
+    // Do not run a remote command: this connection exists only to carry the
+    // forward, and a login shell on the far side would be one more thing to
+    // fail.
+    argv.push("-N".to_owned());
+    // Fail loudly rather than sitting there connected with no forward, which
+    // would look identical to success until the first connection attempt.
+    argv.push("-o".to_owned());
+    argv.push("ExitOnForwardFailure=yes".to_owned());
+    // Notice a dead peer instead of holding a tunnel that stopped working.
+    argv.push("-o".to_owned());
+    argv.push("ServerAliveInterval=15".to_owned());
+    argv.push("-L".to_owned());
+    argv.push(format!(
+        "127.0.0.1:{local_port}:{}:{}",
+        remote.ip(),
+        remote.port()
+    ));
+    argv.push(target.destination().to_owned());
+    argv
+}
+
+/// A child process holding a forward open, killed when the [`Forward`] that
+/// owns it is dropped.
 #[derive(Debug)]
 struct SshTunnel {
     child: Child,
+}
+
+impl SshTunnel {
+    /// Start `argv`, with every stream detached except the stderr a failure
+    /// diagnostic is read from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the program cannot be started at all — no
+    /// `ssh` on `PATH` being the usual reason.
+    fn spawn(argv: &[String]) -> Result<Self> {
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::piped());
+
+        let child = command
+            .spawn()
+            .map_err(|error| Error::io("spawn ssh for a port forward", &error))?;
+        Ok(Self { child })
+    }
 }
 
 impl ForwardGuard for SshTunnel {
@@ -72,34 +125,7 @@ pub(super) async fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forwa
     let local_port = reserve_local_port()?;
     let local: SocketAddr = ([127, 0, 0, 1], local_port).into();
 
-    let mut command = Command::new("ssh");
-    command.args(target.connection_flags());
-    // Do not run a remote command: this connection exists only to carry the
-    // forward, and a login shell on the far side would be one more thing to
-    // fail.
-    command.arg("-N");
-    // Fail loudly rather than sitting there connected with no forward, which
-    // would look identical to success until the first connection attempt.
-    command.arg("-o");
-    command.arg("ExitOnForwardFailure=yes");
-    // Notice a dead peer instead of holding a tunnel that stopped working.
-    command.arg("-o");
-    command.arg("ServerAliveInterval=15");
-    command.arg("-L");
-    command.arg(format!(
-        "127.0.0.1:{local_port}:{}:{}",
-        remote.ip(),
-        remote.port()
-    ));
-    command.arg(target.destination());
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::piped());
-
-    let child = command
-        .spawn()
-        .map_err(|error| Error::io("spawn ssh for a port forward", &error))?;
-    let mut tunnel = SshTunnel { child };
+    let mut tunnel = SshTunnel::spawn(&tunnel_command(target, local_port, remote))?;
 
     match wait_until_listening(&mut tunnel, local).await {
         Ok(()) => Ok(Forward::guarded(local, Box::new(tunnel))),
