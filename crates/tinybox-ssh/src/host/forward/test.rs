@@ -63,11 +63,14 @@ async fn an_unreachable_destination_fails_instead_of_hanging() -> Result<()> {
     assert!(
         matches!(
             outcome,
-            // The forward was refused, or never started accepting.
-            Some(Error::Backend {
-                operation: "open a port forward",
-                ..
-            }) | Some(Error::Io { .. }) // No `ssh` binary on this host.
+            // The forward was refused or never started accepting, or
+            // there is no `ssh` binary on this host to try it with.
+            Some(
+                Error::Backend {
+                    operation: "open a port forward",
+                    ..
+                } | Error::Io { .. }
+            )
         ),
         "unexpected outcome: {outcome:?}"
     );
