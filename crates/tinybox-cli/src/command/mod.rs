@@ -397,26 +397,9 @@ impl Cli {
                 let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
                 report(&output, out, err)
             }
-            Command::Spawn { id, argv } => {
-                let id = BoxId::new(id)?;
-                let sandbox = build(sandbox_of(&store, &id)?)?;
-                let process = sandbox.spawn(&id, &ExecRequest::new(argv)).await?;
-                line(out, process.as_ref())
-            }
-            Command::Ps { id, process } => {
-                let id = BoxId::new(id)?;
-                let sandbox = build(sandbox_of(&store, &id)?)?;
-                let running = sandbox.is_running(&id, &ProcessId::new(process)?).await?;
-                // A process that has exited is an answer, not a failure, so it
-                // is reported on stdout rather than as a non-zero exit.
-                line(out, if running { "running" } else { "gone" })
-            }
-            Command::Kill { id, process } => {
-                let id = BoxId::new(id)?;
-                let sandbox = build(sandbox_of(&store, &id)?)?;
-                sandbox.stop(&id, &ProcessId::new(process)?).await?;
-                line(out, "stopped")
-            }
+            Command::Spawn { id, argv } => spawn(&store, &backends, id, argv, out).await,
+            Command::Ps { id, process } => probe(&store, &backends, id, &process, out).await,
+            Command::Kill { id, process } => kill(&store, &backends, id, &process, out).await,
             Command::Forward { port, address } => {
                 forward(reach.as_ref(), (address, port).into(), out).await
             }
@@ -877,6 +860,73 @@ fn render_sync(outcome: &tinybox_sync::Sync) -> String {
 /// Returns [`Error::InvalidIdentifier`] when a Docker namespace is not a valid
 /// identifier.
 /// Destroy one box and print its identifier back.
+/// Start a command in a box and print the identifier for asking about it.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] when the box's sandbox cannot host a process
+/// between commands, and whatever the backend reports when the command could
+/// not be started.
+async fn spawn(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    argv: Vec<String>,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    let process = sandbox.spawn(&id, &ExecRequest::new(argv)).await?;
+    line(out, process.as_ref())
+}
+
+/// Report whether a spawned process is still running.
+///
+/// A process that has exited prints `gone` and exits zero: that it finished is
+/// an answer, and reporting it as a failure would be indistinguishable from an
+/// unreachable box.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] when the box's sandbox does not track
+/// detached processes, and a backend error when the box cannot be reached.
+async fn probe(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    process: &str,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    let running = sandbox
+        .is_running(&id, &ProcessId::new(process.to_owned())?)
+        .await?;
+    line(out, if running { "running" } else { "gone" })
+}
+
+/// Stop a spawned process.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] when the box's sandbox does not track
+/// detached processes, and a backend error when the box cannot be reached. A
+/// process that had already exited is not an error.
+async fn kill(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    process: &str,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    sandbox
+        .stop(&id, &ProcessId::new(process.to_owned())?)
+        .await?;
+    line(out, "stopped")
+}
+
 async fn remove(
     store: &Arc<dyn Store>,
     backends: &Backends<'_>,
