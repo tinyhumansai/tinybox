@@ -8,12 +8,13 @@
 
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tinybox_core::{Capability, Error, ExecOutput, ExecRequest, ForwardGuard as _, Host, Result};
 
 use super::super::{SshHost, SshTarget};
-use super::{SshTunnel, exit_diagnostic, tunnel_command, wait_until_listening};
+use super::{LISTEN_TIMEOUT, SshTunnel, exit_diagnostic, tunnel_command, wait_until_listening};
 
 /// A host that is not `local`, so an [`SshHost`] wrapping it is a chain.
 #[derive(Debug)]
@@ -89,7 +90,7 @@ async fn waiting_resolves_as_soon_as_something_accepts() -> Result<()> {
     let local: SocketAddr = listener.local_addr().map_err(|e| Error::io("addr", &e))?;
     let mut tunnel = stand_in(&["sleep", "30"])?;
 
-    let outcome = wait_until_listening(&mut tunnel, local).await;
+    let outcome = wait_until_listening(&mut tunnel, local, LISTEN_TIMEOUT).await;
 
     tunnel.close();
     assert!(outcome.is_ok(), "{outcome:?}");
@@ -107,11 +108,35 @@ async fn a_tunnel_that_dies_is_reported_with_its_own_diagnostic() -> Result<()> 
     let local: SocketAddr = unused.local_addr().map_err(|e| Error::io("addr", &e))?;
     drop(unused);
 
-    let outcome = wait_until_listening(&mut tunnel, local).await;
+    let outcome = wait_until_listening(&mut tunnel, local, LISTEN_TIMEOUT).await;
 
     match outcome.err() {
         Some(Error::Backend { message, .. }) => {
             assert!(message.contains("Permission denied"), "{message:?}");
+        }
+        other => assert_eq!(format!("{other:?}"), "a backend error"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn waiting_gives_up_rather_than_holding_a_tunnel_that_never_works() -> Result<()> {
+    // A tunnel whose `ssh` is alive but never binds — a forward the server
+    // silently dropped — has no event to wait for, so only the deadline ends
+    // it. Reported with the deadline in it, because "it did not work" without
+    // "and I waited this long" tells an operator nothing.
+    let mut tunnel = stand_in(&["sleep", "30"])?;
+    let unused = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| Error::io("bind", &e))?;
+    let local: SocketAddr = unused.local_addr().map_err(|e| Error::io("addr", &e))?;
+    drop(unused);
+
+    let outcome = wait_until_listening(&mut tunnel, local, Duration::from_millis(1)).await;
+
+    tunnel.close();
+    match outcome.err() {
+        Some(Error::Backend { message, .. }) => {
+            assert!(message.contains("did not start accepting"), "{message:?}");
+            assert!(message.contains("1ms"), "{message:?}");
         }
         other => assert_eq!(format!("{other:?}"), "a backend error"),
     }
