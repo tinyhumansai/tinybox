@@ -74,7 +74,10 @@ fn it_admits_it_confines_nothing() {
     assert!(!caps.is_suitable_for_untrusted_code());
     // Limits are declined rather than accepted and quietly ignored.
     assert!(!caps.supports(Capability::ResourceLimits));
-    assert!(caps.declared().is_empty());
+    // Detach is the one thing it does declare, and honestly: a box here is a
+    // directory on this machine, so a backgrounded process really does outlive
+    // the command that started it.
+    assert_eq!(caps.declared(), [Capability::Detach]);
 }
 
 #[tokio::test]
