@@ -5,7 +5,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
 
-mod quote;
 mod target;
 
 pub use target::SshTarget;
@@ -70,7 +69,7 @@ impl SshHost {
         // `--` separates ssh's own options from the remote command, so a
         // command starting with a dash cannot be read as an ssh flag.
         argv.push("--".to_owned());
-        argv.push(quote::remote_command(
+        argv.push(tinybox_core::shell::script(
             &request.argv,
             request.cwd.as_deref(),
             &request.env,
