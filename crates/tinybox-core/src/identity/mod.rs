@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 
 mod types;
 
-pub use types::{BoxId, HostRef, SandboxRef, SnapshotId, TemplateName};
+pub use types::{BoxId, HostRef, ProcessId, SandboxRef, SnapshotId, TemplateName};
 
 /// Whether `value` would be accepted as a tinybox identifier.
 ///
