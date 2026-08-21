@@ -29,6 +29,8 @@ use crate::identity::{BoxId, ProcessId, SnapshotId};
 use crate::spec::BoxSpec;
 
 mod forward;
+#[cfg(test)]
+mod forward_test;
 mod types;
 
 pub use forward::{Forward, ForwardGuard};
