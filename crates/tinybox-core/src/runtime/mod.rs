@@ -15,7 +15,7 @@
 //!
 //! [`Sandbox::capabilities`] must describe what the backend really does. Core
 //! checks the declaration before dispatching and surfaces
-//! [`Error::Unsupported`](crate::error::Error::Unsupported), so a backend should
+//! [`Error::Unsupported`], so a backend should
 //! return an accurate [`SandboxCapabilities`] and let the check fail rather
 //! than emulate something it cannot deliver.
 
@@ -113,8 +113,8 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownBox`](crate::error::Error::UnknownBox) when `id` does
-    /// not resolve, [`Error::InvalidState`](crate::error::Error::InvalidState) when
+    /// Returns [`Error::UnknownBox`] when `id` does
+    /// not resolve, [`Error::InvalidState`] when
     /// the box is not running, or a backend error when the command cannot be
     /// started.
     async fn exec(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecOutput>;
@@ -127,9 +127,9 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`](crate::error::Error::Unsupported) when this
+    /// Returns [`Error::Unsupported`] when this
     /// sandbox does not snapshot, or
-    /// [`Error::UnknownBox`](crate::error::Error::UnknownBox) when `id` does not
+    /// [`Error::UnknownBox`] when `id` does not
     /// resolve.
     async fn snapshot(&self, id: &BoxId) -> Result<SnapshotId>;
 
@@ -140,9 +140,9 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`](crate::error::Error::Unsupported) when this
+    /// Returns [`Error::Unsupported`] when this
     /// sandbox cannot fork, or
-    /// [`Error::UnknownSnapshot`](crate::error::Error::UnknownSnapshot) when
+    /// [`Error::UnknownSnapshot`] when
     /// `snapshot` does not resolve.
     async fn fork(&self, snapshot: &SnapshotId, spec: &BoxSpec) -> Result<BoxInfo>;
 
@@ -150,7 +150,7 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownBox`](crate::error::Error::UnknownBox) when `id` does
+    /// Returns [`Error::UnknownBox`] when `id` does
     /// not resolve.
     async fn inspect(&self, id: &BoxId) -> Result<BoxInfo>;
 
@@ -158,7 +158,7 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownBox`](crate::error::Error::UnknownBox) when `id` does
+    /// Returns [`Error::UnknownBox`] when `id` does
     /// not resolve.
     async fn destroy(&self, id: &BoxId) -> Result<()>;
 
@@ -170,7 +170,7 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// See [`detach`](crate::detach) for the mechanism, and for what a backend
     /// is promising by declaring
-    /// [`Capability::Detach`](crate::capability::Capability::Detach).
+    /// [`Capability::Detach`].
     ///
     /// # Errors
     ///
