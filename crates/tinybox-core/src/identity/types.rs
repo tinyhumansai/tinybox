@@ -59,6 +59,11 @@ macro_rules! identifier {
             /// `unwrap_or_else` there would be a branch no test could reach,
             /// and an unreachable branch in a coverage-gated crate gets
             /// "covered" by something meaningless.
+            ///
+            /// The macro emits this for all six identifiers and only
+            /// `ProcessId` mints its own today, so it is allowed to go unused
+            /// rather than complicating the macro with a flag for one caller.
+            #[allow(dead_code, reason = "generated for six types, minted by one")]
             pub(crate) fn from_generated(value: String) -> Self {
                 debug_assert!(
                     validate($kind, &value).is_ok(),
