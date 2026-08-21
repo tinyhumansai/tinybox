@@ -6,7 +6,7 @@
 //! — that waiting really does resolve when a listener appears and really does
 //! give up when the child dies.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +35,17 @@ impl Host for NotLocal {
 fn target() -> Result<SshTarget> {
     SshTarget::new("builder@example.invalid")
 }
+
+/// An address nothing can ever accept on.
+///
+/// Port 0 is not a connectable port — it means "let the OS choose" when
+/// binding, and connecting to it fails immediately. That makes it the one
+/// address these tests can rely on, where binding an ephemeral port and closing
+/// it cannot: the port is free the moment it is released, so a sibling test
+/// binding its own listener can land on exactly that number and the connect
+/// unexpectedly succeeds. That is a race these tests lost on CI and won
+/// locally, which is the worst way round.
+const NEVER_ACCEPTS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
 /// Start `argv` as a stand-in for the `ssh` that would carry a tunnel.
 fn stand_in(argv: &[&str]) -> Result<SshTunnel> {
@@ -103,12 +114,8 @@ async fn a_tunnel_that_dies_is_reported_with_its_own_diagnostic() -> Result<()> 
     // turn a rejected key into a ten-second hang and then a message saying
     // nothing about why.
     let mut tunnel = stand_in(&["/bin/sh", "-c", "echo 'Permission denied' >&2; exit 255"])?;
-    // Nothing will ever accept here; the child's death is what ends the wait.
-    let unused = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| Error::io("bind", &e))?;
-    let local: SocketAddr = unused.local_addr().map_err(|e| Error::io("addr", &e))?;
-    drop(unused);
 
-    let outcome = wait_until_listening(&mut tunnel, local, LISTEN_TIMEOUT).await;
+    let outcome = wait_until_listening(&mut tunnel, NEVER_ACCEPTS, LISTEN_TIMEOUT).await;
 
     match outcome.err() {
         Some(Error::Backend { message, .. }) => {
@@ -126,11 +133,8 @@ async fn waiting_gives_up_rather_than_holding_a_tunnel_that_never_works() -> Res
     // it. Reported with the deadline in it, because "it did not work" without
     // "and I waited this long" tells an operator nothing.
     let mut tunnel = stand_in(&["sleep", "30"])?;
-    let unused = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| Error::io("bind", &e))?;
-    let local: SocketAddr = unused.local_addr().map_err(|e| Error::io("addr", &e))?;
-    drop(unused);
 
-    let outcome = wait_until_listening(&mut tunnel, local, Duration::from_millis(1)).await;
+    let outcome = wait_until_listening(&mut tunnel, NEVER_ACCEPTS, Duration::from_millis(1)).await;
 
     tunnel.close();
     match outcome.err() {
