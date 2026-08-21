@@ -16,9 +16,9 @@ use super::target::SshTarget;
 
 /// How long to wait for the tunnel's local listener to start accepting.
 ///
-/// `ssh` binds the local side before the far side matters, so this is waiting
-/// on authentication and the forward request, not on whatever is listening
-/// over there. Reaching *that* is the caller's own health check to make.
+/// `ssh` binds the local side early — before authenticating, and before the far
+/// side has agreed to anything — so this waits on the listener appearing and
+/// nothing more. See [`open`] for what that does and does not prove.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often to retry the local connect while waiting.
@@ -111,12 +111,25 @@ fn reserve_local_port() -> Result<u16> {
 
 /// Open a tunnel from a local loopback port to `remote` on `target`.
 ///
+/// # What a successful return proves, and what it does not
+///
+/// It proves a local listener exists. It does **not** prove the far side is
+/// reachable: `ssh` binds the local port before it authenticates, so a
+/// destination that will be refused can still produce a working listener for a
+/// moment, and a connection through it then fails. `ExitOnForwardFailure=yes`
+/// and the child-death check below narrow that window rather than closing it,
+/// because it cannot be closed from here — only the far side knows.
+///
+/// So a caller that needs a *working* endpoint must check the endpoint. That is
+/// not a shortcoming of this function: whatever is listening over there has its
+/// own readiness, later than the tunnel's, and only the caller knows how to ask
+/// about it.
+///
 /// # Errors
 ///
 /// Returns [`Error::Io`] when a local port cannot be reserved or `ssh` cannot
-/// be started, and [`Error::Backend`] when the tunnel does not begin accepting
-/// connections within [`LISTEN_TIMEOUT`] — which is what a rejected key or a
-/// refused forward looks like from here.
+/// be started, and [`Error::Backend`] when `ssh` exits before the listener
+/// appears, or when it never appears within [`LISTEN_TIMEOUT`].
 pub(super) async fn open(target: &SshTarget, remote: SocketAddr) -> Result<Forward> {
     let local_port = reserve_local_port()?;
     let local: SocketAddr = ([127, 0, 0, 1], local_port).into();

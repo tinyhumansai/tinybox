@@ -193,26 +193,34 @@ async fn a_chained_host_refuses_rather_than_tunnelling_from_the_wrong_machine() 
 }
 
 #[tokio::test]
-async fn an_unreachable_destination_fails_instead_of_hanging() -> Result<()> {
-    // `BatchMode=yes` is what makes this a failure rather than a password
-    // prompt nobody is there to answer.
+async fn an_unreachable_destination_settles_quickly_instead_of_hanging() -> Result<()> {
+    // `BatchMode=yes` is what makes this settle at all: without it `ssh` would
+    // prompt for a password nobody is there to answer, and the call would hang
+    // rather than fail.
+    //
+    // Which way it settles is deliberately not asserted. `ssh` binds the local
+    // port before it authenticates, so an unreachable destination can produce a
+    // listener for a moment before dying — see `open`'s documentation. Pinning
+    // one outcome here would be pinning a race, and the property that matters
+    // is that neither outcome takes the full `LISTEN_TIMEOUT`.
     let host = SshHost::new(Arc::new(tinybox_host::LocalHost::new()), target()?);
 
-    let outcome = host.forward(([127, 0, 0, 1], 7788).into()).await.err();
+    let started = std::time::Instant::now();
+    let outcome = host.forward(([127, 0, 0, 1], 7788).into()).await;
+    let elapsed = started.elapsed();
 
-    assert!(
-        matches!(
-            outcome,
-            // The forward was refused or never started accepting, or there is
-            // no `ssh` binary on this host to try it with.
-            Some(
+    assert!(elapsed < LISTEN_TIMEOUT, "took {elapsed:?}");
+    if let Err(error) = outcome {
+        assert!(
+            matches!(
+                error,
                 Error::Backend {
                     operation: "open a port forward",
                     ..
-                } | Error::Io { .. }
-            )
-        ),
-        "unexpected outcome: {outcome:?}"
-    );
+                } | Error::Io { .. } // No `ssh` binary on this host.
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
     Ok(())
 }
