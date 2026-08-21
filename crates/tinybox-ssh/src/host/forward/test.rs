@@ -12,8 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tinybox_core::{Capability, Error, ExecOutput, ExecRequest, ForwardGuard as _, Host, Result};
 
-use super::{SshTunnel, exit_diagnostic, tunnel_command, wait_until_listening};
 use super::super::{SshHost, SshTarget};
+use super::{SshTunnel, exit_diagnostic, tunnel_command, wait_until_listening};
 
 /// A host that is not `local`, so an [`SshHost`] wrapping it is a chain.
 #[derive(Debug)]
@@ -49,13 +49,25 @@ fn the_tunnel_carries_only_the_forward() -> Result<()> {
     assert!(argv.contains(&"-N".to_owned()), "{argv:?}");
     // Without this, a refused forward leaves `ssh` connected and idle, which
     // looks exactly like success until the first connection attempt.
-    assert!(argv.contains(&"ExitOnForwardFailure=yes".to_owned()), "{argv:?}");
+    assert!(
+        argv.contains(&"ExitOnForwardFailure=yes".to_owned()),
+        "{argv:?}"
+    );
     // The local side is loopback-only: a forward reachable from the network
     // would republish the far machine's port to anyone who can reach this one.
-    let spec = argv.iter().position(|part| part == "-L").map(|at| &argv[at + 1]);
-    assert_eq!(spec.map(String::as_str), Some("127.0.0.1:54321:10.0.0.5:7788"));
+    let spec = argv
+        .iter()
+        .position(|part| part == "-L")
+        .map(|at| &argv[at + 1]);
+    assert_eq!(
+        spec.map(String::as_str),
+        Some("127.0.0.1:54321:10.0.0.5:7788")
+    );
     // The destination is last, so nothing after it can be read as a flag.
-    assert_eq!(argv.last().map(String::as_str), Some("builder@example.invalid"));
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some("builder@example.invalid")
+    );
     Ok(())
 }
 
