@@ -106,6 +106,15 @@ impl SandboxCapabilities {
         self.with(Capability::ResourceLimits)
     }
 
+    /// Declare that a process can be left running in a box and found again.
+    ///
+    /// See [`Capability::Detach`] for what a backend is promising. A sandbox
+    /// that cannot later locate or stop such a process must not call this.
+    #[must_use]
+    pub const fn with_detach(self) -> Self {
+        self.with(Capability::Detach)
+    }
+
     /// Add one capability to the set.
     ///
     /// Snapshot capabilities are not settable this way: what a sandbox can
