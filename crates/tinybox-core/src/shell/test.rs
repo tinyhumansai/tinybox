@@ -1,4 +1,4 @@
-//! Tests for remote shell quoting.
+//! Tests for POSIX shell quoting.
 //!
 //! A bug here is a command-injection bug, so these are exhaustive about the
 //! metacharacters a shell acts on rather than sampling a few. `live_ssh.rs`
@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::{command_line, remote_command};
+use super::{command_line, script};
 
 /// Every construct a POSIX shell would otherwise act on.
 const DANGEROUS: [&str; 16] = [
@@ -104,7 +104,7 @@ fn a_quoted_argument_round_trips_through_a_real_shell() {
 fn a_bare_command_has_no_prefix() {
     let argv = vec!["ls".to_owned(), "-la".to_owned()];
 
-    assert_eq!(remote_command(&argv, None, &BTreeMap::new()), "'ls' '-la'");
+    assert_eq!(script(&argv, None, &BTreeMap::new()), "'ls' '-la'");
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn a_working_directory_is_entered_first_and_chained_with_and() {
     // `&&` rather than `;` so a missing directory fails the command instead of
     // running it somewhere unexpected.
     assert_eq!(
-        remote_command(&argv, Some(Path::new("/srv/work")), &BTreeMap::new()),
+        script(&argv, Some(Path::new("/srv/work")), &BTreeMap::new()),
         "cd '/srv/work' && 'ls'"
     );
 }
@@ -124,11 +124,11 @@ fn a_working_directory_with_a_space_or_quote_is_quoted() {
     let argv = vec!["pwd".to_owned()];
 
     assert_eq!(
-        remote_command(&argv, Some(Path::new("/srv/my work")), &BTreeMap::new()),
+        script(&argv, Some(Path::new("/srv/my work")), &BTreeMap::new()),
         "cd '/srv/my work' && 'pwd'"
     );
     assert_eq!(
-        remote_command(&argv, Some(Path::new("/srv/it's")), &BTreeMap::new()),
+        script(&argv, Some(Path::new("/srv/it's")), &BTreeMap::new()),
         r"cd '/srv/it'\''s' && 'pwd'"
     );
 }
@@ -140,7 +140,7 @@ fn environment_is_applied_with_env_and_fully_quoted() {
     env.insert("SIMPLE".to_owned(), "value".to_owned());
 
     assert_eq!(
-        remote_command(&argv, None, &env),
+        script(&argv, None, &env),
         "env 'SIMPLE=value' 'printenv'"
     );
 }
@@ -153,7 +153,7 @@ fn a_value_that_looks_like_a_command_stays_a_value() {
 
     // The whole `KEY=value` pair is one quoted word, so the semicolon is data.
     assert_eq!(
-        remote_command(&argv, None, &env),
+        script(&argv, None, &env),
         "env 'EVIL=; rm -rf /' 'printenv'"
     );
 }
@@ -168,7 +168,7 @@ fn a_directory_and_an_environment_compose() {
     // Ordered, because the environment is a BTreeMap: two requests differing
     // only in insertion order produce the same command.
     assert_eq!(
-        remote_command(&argv, Some(Path::new("/w")), &env),
+        script(&argv, Some(Path::new("/w")), &env),
         "cd '/w' && env 'A=1' 'B=2' 'make'"
     );
 }
