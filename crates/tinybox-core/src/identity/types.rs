@@ -123,3 +123,17 @@ identifier!(
     SandboxRef,
     "sandbox reference"
 );
+
+identifier!(
+    /// Identifies one detached process inside a box.
+    ///
+    /// Deliberately *not* an operating-system pid. None of the transports
+    /// tinybox speaks hands back a process handle a caller could hold — `docker
+    /// exec` and `ssh` both return only what the command printed — so tinybox
+    /// mints this itself and [`detach`](crate::detach) records the real pid
+    /// beside it, inside the box. The identifier is therefore stable across
+    /// reconnects and meaningful on the caller's side, which a pid from a
+    /// foreign process table is not.
+    ProcessId,
+    "process id"
+);
