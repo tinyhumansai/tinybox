@@ -1385,6 +1385,10 @@ async fn spawning_into_a_sandbox_that_cannot_detach_is_refused() -> Result<()> {
     let spawned = invoke(dir.path(), &["spawn", "box-0", "sleep", "30"]).await;
 
     assert_eq!(spawned.code, EXIT_TINYBOX_ERROR);
-    assert!(spawned.err.contains("detached processes"), "{}", spawned.err);
+    assert!(
+        spawned.err.contains("detached processes"),
+        "{}",
+        spawned.err
+    );
     Ok(())
 }

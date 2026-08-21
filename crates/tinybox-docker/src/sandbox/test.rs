@@ -830,7 +830,9 @@ async fn a_failed_start_carries_the_containers_diagnostic() -> Result<()> {
     host.push_ok("running"); // inspect
     host.push_failure("/bin/sh: openhuman-core: not found");
 
-    let outcome = sandbox.spawn(&info.id, &ExecRequest::new(["openhuman-core"])).await;
+    let outcome = sandbox
+        .spawn(&info.id, &ExecRequest::new(["openhuman-core"]))
+        .await;
 
     assert_eq!(
         outcome.err(),

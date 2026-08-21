@@ -139,10 +139,7 @@ fn environment_is_applied_with_env_and_fully_quoted() {
     let mut env = BTreeMap::new();
     env.insert("SIMPLE".to_owned(), "value".to_owned());
 
-    assert_eq!(
-        script(&argv, None, &env),
-        "env 'SIMPLE=value' 'printenv'"
-    );
+    assert_eq!(script(&argv, None, &env), "env 'SIMPLE=value' 'printenv'");
 }
 
 #[test]

@@ -272,7 +272,9 @@ async fn a_local_forward_is_the_address_itself() -> Result<()> {
     // Nothing to tunnel: a port published on this machine is already reachable
     // from it. The method exists so a caller can ask any host for reach without
     // first asking which kind of host it has.
-    let forwarded = LocalHost::new().forward(([127, 0, 0, 1], 7788).into()).await?;
+    let forwarded = LocalHost::new()
+        .forward(([127, 0, 0, 1], 7788).into())
+        .await?;
 
     assert_eq!(forwarded.local_addr(), ([127, 0, 0, 1], 7788).into());
     assert!(forwarded.is_direct());
