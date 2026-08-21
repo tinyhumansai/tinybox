@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
+use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
 
+mod forward;
 mod target;
 
 pub use target::SshTarget;
@@ -112,7 +113,48 @@ impl Host for SshHost {
         }
         self.inner.run(&forwarded).await
     }
+
+    /// Open a tunnel from this machine to `remote` on the far machine.
+    ///
+    /// This is the half of reach that command dispatch cannot cover. A sandbox
+    /// publishes a guest port to *its host*, and when that host is over there,
+    /// publishing is all it can do — the caller still has no route. `ssh -L`
+    /// is the route, so it belongs here rather than in any sandbox.
+    ///
+    /// # Only from a local inner host
+    ///
+    /// Every other operation on this type composes freely, because it builds a
+    /// command line and lets the inner host decide where it runs. A tunnel
+    /// cannot: it is a process that has to keep running, which
+    /// [`Host::run`] has no way to express. So a chained `SshHost` — reaching
+    /// one machine through another — refuses rather than opening a tunnel on
+    /// the wrong machine and reporting an address that leads nowhere.
+    /// `ProxyJump` in the user's SSH config is the supported way to do that,
+    /// and it needs no code here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] when the inner host is not the local
+    /// machine, [`Error::Io`] when `ssh` cannot be started, and
+    /// [`Error::Backend`] when the forward is refused or never starts
+    /// accepting.
+    async fn forward(&self, remote: std::net::SocketAddr) -> Result<Forward> {
+        if self.inner.name() != LOCAL_HOST_NAME {
+            return Err(Error::Unsupported {
+                sandbox: NAME.to_owned(),
+                capability: tinybox_core::Capability::PortForward,
+            });
+        }
+        forward::open(&self.target, remote).await
+    }
 }
+
+/// The inner host a tunnel can be opened from.
+///
+/// Matched by name rather than by type so that this crate keeps its
+/// dependency-free relationship with `tinybox-host`; the name is the same
+/// registry key [`HostRef`](tinybox_core::HostRef) uses.
+const LOCAL_HOST_NAME: &str = "local";
 
 #[cfg(test)]
 mod test;
