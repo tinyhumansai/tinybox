@@ -747,3 +747,105 @@ async fn a_new_container_records_when_it_was_created() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_detached_process_is_started_through_docker_exec() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    host.push_ok("running"); // inspect
+
+    let process = sandbox
+        .spawn(&info.id, &ExecRequest::new(["openhuman-core", "serve"]))
+        .await?;
+
+    let argv = host.command(2).unwrap_or_default();
+    assert_eq!(argv[0..2], ["docker", "exec"]);
+    // No `--detach`: the wrapper's own `&` is what backgrounds the process,
+    // which is also what makes the pid recoverable. `docker exec --detach`
+    // hands back nothing a caller could name.
+    assert!(!argv.contains(&"--detach".to_owned()), "{argv:?}");
+    let line = argv.last().map(String::as_str).unwrap_or_default();
+    assert!(line.contains("'openhuman-core' 'serve'"), "{line:?}");
+    assert!(line.contains(process.as_str()), "{line:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_detach_wrapper_carries_cwd_and_env_rather_than_docker_flags() -> Result<()> {
+    // Both would work, but only one of them survives the shell that has to
+    // background the command, so the wrapper owns them and `args::exec` sees a
+    // request with neither.
+    let (sandbox, host, _store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    host.push_ok("running"); // inspect
+
+    sandbox
+        .spawn(
+            &info.id,
+            &ExecRequest::new(["server"])
+                .with_cwd("/srv/work")
+                .with_env("PORT", "7788"),
+        )
+        .await?;
+
+    let argv = host.command(2).unwrap_or_default();
+    assert!(!argv.contains(&"--workdir".to_owned()), "{argv:?}");
+    assert!(!argv.contains(&"--env".to_owned()), "{argv:?}");
+    let line = argv.last().map(String::as_str).unwrap_or_default();
+    assert!(line.contains("cd '/srv/work' &&"), "{line:?}");
+    assert!(line.contains("env 'PORT=7788'"), "{line:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_probe_answers_from_what_the_container_printed() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    host.push_ok("running"); // inspect
+    host.push_ok("running"); // the probe itself
+
+    assert!(
+        sandbox
+            .is_running(&info.id, &tinybox_core::ProcessId::new("p1-0")?)
+            .await?
+    );
+
+    host.push_ok("running"); // inspect
+    host.push_ok("gone");
+    assert!(
+        !sandbox
+            .is_running(&info.id, &tinybox_core::ProcessId::new("p1-0")?)
+            .await?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_start_carries_the_containers_diagnostic() -> Result<()> {
+    // Unlike `exec`, where a non-zero status is a result, a detached start that
+    // fails means no process exists — so it is an error, not an empty success
+    // the caller would later probe and find "gone" for no stated reason.
+    let (sandbox, host, _store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    host.push_ok("running"); // inspect
+    host.push_failure("/bin/sh: openhuman-core: not found");
+
+    let outcome = sandbox.spawn(&info.id, &ExecRequest::new(["openhuman-core"])).await;
+
+    assert_eq!(
+        outcome.err(),
+        Some(Error::Backend {
+            sandbox: NAME.to_owned(),
+            operation: "start a detached process",
+            message: "/bin/sh: openhuman-core: not found".to_owned(),
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn detach_is_declared_because_a_container_persists_between_commands() {
+    let declared = DockerSandbox::declared_capabilities();
+
+    assert!(declared.supports(Capability::Detach));
+}
