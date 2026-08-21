@@ -117,7 +117,6 @@ impl PassthroughSandbox {
         };
         Ok(resolved)
     }
-}
 
     /// Look `id` up, check it accepts commands, and resolve `request`
     /// against its spec.
