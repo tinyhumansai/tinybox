@@ -533,13 +533,16 @@ async fn inspect_lists_what_the_sandbox_declares() -> Result<()> {
 
     let inspected = invoke(dir.path(), &["inspect", "box-0"]).await;
 
-    // Passthrough declares nothing, and says that rather than printing an
-    // empty list the reader has to interpret.
+    // Passthrough declares detached processes and nothing else: a box here is
+    // an ordinary directory on this machine, so a backgrounded process really
+    // does survive between commands, but there is no filesystem boundary to
+    // snapshot and no limit it can apply.
     assert!(
-        inspected
-            .out
-            .contains("supports:   nothing beyond running commands")
+        inspected.out.contains("supports:   detached processes"),
+        "{}",
+        inspected.out
     );
+    assert!(!inspected.out.contains("filesystem snapshots"));
     Ok(())
 }
 
