@@ -59,12 +59,17 @@ async fn an_unreachable_destination_fails_instead_of_hanging() -> Result<()> {
 
     let outcome = host.forward(([127, 0, 0, 1], 7788).into()).await;
 
-    match outcome.err() {
-        Some(Error::Backend { operation, .. }) => assert_eq!(operation, "open a port forward"),
-        // No `ssh` binary on this host: nothing to test, and `Io` is the
-        // honest report for it.
-        Some(Error::Io { .. }) => {}
-        other => assert!(false, "unexpected outcome: {other:?}"),
-    }
+    let outcome = outcome.err();
+    assert!(
+        matches!(
+            outcome,
+            // The forward was refused, or never started accepting.
+            Some(Error::Backend {
+                operation: "open a port forward",
+                ..
+            }) | Some(Error::Io { .. }) // No `ssh` binary on this host.
+        ),
+        "unexpected outcome: {outcome:?}"
+    );
     Ok(())
 }
