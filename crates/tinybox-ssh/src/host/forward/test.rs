@@ -2,19 +2,21 @@
 //!
 //! Opening a real tunnel needs a real sshd, which is `live_ssh.rs`'s job. What
 //! is checked here is everything that can be wrong *before* a packet moves: the
-//! refusal a chained host gets, and that a failed open leaves no `ssh` behind.
+//! refusal a chained host gets, and that an unreachable destination fails
+//! rather than hanging on a prompt.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tinybox_core::{Capability, Error, ExecOutput, ExecRequest, Host, Result};
 
 use super::super::{SshHost, SshTarget};
 
-/// A host that is not `local`, so an `SshHost` wrapping it is a chain.
+/// A host that is not `local`, so an [`SshHost`] wrapping it is a chain.
 #[derive(Debug)]
 struct NotLocal;
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Host for NotLocal {
     fn name(&self) -> &'static str {
         "ssh"
@@ -25,48 +27,44 @@ impl Host for NotLocal {
     }
 }
 
-fn target() -> SshTarget {
-    SshTarget::new("builder@example.invalid").expect("a valid destination")
+/// A destination in a reserved TLD, so no test can reach a real machine.
+fn target() -> Result<SshTarget> {
+    SshTarget::new("builder@example.invalid")
 }
 
 #[tokio::test]
-async fn a_chained_host_refuses_rather_than_tunnelling_from_the_wrong_machine() {
+async fn a_chained_host_refuses_rather_than_tunnelling_from_the_wrong_machine() -> Result<()> {
     // Every other operation composes, because it is a command line the inner
     // host runs. A tunnel is a process that has to keep running, so opening it
     // here would put it on this machine and report an address leading nowhere.
-    let chained = SshHost::new(Arc::new(NotLocal), target());
+    let chained = SshHost::new(Arc::new(NotLocal), target()?);
 
-    let error = chained
-        .forward(([127, 0, 0, 1], 7788).into())
-        .await
-        .expect_err("a chained forward is refused");
+    let outcome = chained.forward(([127, 0, 0, 1], 7788).into()).await;
 
     assert_eq!(
-        error,
-        Error::Unsupported {
+        outcome.err(),
+        Some(Error::Unsupported {
             sandbox: "ssh".to_owned(),
             capability: Capability::PortForward,
-        }
+        })
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn an_unreachable_destination_fails_instead_of_hanging() {
+async fn an_unreachable_destination_fails_instead_of_hanging() -> Result<()> {
     // `BatchMode=yes` is what makes this a failure rather than a password
-    // prompt nobody is there to answer. `.invalid` is reserved by RFC 2606, so
-    // this cannot accidentally reach a real machine.
-    let host = SshHost::new(Arc::new(tinybox_host::LocalHost::new()), target());
+    // prompt nobody is there to answer.
+    let host = SshHost::new(Arc::new(tinybox_host::LocalHost::new()), target()?);
 
-    let result = host.forward(([127, 0, 0, 1], 7788).into()).await;
+    let outcome = host.forward(([127, 0, 0, 1], 7788).into()).await;
 
-    match result {
-        Err(Error::Backend { operation, .. }) => {
-            assert_eq!(operation, "open a port forward");
-        }
-        // No `ssh` binary on this host: nothing to test, and `Io` is the honest
-        // report for it.
-        Err(Error::Io { .. }) => {}
-        Err(other) => panic!("unexpected error: {other:?}"),
-        Ok(_) => panic!("a forward to example.invalid must not succeed"),
+    match outcome.err() {
+        Some(Error::Backend { operation, .. }) => assert_eq!(operation, "open a port forward"),
+        // No `ssh` binary on this host: nothing to test, and `Io` is the
+        // honest report for it.
+        Some(Error::Io { .. }) => {}
+        other => assert!(false, "unexpected outcome: {other:?}"),
     }
+    Ok(())
 }
