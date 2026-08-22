@@ -51,6 +51,28 @@ macro_rules! identifier {
                 Ok(Self(value))
             }
 
+            #[doc = concat!("Wrap a ", $kind, " this crate generated itself.")]
+            ///
+            /// Skips validation, which is sound only because the caller built
+            /// the text from a fixed pattern. It exists so that an internally
+            /// minted identifier has no impossible error arm: an
+            /// `unwrap_or_else` there would be a branch no test could reach,
+            /// and an unreachable branch in a coverage-gated crate gets
+            /// "covered" by something meaningless.
+            ///
+            /// The macro emits this for all six identifiers and only
+            /// `ProcessId` mints its own today, so it is allowed to go unused
+            /// rather than complicating the macro with a flag for one caller.
+            #[allow(dead_code, reason = "generated for six types, minted by one")]
+            pub(crate) fn from_generated(value: String) -> Self {
+                debug_assert!(
+                    validate($kind, &value).is_ok(),
+                    "generated {} is not valid: {value:?}",
+                    $kind,
+                );
+                Self(value)
+            }
+
             #[doc = concat!("Borrow this ", $kind, " as a string slice.")]
             #[must_use]
             pub fn as_str(&self) -> &str {
@@ -122,4 +144,18 @@ identifier!(
     /// confinement wrapped around a process, such as `docker` or `namespace`.
     SandboxRef,
     "sandbox reference"
+);
+
+identifier!(
+    /// Identifies one detached process inside a box.
+    ///
+    /// Deliberately *not* an operating-system pid. None of the transports
+    /// tinybox speaks hands back a process handle a caller could hold — `docker
+    /// exec` and `ssh` both return only what the command printed — so tinybox
+    /// mints this itself and [`detach`](crate::detach) records the real pid
+    /// beside it, inside the box. The identifier is therefore stable across
+    /// reconnects and meaningful on the caller's side, which a pid from a
+    /// foreign process table is not.
+    ProcessId,
+    "process id"
 );

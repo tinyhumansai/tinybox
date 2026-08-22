@@ -11,7 +11,8 @@ const MICROVM: SandboxCapabilities = SandboxCapabilities::new(
 .with_fork()
 .with_pause_resume()
 .with_port_forward()
-.with_resource_limits();
+.with_resource_limits()
+.with_detach();
 
 /// A container sandbox: isolated and snapshottable, but no memory capture.
 const CONTAINER: SandboxCapabilities =
@@ -33,6 +34,7 @@ fn passthrough_admits_it_isolates_nothing() {
     assert!(!caps.supports(Capability::FilesystemSnapshot));
     assert!(!caps.supports(Capability::MemorySnapshot));
     assert!(!caps.supports(Capability::ResourceLimits));
+    assert!(!caps.supports(Capability::Detach));
 }
 
 #[test]
@@ -53,6 +55,7 @@ fn each_builder_method_adds_exactly_one_capability() {
         base.with_resource_limits().declared(),
         [Capability::ResourceLimits]
     );
+    assert_eq!(base.with_detach().declared(), [Capability::Detach]);
 }
 
 #[test]
@@ -129,6 +132,7 @@ fn capabilities_do_not_share_a_bit() {
             Capability::ResourceLimits,
             SandboxCapabilities::with_resource_limits,
         ),
+        (Capability::Detach, SandboxCapabilities::with_detach),
     ] {
         built = add(built);
         expected.push(capability);

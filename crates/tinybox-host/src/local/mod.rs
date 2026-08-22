@@ -1,7 +1,7 @@
 //! Running commands on the machine tinybox is running on.
 
 use async_trait::async_trait;
-use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
+use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
@@ -111,6 +111,21 @@ impl Host for LocalHost {
             .await
             .map_err(|error| Error::io("wait", &error))?;
         Ok(Self::collect(&output))
+    }
+
+    /// Hand the address straight back.
+    ///
+    /// A port published on this machine is already reachable from this
+    /// machine, so there is nothing to tunnel and nothing to hold open. The
+    /// method exists so that a caller can ask any host for reach without first
+    /// asking which kind of host it has — the difference between `local` and
+    /// `ssh` should not leak into code that only wants somewhere to connect.
+    ///
+    /// # Errors
+    ///
+    /// Never. The signature is fallible because other hosts' forwards are.
+    async fn forward(&self, remote: std::net::SocketAddr) -> Result<Forward> {
+        Ok(Forward::direct(remote))
     }
 }
 

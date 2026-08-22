@@ -35,8 +35,9 @@ use async_trait::async_trait;
 
 use crate::capability::{Capability, SandboxCapabilities};
 use crate::clock::{Clock, SystemClock};
+use crate::detach;
 use crate::error::{Error, Result};
-use crate::identity::{BoxId, SnapshotId};
+use crate::identity::{BoxId, ProcessId, SnapshotId};
 use crate::runtime::{BoxInfo, BoxState, ExecOutput, ExecRequest, Host, Sandbox};
 use crate::spec::{BoxSpec, WorkspaceSource};
 use crate::store::Store;
@@ -116,6 +117,30 @@ impl PassthroughSandbox {
         };
         Ok(resolved)
     }
+
+    /// Look `id` up, check it accepts commands, and resolve `request`
+    /// against its spec.
+    ///
+    /// Shared by `exec` and the detach trio so that a backgrounded command
+    /// sees the same working directory, environment, and state check a
+    /// foreground one does. Having two paths here is how they drift.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownBox`] when `id` does not resolve,
+    /// [`Error::InvalidState`] when the box is not accepting commands, and
+    /// [`Error::EmptyCommand`] when the request names no program.
+    fn resolved_for(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecRequest> {
+        let info = self.store.get(id)?;
+        if !info.state.accepts_commands() {
+            return Err(Error::InvalidState {
+                id: id.as_str().to_owned(),
+                actual: info.state,
+                expected: BoxState::Ready,
+            });
+        }
+        Self::resolve(&info.spec, request)
+    }
 }
 
 #[async_trait]
@@ -125,7 +150,12 @@ impl Sandbox for PassthroughSandbox {
     }
 
     fn capabilities(&self) -> SandboxCapabilities {
-        SandboxCapabilities::PASSTHROUGH
+        // Detach, and nothing else. A passthrough box is an ordinary directory
+        // on an ordinary machine, so a backgrounded process keeps running and
+        // its pid file is still there next time — which is the whole of what
+        // `Capability::Detach` promises. The refusals below are unaffected:
+        // this sandbox still has no filesystem boundary to snapshot.
+        SandboxCapabilities::PASSTHROUGH.with_detach()
     }
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
@@ -138,16 +168,7 @@ impl Sandbox for PassthroughSandbox {
     }
 
     async fn exec(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecOutput> {
-        let info = self.store.get(id)?;
-        if !info.state.accepts_commands() {
-            return Err(Error::InvalidState {
-                id: id.as_str().to_owned(),
-                actual: info.state,
-                expected: BoxState::Ready,
-            });
-        }
-
-        let resolved = Self::resolve(&info.spec, request)?;
+        let resolved = self.resolved_for(id, request)?;
         self.host.run(&resolved).await
     }
 
@@ -171,6 +192,35 @@ impl Sandbox for PassthroughSandbox {
 
     async fn destroy(&self, id: &BoxId) -> Result<()> {
         self.store.remove(id)
+    }
+
+    async fn spawn(&self, id: &BoxId, request: &ExecRequest) -> Result<ProcessId> {
+        let process = detach::mint();
+        // Resolved first, so the box's own cwd and environment reach the
+        // backgrounded command exactly as they would a foreground one.
+        let resolved = self.resolved_for(id, request)?;
+        let started = detach::start(&process, &resolved)?;
+        let output = self.host.run(&started).await?;
+        if !output.succeeded() {
+            return Err(Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "start a detached process",
+                message: output.stderr_lossy().trim().to_owned(),
+            });
+        }
+        Ok(process)
+    }
+
+    async fn is_running(&self, id: &BoxId, process: &ProcessId) -> Result<bool> {
+        let resolved = self.resolved_for(id, &detach::probe(process))?;
+        let output = self.host.run(&resolved).await?;
+        Ok(output.stdout_lossy().trim() == detach::RUNNING)
+    }
+
+    async fn stop(&self, id: &BoxId, process: &ProcessId) -> Result<()> {
+        let resolved = self.resolved_for(id, &detach::stop(process, detach::DEFAULT_GRACE))?;
+        self.host.run(&resolved).await?;
+        Ok(())
     }
 }
 

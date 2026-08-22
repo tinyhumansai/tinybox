@@ -106,19 +106,28 @@ pub enum Capability {
     PortForward,
     /// Applying the limits in [`Resources`](crate::spec::Resources).
     ResourceLimits,
+    /// Hosting a process that outlives the command that started it.
+    ///
+    /// A sandbox declares this when a caller can leave a server running in a
+    /// box and come back to it — see [`detach`](crate::detach). A sandbox whose
+    /// boxes do not persist writes between commands, or that returns only what
+    /// a command printed, must decline: a background process it cannot later
+    /// find or stop is worse than a refusal.
+    Detach,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
     ///
     /// Used to render a declared set; keep it in step with the enum.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::FilesystemSnapshot,
         Self::MemorySnapshot,
         Self::Fork,
         Self::PauseResume,
         Self::PortForward,
         Self::ResourceLimits,
+        Self::Detach,
     ];
 
     /// This capability's bit within a [`SandboxCapabilities`] feature set.
@@ -132,6 +141,7 @@ impl Capability {
             Self::PauseResume => 1 << 3,
             Self::PortForward => 1 << 4,
             Self::ResourceLimits => 1 << 5,
+            Self::Detach => 1 << 6,
         }
     }
 }
@@ -145,6 +155,7 @@ impl fmt::Display for Capability {
             Self::PauseResume => "pause and resume",
             Self::PortForward => "port forwarding",
             Self::ResourceLimits => "resource limits",
+            Self::Detach => "detached processes",
         };
         formatter.write_str(text)
     }

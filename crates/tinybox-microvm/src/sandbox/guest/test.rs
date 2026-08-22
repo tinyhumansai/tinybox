@@ -257,8 +257,14 @@ fn decode(encoded: &str) -> String {
         }
     }
 
+    // `as_chunks` rather than `chunks_exact(8)`: the size is a constant, so the
+    // array form is what clippy asks for and it drops the trailing partial
+    // chunk the same way. Unrelated to this test's subject; the lint arrived
+    // with a newer toolchain.
     let bytes = bits
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|chunk| chunk.iter().fold(0u8, |acc, bit| (acc << 1) | *bit))
         .collect::<Vec<_>>();
     String::from_utf8_lossy(&bytes).into_owned()

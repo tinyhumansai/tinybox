@@ -533,13 +533,16 @@ async fn inspect_lists_what_the_sandbox_declares() -> Result<()> {
 
     let inspected = invoke(dir.path(), &["inspect", "box-0"]).await;
 
-    // Passthrough declares nothing, and says that rather than printing an
-    // empty list the reader has to interpret.
+    // Passthrough declares detached processes and nothing else: a box here is
+    // an ordinary directory on this machine, so a backgrounded process really
+    // does survive between commands, but there is no filesystem boundary to
+    // snapshot and no limit it can apply.
     assert!(
-        inspected
-            .out
-            .contains("supports:   nothing beyond running commands")
+        inspected.out.contains("supports:   detached processes"),
+        "{}",
+        inspected.out
     );
+    assert!(!inspected.out.contains("filesystem snapshots"));
     Ok(())
 }
 
@@ -1297,4 +1300,95 @@ fn write_boxes(dir: &Path, boxes: &[(&str, Option<std::time::SystemTime>)]) -> R
     }
     std::fs::write(dir.join("boxes.json"), format!("{{{}}}", records.join(",")))
         .map_err(|error| Error::io("write", &error))
+}
+
+#[tokio::test]
+async fn a_spawned_process_outlives_the_command_that_started_it() -> Result<()> {
+    // The whole point of `spawn` over `exec`: a separate invocation is standing
+    // in for a separate process, and the thing started by the first one is
+    // still there for the second to ask about.
+    let dir = temp_dir()?;
+    invoke(dir.path(), &["create", "--dir", "/tmp"]).await;
+
+    let spawned = invoke(dir.path(), &["spawn", "box-0", "sleep", "30"]).await;
+    assert_eq!(spawned.code, 0);
+    let process = spawned.out.trim().to_owned();
+    assert!(!process.is_empty(), "spawn prints an identifier");
+
+    let running = invoke(dir.path(), &["ps", "box-0", &process]).await;
+    assert_eq!(running.out.trim(), "running");
+
+    let killed = invoke(dir.path(), &["kill", "box-0", &process]).await;
+    assert_eq!(killed.code, 0);
+
+    let gone = invoke(dir.path(), &["ps", "box-0", &process]).await;
+    // `gone` on stdout with a zero exit: the process finishing is an answer,
+    // not a failure, and reporting it as one would be indistinguishable from
+    // an unreachable box.
+    assert_eq!(gone.code, 0);
+    assert_eq!(gone.out.trim(), "gone");
+    Ok(())
+}
+
+#[tokio::test]
+async fn asking_about_a_process_that_was_never_started_answers_gone() -> Result<()> {
+    let dir = temp_dir()?;
+    invoke(dir.path(), &["create", "--dir", "/tmp"]).await;
+
+    let answer = invoke(dir.path(), &["ps", "box-0", "p1-0"]).await;
+
+    assert_eq!(answer.code, 0);
+    assert_eq!(answer.out.trim(), "gone");
+    Ok(())
+}
+
+#[tokio::test]
+async fn killing_a_process_that_has_already_exited_is_not_an_error() -> Result<()> {
+    // Stopping something already stopped is the outcome the caller wanted.
+    let dir = temp_dir()?;
+    invoke(dir.path(), &["create", "--dir", "/tmp"]).await;
+
+    let killed = invoke(dir.path(), &["kill", "box-0", "p1-0"]).await;
+
+    assert_eq!(killed.code, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_local_forward_reports_the_address_and_returns() -> Result<()> {
+    // Nothing is held open on a local host, so blocking would look like a
+    // working tunnel and be a hang.
+    let dir = temp_dir()?;
+
+    let forwarded = invoke(dir.path(), &["forward", "7788"]).await;
+
+    assert_eq!(forwarded.code, 0);
+    assert_eq!(forwarded.out.trim(), "127.0.0.1:7788");
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawning_into_a_sandbox_that_cannot_detach_is_refused() -> Result<()> {
+    // A namespace box is a record and a bound directory rather than a running
+    // container, so a backgrounded process would not survive to be found. It
+    // says so instead.
+    let dir = temp_dir()?;
+    let created = invoke(
+        dir.path(),
+        &["create", "--sandbox", "namespace", "--dir", "/tmp"],
+    )
+    .await;
+    if created.code != 0 {
+        return Ok(()); // No bubblewrap on this host.
+    }
+
+    let spawned = invoke(dir.path(), &["spawn", "box-0", "sleep", "30"]).await;
+
+    assert_eq!(spawned.code, EXIT_TINYBOX_ERROR);
+    assert!(
+        spawned.err.contains("detached processes"),
+        "{}",
+        spawned.err
+    );
+    Ok(())
 }

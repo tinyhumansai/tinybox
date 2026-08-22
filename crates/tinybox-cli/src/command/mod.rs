@@ -8,7 +8,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tinybox_core::{
     BoxId, BoxInfo, BoxSpec, Clock, Error, ExecRequest, Host, HostRef, NetworkPolicy,
-    PassthroughSandbox, Placement, PortMapping, Sandbox, SandboxRef, SnapshotId, Store,
+    PassthroughSandbox, Placement, PortMapping, ProcessId, Sandbox, SandboxRef, SnapshotId, Store,
     SystemClock, TemplateName, Templates, WorkspaceSource, passthrough,
 };
 use tinybox_docker::DockerSandbox;
@@ -176,6 +176,47 @@ enum Command {
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
         argv: Vec<String>,
+    },
+    /// Start a command in a box and leave it running.
+    ///
+    /// Where `exec` waits, this returns a process id as soon as the command is
+    /// started. It is how a server gets into a box; `exec` would never return.
+    Spawn {
+        /// Which box to start it in.
+        id: String,
+        /// The command and its arguments.
+        #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
+        argv: Vec<String>,
+    },
+    /// Report whether a spawned process is still running.
+    Ps {
+        /// Which box it was started in.
+        id: String,
+        /// The process id `spawn` printed.
+        process: String,
+    },
+    /// Stop a spawned process.
+    ///
+    /// Succeeds when it has already exited: stopping something already stopped
+    /// is the outcome the caller wanted.
+    Kill {
+        /// Which box it was started in.
+        id: String,
+        /// The process id `spawn` printed.
+        process: String,
+    },
+    /// Make a port on the box's machine reachable from this one.
+    ///
+    /// Publishing a port (`create -p`) puts it on the machine the box runs on.
+    /// When that is somewhere else, this is what closes the gap. The tunnel
+    /// lasts as long as the command runs, so it holds until interrupted.
+    Forward {
+        /// The port on the box's machine.
+        port: u16,
+        /// The address to reach it at over there. Defaults to loopback, which
+        /// is where a published port lands.
+        #[arg(long, value_name = "IP", default_value = "127.0.0.1")]
+        address: std::net::IpAddr,
     },
     /// List every box.
     #[command(alias = "list")]
@@ -350,12 +391,11 @@ impl Cli {
                 )?;
                 announce(&sandbox.create(&spec).await?, sandbox.as_ref(), out, err)
             }
-            Command::Exec { id, argv } => {
-                let id = BoxId::new(id)?;
-                let sandbox = build(sandbox_of(&store, &id)?)?;
-                let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
-                report(&output, out, err)
-            }
+            Command::Exec { id, argv } => exec(&store, &backends, id, argv, out, err).await,
+            Command::Spawn { id, argv } => spawn(&store, &backends, id, argv, out).await,
+            Command::Ps { id, process } => probe(&store, &backends, id, &process, out).await,
+            Command::Kill { id, process } => kill(&store, &backends, id, &process, out).await,
+            Command::Forward { port, address } => forward(reach.as_ref(), address, port, out).await,
             // Listing is the store's business, not the sandbox's: the store is
             // what owns the set of records.
             Command::Ls => text(out, &render_listing(&store.list()?)),
@@ -568,6 +608,37 @@ fn text(out: &mut dyn Write, rendered: &str) -> tinybox_core::Result<u8> {
 /// Returns [`Error::Io`] when the stream cannot be written to.
 fn line(out: &mut dyn Write, value: &str) -> tinybox_core::Result<u8> {
     text(out, &format!("{value}\n"))
+}
+
+/// Open a tunnel to `remote` and hold it until the process is interrupted.
+///
+/// The forward is a guard, so it exists for exactly as long as this function
+/// runs. There is no daemon to hand it to and no state file that could
+/// describe a tunnel this process is no longer holding open, so blocking is
+/// the honest shape: the command running *is* the forward existing.
+///
+/// # Errors
+///
+/// Returns whatever the host reports when the tunnel cannot be opened —
+/// [`Error::Unsupported`] from a host that cannot tunnel at all.
+async fn forward(
+    reach: &dyn Host,
+    address: std::net::IpAddr,
+    port: u16,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let forwarded = reach.forward((address, port).into()).await?;
+    line(out, &forwarded.local_addr().to_string())?;
+
+    if forwarded.is_direct() {
+        // Nothing is being held open, so there is nothing to hold *for*.
+        // Blocking here would look like a working tunnel and be a hang.
+        return Ok(0);
+    }
+    // Park until the terminal interrupts us; dropping `forwarded` on the way
+    // out closes the tunnel.
+    std::future::pending::<()>().await;
+    Ok(0)
 }
 
 /// Forward a finished command's output and status to the caller.
@@ -783,6 +854,94 @@ fn render_sync(outcome: &tinybox_sync::Sync) -> String {
 /// Returns [`Error::InvalidIdentifier`] when a Docker namespace is not a valid
 /// identifier.
 /// Destroy one box and print its identifier back.
+/// Run a command in a box, mirroring its output and exit status.
+///
+/// # Errors
+///
+/// Returns whatever the backend reports when the command could not be started.
+/// A command that runs and exits non-zero is **not** an error: its status
+/// becomes this process's.
+async fn exec(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    argv: Vec<String>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    let output = sandbox.exec(&id, &ExecRequest::new(argv)).await?;
+    report(&output, out, err)
+}
+
+/// Start a command in a box and print the identifier for asking about it.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] when the box's sandbox cannot host a process
+/// between commands, and whatever the backend reports when the command could
+/// not be started.
+async fn spawn(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    argv: Vec<String>,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    let process = sandbox.spawn(&id, &ExecRequest::new(argv)).await?;
+    line(out, process.as_ref())
+}
+
+/// Report whether a spawned process is still running.
+///
+/// A process that has exited prints `gone` and exits zero: that it finished is
+/// an answer, and reporting it as a failure would be indistinguishable from an
+/// unreachable box.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] when the box's sandbox does not track
+/// detached processes, and a backend error when the box cannot be reached.
+async fn probe(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    process: &str,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    let running = sandbox
+        .is_running(&id, &ProcessId::new(process.to_owned())?)
+        .await?;
+    line(out, if running { "running" } else { "gone" })
+}
+
+/// Stop a spawned process.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] when the box's sandbox does not track
+/// detached processes, and a backend error when the box cannot be reached. A
+/// process that had already exited is not an error.
+async fn kill(
+    store: &Arc<dyn Store>,
+    backends: &Backends<'_>,
+    id: String,
+    process: &str,
+    out: &mut dyn Write,
+) -> tinybox_core::Result<u8> {
+    let id = BoxId::new(id)?;
+    let sandbox = backends.get(sandbox_of(store, &id)?)?;
+    sandbox
+        .stop(&id, &ProcessId::new(process.to_owned())?)
+        .await?;
+    line(out, "stopped")
+}
+
 async fn remove(
     store: &Arc<dyn Store>,
     backends: &Backends<'_>,

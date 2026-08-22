@@ -1,17 +1,24 @@
-//! Turning an argument vector into something a remote shell will not mangle.
+//! Turning an argument vector into something a POSIX shell will not mangle.
 //!
 //! # Why this exists at all
 //!
 //! tinybox passes commands as argument vectors precisely so that no backend has
-//! to quote and no caller can inject through a filename. SSH breaks that
-//! guarantee: its exec channel carries a command *string*, which the remote
-//! login shell then parses. That is true of the protocol, not of shelling out —
-//! an SSH library would face exactly the same problem.
+//! to quote and no caller can inject through a filename. Two things break that
+//! guarantee, and both are properties of a protocol rather than of shelling
+//! out:
+//!
+//! - **SSH** carries a command *string* on its exec channel, which the remote
+//!   login shell then parses. An embedded SSH client would face this too.
+//! - **A detached process** ([`crate::detach`]) needs a shell on the far side to
+//!   background the command and record its pid, because no transport tinybox
+//!   speaks returns a process handle a caller could hold.
 //!
 //! So this is the one place in tinybox where the no-quoting property has to be
 //! re-established by hand, which makes it the one place where a bug is a
-//! command-injection bug. It is a pure function for that reason: every case can
-//! be pinned in a test.
+//! command-injection bug. It lives in core, and is public, so that it stays
+//! *one* place: a second copy is a second chance to get it wrong, and the two
+//! callers are in different crates. Every function here is pure, so every case
+//! can be pinned in a test.
 
 /// Wrap one argument so a POSIX shell reproduces it exactly.
 ///
@@ -22,7 +29,8 @@
 ///
 /// An empty argument still needs quoting, or it would vanish from the command
 /// line rather than arriving as an empty string.
-fn quote(argument: &str) -> String {
+#[must_use]
+pub fn quote(argument: &str) -> String {
     let mut quoted = String::with_capacity(argument.len() + 2);
     quoted.push('\'');
     for character in argument.chars() {
@@ -42,7 +50,8 @@ fn quote(argument: &str) -> String {
 /// Every argument is quoted, including the program name: a program path
 /// containing a space is unusual but not invalid, and treating the first
 /// argument specially is how that becomes a bug.
-pub(super) fn command_line<I, S>(argv: I) -> String
+#[must_use]
+pub fn command_line<I, S>(argv: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -53,16 +62,18 @@ where
         .join(" ")
 }
 
-/// Build the full remote command, including working directory and environment.
+/// Build a full command, including working directory and environment.
 ///
-/// SSH does not carry the caller's environment or working directory, so both
-/// are applied by the remote shell. `cd` runs first and is chained with `&&`,
-/// so a missing directory fails the command rather than silently running it
+/// A shell does not inherit the caller's working directory or environment
+/// across any of the transports tinybox uses, so both are applied by the shell
+/// that runs the command. `cd` runs first and is chained with `&&`, so a
+/// missing directory fails the command rather than silently running it
 /// somewhere else — which for a build command would be worse than an error.
 ///
 /// `env` is used rather than `KEY=value command` prefixes because it applies
 /// cleanly whatever the command is, including a shell builtin.
-pub(super) fn remote_command(
+#[must_use]
+pub fn script(
     argv: &[String],
     cwd: Option<&std::path::Path>,
     env: &std::collections::BTreeMap<String, String>,

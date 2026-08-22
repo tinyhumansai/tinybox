@@ -449,3 +449,80 @@ fn a_box_with_no_recorded_creation_time_never_expires() -> Result<()> {
     assert!(!info.is_expired(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)));
     Ok(())
 }
+
+/// The defaults exist so a backend opts *in* to the two operations added for
+/// services. Neither `FakeSandbox` nor `FakeHost` overrides them, which is
+/// exactly the case these check.
+mod defaults {
+    use super::{CONTAINER, FakeHost, FakeSandbox, spec};
+    use crate::capability::Capability;
+    use crate::error::{Error, Result};
+    use crate::identity::{BoxId, ProcessId};
+    use crate::runtime::{ExecRequest, Host, Sandbox};
+
+    fn process() -> Result<ProcessId> {
+        ProcessId::new("p1-0")
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_that_does_not_override_them_refuses_all_three() -> Result<()> {
+        // Silence is not an option here: a background process a sandbox cannot
+        // find or stop again is worse than a refusal, because it looks like it
+        // worked.
+        let sandbox = FakeSandbox::new(CONTAINER);
+        let created = sandbox.create(&spec()?).await?;
+        let expected = Some(Error::Unsupported {
+            sandbox: "fake".to_owned(),
+            capability: Capability::Detach,
+        });
+
+        assert_eq!(
+            sandbox
+                .spawn(&created.id, &ExecRequest::new(["server"]))
+                .await
+                .err(),
+            expected
+        );
+        assert_eq!(
+            sandbox.is_running(&created.id, &process()?).await.err(),
+            expected
+        );
+        assert_eq!(sandbox.stop(&created.id, &process()?).await.err(), expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_refusal_names_the_sandbox_that_refused() -> Result<()> {
+        // Two sandboxes in one process both refusing "detached processes" is
+        // useless if neither says which box the caller was talking to.
+        let sandbox = FakeSandbox::new(CONTAINER);
+
+        let outcome = sandbox
+            .spawn(&BoxId::new("box-0")?, &ExecRequest::new(["server"]))
+            .await;
+
+        assert!(
+            outcome
+                .err()
+                .is_some_and(|error| error.to_string().contains("fake")),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_host_that_cannot_tunnel_says_so_rather_than_answering() -> Result<()> {
+        // Returning the address unchanged would be the tempting default and the
+        // wrong one: the caller would connect to a port on their own machine
+        // that nothing is listening on.
+        let outcome = FakeHost.forward(([127, 0, 0, 1], 7788).into()).await;
+
+        assert_eq!(
+            outcome.err(),
+            Some(Error::Unsupported {
+                sandbox: "fake-host".to_owned(),
+                capability: Capability::PortForward,
+            })
+        );
+        Ok(())
+    }
+}
