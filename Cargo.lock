@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "clap",
@@ -794,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-docker"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-host"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-linux"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-microvm"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-module"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde_json",
  "tinybox-core",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-ssh"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-sync"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "blake3",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "tinybus"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "flate2",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "tinybus-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "tinybus-module"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde",
