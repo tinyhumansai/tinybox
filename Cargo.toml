@@ -34,13 +34,14 @@ categories = ["development-tools", "virtualization"]
 [workspace.dependencies]
 # TinyBus defines the message types, interface macro, and frozen module ABI used
 # by the bus adapter. Socket and CLI features are unnecessary here.
-tinybus = { path = "vendor/tinybus/crates/tinybus", version = "0.1.0", default-features = false, features = [
+tinybus = { version = "=0.1.2", default-features = false, features = [
     "macros",
     "modules",
 ] }
 # The module-side SDK owns the isolated runtime and exports the ABI entrypoints
 # required by TinyBus's dynamic loader.
-tinybus-module = { path = "vendor/tinybus/crates/tinybus-module", version = "0.1.0" }
+tinybus-module = "=0.1.2"
+
 # Derive macros for the crate-wide error type in `tinybox-core`.
 thiserror = "2"
 # `Host` and `Sandbox` are object-safe async traits stored as trait objects in a
@@ -97,3 +98,7 @@ private_intra_doc_links = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+[patch.crates-io]
+tinybus = { path = "vendor/tinybus/crates/tinybus" }
+tinybus-module = { path = "vendor/tinybus/crates/tinybus-module" }
