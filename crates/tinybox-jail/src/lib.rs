@@ -15,7 +15,7 @@
 //! | Linux   | landlock      | Kernel 5.13+ LSM, applied in `pre_exec`    |
 //! | macOS   | seatbelt      | `sandbox-exec -p '<profile>' …`            |
 //! | Windows | appcontainer  | `CreateAppContainerProfile` + `STARTUPINFOEX` |
-//! | other   | noop          | Plain `Command::spawn`, audit-only         |
+//! | other   | unsupported   | Spawning is rejected                       |
 //!
 //! ## Quick start
 //!

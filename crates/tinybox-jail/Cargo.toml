@@ -1,6 +1,6 @@
 [package]
 name = "tinybox-jail"
-description = "Per-process directory jail for spawned commands: Landlock, Seatbelt, AppContainer, and a noop fallback."
+description = "Per-process directory jail for spawned commands: Landlock, Seatbelt, and AppContainer."
 documentation = "https://docs.rs/tinybox-jail"
 version.workspace = true
 edition.workspace = true
@@ -14,11 +14,13 @@ publish = false
 
 [features]
 # Enables the Linux Landlock backend. Without it `LandlockBackend` reports
-# itself unavailable and the default backend falls back to noop.
+# itself unavailable and default spawning returns an unsupported error.
 landlock = ["dep:landlock"]
 
 [dependencies]
 log = "0.4"
+# Reuse the workspace clock so registry timestamps can be controlled in tests.
+tinybox-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

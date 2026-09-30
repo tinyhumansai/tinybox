@@ -13,6 +13,8 @@ use std::process::{Child, Command};
 
 use super::jail::{Jail, JailBackend};
 
+/// macOS Seatbelt backend that launches commands with `sandbox-exec`.
+#[derive(Debug)]
 pub struct SeatbeltBackend;
 
 impl Default for SeatbeltBackend {
@@ -22,6 +24,7 @@ impl Default for SeatbeltBackend {
 }
 
 impl SeatbeltBackend {
+    /// Creates the Seatbelt backend.
     pub fn new() -> Self {
         Self
     }

@@ -58,64 +58,45 @@ impl JailBackend for LandlockBackend {
             };
             use std::os::unix::process::CommandExt;
 
-            let root = jail.root.clone();
-            let read_only = jail.read_only.clone();
+            let writes = AccessFs::WriteFile
+                | AccessFs::RemoveDir
+                | AccessFs::RemoveFile
+                | AccessFs::MakeChar
+                | AccessFs::MakeDir
+                | AccessFs::MakeReg
+                | AccessFs::MakeSock
+                | AccessFs::MakeFifo
+                | AccessFs::MakeBlock
+                | AccessFs::MakeSym
+                | AccessFs::Refer
+                | AccessFs::Truncate;
+            let reads = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
+            let mut ruleset = Ruleset::default()
+                .handle_access(writes | reads)
+                .and_then(|ruleset| ruleset.create())
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let root_fd = PathFd::new(&jail.root)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(root_fd, writes | reads))
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            for path in &jail.read_only {
+                let fd =
+                    PathFd::new(path).map_err(|error| std::io::Error::other(error.to_string()))?;
+                ruleset = ruleset
+                    .add_rule(PathBeneath::new(fd, reads))
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+            let mut ruleset = Some(ruleset);
 
-            // SAFETY: pre_exec runs after fork() in the child, before exec.
-            // We apply Landlock there so the parent process keeps its
-            // privileges (the parent may legitimately need broader access).
+            // SAFETY: the child callback only applies this prebuilt ruleset.
             unsafe {
-                cmd.pre_exec(move || {
-                    let mut ruleset = Ruleset::default()
-                        .handle_access(
-                            AccessFs::Execute
-                                | AccessFs::ReadFile
-                                | AccessFs::WriteFile
-                                | AccessFs::ReadDir
-                                | AccessFs::RemoveDir
-                                | AccessFs::RemoveFile
-                                | AccessFs::MakeReg
-                                | AccessFs::MakeDir
-                                | AccessFs::MakeSym,
-                        )
-                        .and_then(|r| r.create())
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-                    let root_fd =
-                        PathFd::new(&root).map_err(|e| std::io::Error::other(e.to_string()))?;
-                    ruleset = ruleset
-                        .add_rule(PathBeneath::new(
-                            root_fd,
-                            AccessFs::Execute
-                                | AccessFs::ReadFile
-                                | AccessFs::WriteFile
-                                | AccessFs::ReadDir
-                                | AccessFs::RemoveFile
-                                | AccessFs::RemoveDir
-                                | AccessFs::MakeReg
-                                | AccessFs::MakeDir,
-                        ))
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-                    // read_only paths also need Execute so the child can
-                    // run binaries it found there (e.g. /usr/bin/sh).
-                    // Without it, Landlock blocks `execve` on anything
-                    // outside `root`.
-                    for ro in &read_only {
-                        if let Ok(fd) = PathFd::new(ro) {
-                            ruleset = ruleset
-                                .add_rule(PathBeneath::new(
-                                    fd,
-                                    AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir,
-                                ))
-                                .map_err(|e| std::io::Error::other(e.to_string()))?;
-                        }
-                    }
-
-                    ruleset
-                        .restrict_self()
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    Ok(())
+                cmd.pre_exec(move || match ruleset.take() {
+                    Some(ruleset) => match ruleset.restrict_self() {
+                        Ok(_) => Ok(()),
+                        Err(_) => Err(std::io::Error::from_raw_os_error(5)),
+                    },
+                    None => Err(std::io::Error::from_raw_os_error(22)),
                 });
             }
 

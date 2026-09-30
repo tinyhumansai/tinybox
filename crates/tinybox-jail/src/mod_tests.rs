@@ -49,6 +49,7 @@ fn default_backend_is_cached() {
 }
 
 #[test]
+#[cfg(not(feature = "landlock"))]
 fn spawn_uses_default_backend() {
     let dir = std::env::temp_dir();
     let jail = Jail::new(&dir, "default-spawn")
@@ -66,11 +67,19 @@ fn spawn_uses_default_backend() {
     // Must succeed via whichever platform backend is detected (or
     // noop). The point of the test is that we go through the public
     // `spawn` entry rather than `spawn_with`.
-    match spawn(&jail, cmd) {
-        Ok(mut child) => {
-            let _ = child.wait();
+    let result = spawn(&jail, cmd);
+    if default_backend().is_available() {
+        match result {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
         }
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+    } else {
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::Unsupported)
+        );
     }
 }
 

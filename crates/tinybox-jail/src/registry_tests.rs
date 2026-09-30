@@ -5,16 +5,14 @@
 //! the ~500-line guideline.
 
 use super::*;
+use std::time::Duration;
+use tinybox_core::clock::FixedClock;
 
-fn tempdir(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "openhuman-registry-{}-{}-{}",
-        tag,
-        std::process::id(),
-        now_unix()
-    ));
-    fs::create_dir_all(&p).unwrap();
-    p
+fn tempdir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("tinybox-registry-{tag}-"))
+        .tempdir()
+        .unwrap()
 }
 
 #[test]
@@ -30,7 +28,6 @@ fn create_list_get_roundtrip() {
     assert_eq!(listed.len(), 2);
     assert_eq!(reg.get(&a.id).unwrap().label, "alpha");
     assert_eq!(reg.get(&b.id).unwrap().label, "beta");
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -43,7 +40,6 @@ fn rename_changes_label_not_id_or_dir() {
     assert_eq!(renamed.dir, a.dir);
     assert_eq!(renamed.label, "new");
     assert!(renamed.updated_at_unix >= a.updated_at_unix);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -56,7 +52,6 @@ fn delete_removes_dir_and_record() {
     reg.delete(&a.id).unwrap();
     assert!(!dir.exists());
     assert!(reg.get(&a.id).is_none());
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -65,7 +60,6 @@ fn delete_missing_errors() {
     let reg = JailRegistry::open(&base).unwrap();
     let err = reg.delete("nope").unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -79,7 +73,6 @@ fn index_persists_across_reopen() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, a.id);
     assert_eq!(listed[0].label, "persistent");
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -92,7 +85,6 @@ fn find_by_label_substring() {
     assert_eq!(reg.find_by_label("AGENT").len(), 2);
     assert_eq!(reg.find_by_label("gamma").len(), 1);
     assert_eq!(reg.find_by_label("nope").len(), 0);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -105,7 +97,6 @@ fn clear_drops_everything() {
     let n = reg.clear().unwrap();
     assert_eq!(n, 3);
     assert_eq!(reg.list().len(), 0);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -122,7 +113,6 @@ fn parallel_jails_have_distinct_dirs() {
     for r in &jails {
         assert!(r.dir.exists());
     }
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -135,7 +125,6 @@ fn set_notes_roundtrips() {
     assert_eq!(updated.notes.as_deref(), Some("hello"));
     let cleared = reg.set_notes(&a.id, None).unwrap();
     assert!(cleared.notes.is_none());
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -144,7 +133,6 @@ fn set_notes_on_missing_id_errors() {
     let reg = JailRegistry::open(&base).unwrap();
     let err = reg.set_notes("nope", Some("x".into())).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -153,7 +141,6 @@ fn rename_on_missing_id_errors() {
     let reg = JailRegistry::open(&base).unwrap();
     let err = reg.rename("nope", "x").unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -164,7 +151,6 @@ fn delete_twice_second_is_not_found() {
     reg.delete(&a.id).unwrap();
     let err = reg.delete(&a.id).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -175,10 +161,10 @@ fn spawn_in_with_missing_id_errors() {
         .spawn_in_with("nope", &super::super::NoopBackend, Command::new("true"))
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
+#[cfg(not(feature = "landlock"))]
 fn spawn_in_uses_default_backend() {
     let base = tempdir("spawn-default");
     let reg = JailRegistry::open(&base).unwrap();
@@ -190,13 +176,20 @@ fn spawn_in_uses_default_backend() {
     } else {
         Command::new("true")
     };
-    match reg.spawn_in(&a.id, cmd) {
-        Ok(mut child) => {
-            let _ = child.wait();
+    let result = reg.spawn_in(&a.id, cmd);
+    if super::super::default_backend().is_available() {
+        match result {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
         }
-        Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
+    } else {
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(io::ErrorKind::Unsupported)
+        );
     }
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -204,7 +197,6 @@ fn clear_on_empty_registry_is_zero() {
     let base = tempdir("empty-clear");
     let reg = JailRegistry::open(&base).unwrap();
     assert_eq!(reg.clear().unwrap(), 0);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -212,30 +204,26 @@ fn find_by_label_on_empty_registry() {
     let base = tempdir("empty-find");
     let reg = JailRegistry::open(&base).unwrap();
     assert!(reg.find_by_label("anything").is_empty());
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn open_creates_base_directory_if_missing() {
-    let base = std::env::temp_dir().join(format!(
-        "oh-reg-mkdir-{}-{}",
-        std::process::id(),
-        now_unix()
-    ));
-    assert!(!base.exists());
-    let reg = JailRegistry::open(&base).unwrap();
-    assert!(base.exists());
+    let base = tempfile::Builder::new()
+        .prefix("oh-reg-mkdir-")
+        .tempdir()
+        .unwrap();
+    let path = base.path();
+    let reg = JailRegistry::open(path).unwrap();
+    assert!(path.exists());
     assert!(reg.list().is_empty());
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn corrupt_index_returns_invalid_data() {
     let base = tempdir("corrupt");
-    fs::write(base.join("index.json"), b"this is not json").unwrap();
+    fs::write(base.path().join("index.json"), b"this is not json").unwrap();
     let err = JailRegistry::open(&base).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -243,19 +231,17 @@ fn persist_writes_index_file() {
     let base = tempdir("persist-file");
     let reg = JailRegistry::open(&base).unwrap();
     reg.create("x").unwrap();
-    let path = base.join("index.json");
+    let path = base.path().join("index.json");
     assert!(path.exists());
     let raw = fs::read_to_string(&path).unwrap();
     assert!(raw.contains("\"label\": \"x\""));
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
 fn base_accessor_returns_open_dir() {
     let base = tempdir("base-accessor");
     let reg = JailRegistry::open(&base).unwrap();
-    assert_eq!(reg.base(), base.as_path());
-    fs::remove_dir_all(&base).ok();
+    assert_eq!(reg.base(), base.path());
 }
 
 #[test]
@@ -274,7 +260,6 @@ fn delete_refuses_path_outside_base() {
     assert!(std::env::temp_dir().exists());
     // Record is still there because we refuse cleanly without removing.
     assert!(reg.get(&a.id).is_some());
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -292,7 +277,6 @@ fn spawn_in_refuses_path_outside_base() {
         .spawn_in_with(&a.id, &super::super::NoopBackend, Command::new("true"))
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -309,7 +293,6 @@ fn spawn_in_uses_record_dir_as_root() {
         .unwrap();
     let status = child.wait().unwrap();
     assert!(status.success() || cfg!(windows));
-    fs::remove_dir_all(&base).ok();
 }
 
 #[test]
@@ -326,5 +309,18 @@ fn create_consecutive_ids_are_unique_in_same_second() {
         .map(|i| reg.create(format!("j{i}")).unwrap().id)
         .collect();
     assert_eq!(ids.len(), 32);
-    fs::remove_dir_all(&base).ok();
+}
+
+#[test]
+fn registry_uses_the_injected_clock_for_timestamps() {
+    let base = tempdir("clock");
+    let clock = Arc::new(FixedClock::at_epoch());
+    let reg = JailRegistry::open_with_clock(base.path(), clock.clone()).unwrap();
+    let created = reg.create("clocked").unwrap();
+    assert_eq!(created.created_at_unix, 0);
+    assert_eq!(created.updated_at_unix, 0);
+
+    clock.advance(Duration::from_secs(5));
+    let updated = reg.rename(&created.id, "renamed").unwrap();
+    assert_eq!(updated.updated_at_unix, 5);
 }

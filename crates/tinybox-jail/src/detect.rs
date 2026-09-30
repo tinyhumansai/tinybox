@@ -2,11 +2,31 @@
 
 use std::sync::Arc;
 
-use super::jail::JailBackend;
-use super::noop::NoopBackend;
+use super::jail::{Jail, JailBackend};
+use std::process::{Child, Command};
 
-/// Picks the strongest backend available on this platform, falling back to
-/// [`NoopBackend`] when no OS sandbox works.
+#[derive(Debug)]
+struct UnsupportedBackend;
+
+impl JailBackend for UnsupportedBackend {
+    fn name(&self) -> &'static str {
+        "unsupported"
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+
+    fn spawn(&self, _: &Jail, _: Command) -> std::io::Result<Child> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no supported jail backend is available",
+        ))
+    }
+}
+
+/// Picks the strongest available backend, returning an unsupported backend
+/// when no OS sandbox works.
 pub fn pick_backend() -> Arc<dyn JailBackend> {
     #[cfg(target_os = "linux")]
     {
@@ -32,6 +52,6 @@ pub fn pick_backend() -> Arc<dyn JailBackend> {
             return Arc::new(ac);
         }
     }
-    log::warn!("[cwd_jail] no OS sandbox available, falling back to noop");
-    Arc::new(NoopBackend)
+    log::warn!("[cwd_jail] no OS sandbox available");
+    Arc::new(UnsupportedBackend)
 }
