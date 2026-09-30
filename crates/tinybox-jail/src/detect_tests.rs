@@ -29,7 +29,10 @@ fn backend_selection_falls_back_when_no_backend_is_available() {
 fn availability_lookup_checks_only_the_named_backend() {
     assert!(!is_available("unknown"));
     #[cfg(target_os = "linux")]
-    assert_eq!(is_available("landlock"), super::super::linux::LandlockBackend::new().is_available());
+    assert_eq!(
+        is_available("landlock"),
+        super::super::linux::LandlockBackend::new().is_available()
+    );
 }
 
 #[test]
