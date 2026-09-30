@@ -324,3 +324,40 @@ fn registry_uses_the_injected_clock_for_timestamps() {
     let updated = reg.rename(&created.id, "renamed").unwrap();
     assert_eq!(updated.updated_at_unix, 5);
 }
+
+#[test]
+fn create_rolls_back_when_index_persistence_fails() {
+    let base = tempdir("create-persist-failure");
+    fs::create_dir(base.path().join("index.json.tmp")).unwrap();
+    let reg = JailRegistry::open(base.path()).unwrap();
+
+    assert!(reg.create("not-persisted").is_err());
+    assert!(reg.list().is_empty());
+    assert_eq!(fs::read_dir(base.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn rename_and_notes_roll_back_when_index_persistence_fails() {
+    let base = tempdir("update-persist-failure");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let created = reg.create("original").unwrap();
+    fs::create_dir(base.path().join("index.json.tmp")).unwrap();
+
+    assert!(reg.rename(&created.id, "changed").is_err());
+    assert!(reg.set_notes(&created.id, Some("changed".into())).is_err());
+    let current = reg.get(&created.id).unwrap();
+    assert_eq!(current.label, "original");
+    assert!(current.notes.is_none());
+}
+
+#[test]
+fn delete_keeps_memory_aligned_when_index_persistence_fails() {
+    let base = tempdir("delete-persist-failure");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let created = reg.create("remove").unwrap();
+    fs::create_dir(base.path().join("index.json.tmp")).unwrap();
+
+    assert!(reg.delete(&created.id).is_err());
+    assert!(reg.get(&created.id).is_none());
+    assert!(!created.dir.exists());
+}
