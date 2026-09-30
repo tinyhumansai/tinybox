@@ -89,6 +89,9 @@ fn background_ampersand_ignores_fd_duplication() {
     assert!(contains_unquoted_background_ampersand(
         r#"echo "`malicious &`""#
     ));
+    assert!(contains_unquoted_background_ampersand(
+        r#"echo "$(echo \) &)""#
+    ));
 }
 
 #[test]
@@ -129,6 +132,33 @@ fn heredocs_are_consumed_in_input_order_and_delimiters_are_complete_words() {
     assert_eq!(
         strip_quoted_heredoc_bodies(concatenated),
         "cat <<'EOF'x\n\nEOFx\necho live"
+    );
+}
+
+#[test]
+fn heredoc_after_an_intervening_command_does_not_hide_that_command() {
+    let command = "cat <<'A'\none\nA\necho DANGER &\ncat <<'B'\ntwo\nB";
+    assert_eq!(
+        strip_quoted_heredoc_bodies(command),
+        "cat <<'A'\n\nA\necho DANGER &\ncat <<'B'\n\nB"
+    );
+}
+
+#[test]
+fn heredoc_operators_inside_a_heredoc_body_are_data() {
+    let command = "cat <<'EOF'\n<<'FAKE'\nEOF\necho DANGER &";
+    assert_eq!(
+        strip_quoted_heredoc_bodies(command),
+        "cat <<'EOF'\n\nEOF\necho DANGER &"
+    );
+}
+
+#[test]
+fn heredoc_delimiter_ends_at_a_shell_operator() {
+    let command = "cat <<'EOF'; echo okay\nbody\nEOF\necho DANGER &";
+    assert_eq!(
+        strip_quoted_heredoc_bodies(command),
+        "cat <<'EOF'; echo okay\n\nEOF\necho DANGER &"
     );
 }
 
