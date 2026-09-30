@@ -93,5 +93,9 @@ pub fn script(
     parts.join(" ")
 }
 
+pub mod scan;
+
+#[cfg(test)]
+mod scan_test;
 #[cfg(test)]
 mod test;

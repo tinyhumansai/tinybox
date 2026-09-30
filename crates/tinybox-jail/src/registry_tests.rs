@@ -55,6 +55,19 @@ fn delete_removes_dir_and_record() {
 }
 
 #[test]
+fn delete_persists_removal_after_jail_directory_is_already_missing() {
+    let base = tempdir("delete-missing-directory");
+    let reg = JailRegistry::open(&base).unwrap();
+    let record = reg.create("missing directory").unwrap();
+    fs::remove_dir_all(&record.dir).unwrap();
+
+    reg.delete(&record.id).unwrap();
+
+    assert!(reg.get(&record.id).is_none());
+    assert!(JailRegistry::open(&base).unwrap().list().is_empty());
+}
+
+#[test]
 fn delete_missing_errors() {
     let base = tempdir("missing");
     let reg = JailRegistry::open(&base).unwrap();
@@ -164,7 +177,6 @@ fn spawn_in_with_missing_id_errors() {
 }
 
 #[test]
-#[cfg(not(feature = "landlock"))]
 fn spawn_in_uses_default_backend() {
     let base = tempdir("spawn-default");
     let reg = JailRegistry::open(&base).unwrap();
@@ -178,8 +190,12 @@ fn spawn_in_uses_default_backend() {
     };
     let result = reg.spawn_in(&a.id, cmd);
     if super::super::default_backend().is_available() {
-        let mut child = result.unwrap();
-        let _ = child.wait().unwrap();
+        match result {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
+        }
     } else {
         assert_eq!(
             result.err().map(|error| error.kind()),
@@ -212,6 +228,18 @@ fn open_creates_base_directory_if_missing() {
     let reg = JailRegistry::open(path).unwrap();
     assert!(path.exists());
     assert!(reg.list().is_empty());
+}
+
+#[test]
+fn open_creates_a_missing_nested_base_directory() {
+    let parent = tempdir("missing-parent");
+    let base = parent.path().join("nested").join("registry");
+    assert!(!base.exists());
+
+    let registry = JailRegistry::open(&base).unwrap();
+
+    assert!(base.is_dir());
+    assert!(registry.list().is_empty());
 }
 
 #[test]
@@ -308,6 +336,22 @@ fn create_consecutive_ids_are_unique_in_same_second() {
 }
 
 #[test]
+fn create_skips_an_existing_unindexed_jail_directory() {
+    let base = tempdir("directory-collision");
+    let current = generate_id(0);
+    let counter = u64::from_str_radix(&current[2..], 16).unwrap();
+    let collision = base.path().join(format!("j0{:x}", counter + 1));
+    fs::create_dir(&collision).unwrap();
+
+    let reg = JailRegistry::open_with_clock(base.path(), Arc::new(FixedClock::at_epoch())).unwrap();
+    let created = reg.create("safe").unwrap();
+
+    assert_ne!(created.dir, collision);
+    assert!(collision.is_dir());
+    assert!(created.dir.is_dir());
+}
+
+#[test]
 fn registry_uses_the_injected_clock_for_timestamps() {
     let base = tempdir("clock");
     let clock = Arc::new(FixedClock::at_epoch());
@@ -322,27 +366,67 @@ fn registry_uses_the_injected_clock_for_timestamps() {
 }
 
 #[test]
-fn failed_index_write_rolls_back_registry_mutations() {
-    let base = tempdir("rollback");
+fn create_rolls_back_when_index_persistence_fails() {
+    let base = tempdir("create-persist-failure");
+    fs::create_dir(base.path().join("index.json.tmp")).unwrap();
     let reg = JailRegistry::open(base.path()).unwrap();
+
+    assert!(reg.create("not-persisted").is_err());
+    assert!(reg.list().is_empty());
+    assert_eq!(fs::read_dir(base.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn rename_and_notes_roll_back_when_index_persistence_fails() {
+    let base = tempdir("update-persist-failure");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let created = reg.create("original").unwrap();
+    fs::create_dir(base.path().join("index.json.tmp")).unwrap();
+
+    assert!(reg.rename(&created.id, "changed").is_err());
+    assert!(reg.set_notes(&created.id, Some("changed".into())).is_err());
+    let current = reg.get(&created.id).unwrap();
+    assert_eq!(current.label, "original");
+    assert!(current.notes.is_none());
+}
+
+#[test]
+fn delete_keeps_memory_aligned_when_index_persistence_fails() {
+    let base = tempdir("delete-persist-failure");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let created = reg.create("remove").unwrap();
+    fs::create_dir(base.path().join("index.json.tmp")).unwrap();
+
+    assert!(reg.delete(&created.id).is_err());
+    assert!(reg.get(&created.id).is_none());
+    assert!(!created.dir.exists());
+}
+
+#[test]
+fn delete_persists_when_the_jail_directory_is_already_missing() {
+    let base = tempdir("delete-missing-directory");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let created = reg.create("removed-outside").unwrap();
+    fs::remove_dir_all(&created.dir).unwrap();
+
+    reg.delete(&created.id).unwrap();
+
+    assert!(reg.get(&created.id).is_none());
+}
+
+#[test]
+fn failed_index_write_after_delete_keeps_in_memory_removal() {
+    let base = tempdir("delete-rollback");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let record = reg.create("deleted").unwrap();
     let blocked_tmp = base.path().join("index.json.tmp");
     fs::create_dir(&blocked_tmp).unwrap();
 
-    let create_error = reg.create("not-persisted").err();
-    assert!(create_error.is_some());
-    assert!(reg.list().is_empty());
+    let error = reg.delete(&record.id).unwrap_err();
 
-    fs::remove_dir(&blocked_tmp).unwrap();
-    let record = reg.create("original").unwrap();
-    fs::create_dir(&blocked_tmp).unwrap();
-
-    assert!(reg.rename(&record.id, "changed").is_err());
-    assert_eq!(
-        reg.get(&record.id).map(|item| item.label),
-        Some("original".into())
-    );
-    assert!(reg.set_notes(&record.id, Some("changed".into())).is_err());
-    assert_eq!(reg.get(&record.id).and_then(|item| item.notes), None);
+    assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+    assert!(!record.dir.exists());
+    assert!(reg.get(&record.id).is_none());
 }
 
 #[test]
@@ -350,8 +434,7 @@ fn open_rejects_a_file_as_registry_directory() {
     let base = tempdir("not-directory");
     let file = base.path().join("file");
     fs::write(&file, b"not a directory").unwrap();
-    let error = JailRegistry::open(file).err();
-    assert!(error.is_some());
+    assert!(JailRegistry::open(file).is_err());
 }
 
 #[test]

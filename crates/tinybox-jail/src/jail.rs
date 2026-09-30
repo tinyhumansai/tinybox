@@ -13,7 +13,7 @@ use std::process::{Child, Command};
 /// One `root` (read/write), zero or more `read_only` paths, an optional
 /// allow-list of extra paths the child *may* read, and a network toggle.
 /// Backends translate this into Landlock rules, a Seatbelt profile, or an
-/// AppContainer ACL.
+/// `AppContainer` ACL.
 #[derive(Debug, Clone)]
 pub struct Jail {
     /// Primary read/write root. The child cannot escape this directory for
@@ -25,11 +25,11 @@ pub struct Jail {
     /// Allow outbound network. Most agent tools need this; some risky tools
     /// (untrusted code execution) should disable it.
     pub allow_net: bool,
-    /// Allow the child to spawn further child processes. AppContainer and
+    /// Allow the child to spawn further child processes. `AppContainer` and
     /// Seatbelt can deny this; Landlock cannot.
     pub allow_subprocess: bool,
     /// Free-form label used by audit logs and (on Windows) as the basis for
-    /// the AppContainer profile name. Keep it short and ASCII.
+    /// the `AppContainer` profile name. Keep it short and ASCII.
     pub label: String,
 }
 
@@ -47,18 +47,21 @@ impl Jail {
     }
 
     /// Grants read (and execute) access to an extra path outside the root.
+    #[must_use]
     pub fn add_read_only(mut self, path: impl AsRef<Path>) -> Self {
         self.read_only.push(path.as_ref().to_path_buf());
         self
     }
 
     /// Asks the backend to block network access where it can.
+    #[must_use]
     pub fn deny_net(mut self) -> Self {
         self.allow_net = false;
         self
     }
 
     /// Asks the backend to forbid spawning further subprocesses where it can.
+    #[must_use]
     pub fn deny_subprocess(mut self) -> Self {
         self.allow_subprocess = false;
         self
@@ -66,9 +69,13 @@ impl Jail {
 
     /// Canonicalize `root` and `read_only` so backends never see `..` or
     /// symlink trickery. Returns an error if `root` does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns the filesystem error encountered while canonicalizing `root`.
     pub fn canonicalize(&mut self) -> std::io::Result<()> {
         self.root = self.root.canonicalize()?;
-        for p in self.read_only.iter_mut() {
+        for p in &mut self.read_only {
             if let Ok(c) = p.canonicalize() {
                 *p = c;
             }
@@ -93,7 +100,7 @@ impl Jail {
 /// OS-specific enforcement of a [`Jail`].
 ///
 /// We model spawning rather than `Command` mutation because Windows
-/// AppContainer requires custom `CreateProcess` flags that `std`'s
+/// `AppContainer` requires custom `CreateProcess` flags that `std`'s
 /// `Command::spawn` does not expose.
 pub trait JailBackend: Send + Sync {
     /// Stable identifier, used in logs / audit ("landlock", "seatbelt",
@@ -107,7 +114,11 @@ pub trait JailBackend: Send + Sync {
 
     /// Spawn `cmd` under the jail described by `jail`. Backends own how the
     /// jail is materialized (Landlock ruleset, sandbox-exec wrapper,
-    /// AppContainer profile + restricted token).
+    /// `AppContainer` profile + restricted token).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot apply the jail or spawn command.
     fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child>;
 }
 

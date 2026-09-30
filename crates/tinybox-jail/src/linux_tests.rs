@@ -1,29 +1,82 @@
-//! Tests for the Linux Landlock backend.
+//! Tests for Landlock setup and child spawning.
 
 use super::*;
 use std::path::Path;
 
+#[cfg(feature = "landlock")]
 #[test]
-fn landlock_spawns_with_configured_system_read_paths() -> std::io::Result<()> {
-    let root = tempfile::tempdir()?;
-    let mut jail = Jail::new(root.path(), "landlock-test");
+fn apply_ruleset_handles_success_failure_and_missing_ruleset() {
+    assert!(apply_ruleset(Some(()), |_| Ok(())).is_ok());
+    assert_eq!(
+        apply_ruleset(Some(()), |_| Err(std::io::Error::other("failed")))
+            .err()
+            .map(|error| error.kind()),
+        Some(std::io::ErrorKind::Other)
+    );
+    assert_eq!(
+        apply_ruleset::<()>(None, |_| Ok(()))
+            .err()
+            .map(|error| error.raw_os_error()),
+        Some(Some(22))
+    );
+}
+
+#[test]
+fn backend_reports_name_and_availability() {
+    let backend = LandlockBackend::new();
+    assert_eq!(backend.name(), "landlock");
+    let _ = backend.is_available();
+    let default_backend: LandlockBackend = Default::default();
+    assert_eq!(default_backend.name(), "landlock");
+}
+
+#[test]
+#[cfg(feature = "landlock")]
+fn spawn_rejects_a_missing_read_only_path() {
+    let root = tempfile::tempdir().expect("temporary jail root");
+    let jail = Jail::new(root.path(), "missing-read-only")
+        .add_read_only(root.path().join("missing-read-only-path"));
+    let result = LandlockBackend::new().spawn(&jail, Command::new("true"));
+    assert_eq!(
+        result.err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::Other)
+    );
+}
+
+#[test]
+fn spawn_applies_rules_before_running_the_command_when_supported() {
+    let root = tempfile::tempdir().expect("temporary jail root");
+    let mut jail = Jail::new(root.path(), "landlock-spawn");
     for path in ["/usr", "/bin", "/lib", "/lib64"] {
         if Path::new(path).exists() {
             jail = jail.add_read_only(path);
         }
     }
-
     let backend = LandlockBackend::new();
-    if !backend.is_available() {
-        let error = backend
+    #[cfg(not(feature = "landlock"))]
+    {
+        let mut child = backend
             .spawn(&jail, Command::new("/usr/bin/true"))
-            .err()
-            .map(|error| error.kind());
-        assert_eq!(error, Some(std::io::ErrorKind::PermissionDenied));
-        return Ok(());
+            .expect("spawn without Landlock support");
+        assert!(child.wait().expect("wait for command").success());
+        return;
     }
 
-    let mut child = backend.spawn(&jail, Command::new("/usr/bin/true"))?;
-    assert!(child.wait()?.success());
-    Ok(())
+    #[cfg(feature = "landlock")]
+    {
+        if !backend.is_available() {
+            let error = backend
+                .spawn(&jail, Command::new("/usr/bin/true"))
+                .err()
+                .map(|error| error.kind());
+            assert_eq!(error, Some(std::io::ErrorKind::PermissionDenied));
+            return;
+        }
+
+        let mut child = backend
+            .spawn(&jail, Command::new("/usr/bin/true"))
+            .expect("spawn with Landlock restrictions");
+        let status = child.wait().expect("wait for jailed command");
+        assert!(status.success());
+    }
 }

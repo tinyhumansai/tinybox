@@ -3,9 +3,9 @@ use super::*;
 /// Regression guard for #3235.
 ///
 /// On platforms where no OS-level jail backend is available
-/// (Landlock / Seatbelt / AppContainer absent or unsupported),
+/// (Landlock / Seatbelt / `AppContainer` absent or unsupported),
 /// `cwd_jail::detect::pick_backend()` returns `NoopBackend`. This
-/// test pins the NoopBackend contract — it must always report
+/// test pins the `NoopBackend` contract — it must always report
 /// `is_available() == true` so it's a usable fallback, must
 /// identify as `"noop"` so operators can see in logs which backend
 /// is active, and `spawn` must be a passthrough that runs the

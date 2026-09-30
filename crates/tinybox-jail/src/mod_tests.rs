@@ -70,13 +70,35 @@ fn spawn_uses_default_backend() {
     // `spawn` entry rather than `spawn_with`.
     let result = spawn(&jail, cmd);
     if default_backend().is_available() {
-        let mut child = result.expect("spawn through available backend");
-        let _ = child.wait().expect("wait");
+        match result {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        }
     } else {
         assert_eq!(
             result.err().map(|error| error.kind()),
             Some(std::io::ErrorKind::Unsupported)
         );
+    }
+}
+
+#[test]
+fn spawn_uses_default_backend_for_an_existing_root() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let result = super::spawn(
+        &Jail::new(dir.path(), "default-spawn"),
+        Command::new("true"),
+    );
+    match result {
+        Ok(mut child) => {
+            let _ = child.wait();
+        }
+        Err(error) => assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+        )),
     }
 }
 

@@ -1,20 +1,21 @@
-//! Tests for backend selection and the unavailable-backend result.
+//! Tests for platform backend selection and the unsupported fallback.
 
 use super::*;
 
 #[test]
-fn unavailable_backend_rejects_spawning() {
+fn unsupported_backend_reports_and_rejects_spawns() {
     let backend = UnsupportedBackend;
     assert_eq!(backend.name(), "unsupported");
     assert!(!backend.is_available());
     let error = backend
-        .spawn(&Jail::new(".", "unsupported"), Command::new("true"))
-        .err()
-        .map(|error| error.kind());
-    assert_eq!(error, Some(std::io::ErrorKind::Unsupported));
+        .spawn(&Jail::new("/", "unsupported"), Command::new("true"))
+        .expect_err("unsupported backend must reject a spawn");
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
 #[test]
-fn backend_detection_returns_a_backend() {
-    assert!(!pick_backend().name().is_empty());
+fn backend_selection_returns_the_unsupported_backend() {
+    let backend = pick_backend();
+    assert_eq!(backend.name(), "unsupported");
+    assert!(!backend.is_available());
 }
