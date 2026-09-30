@@ -1,0 +1,2489 @@
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/crates/tinybox-jail/src/detect.rs:
+    1|       |//! Platform auto-detection. Picks the strongest available backend.
+    2|       |
+    3|       |use std::sync::Arc;
+    4|       |
+    5|       |use super::jail::{Jail, JailBackend};
+    6|       |use std::process::{Child, Command};
+    7|       |
+    8|       |#[derive(Debug)]
+    9|       |struct UnsupportedBackend;
+   10|       |
+   11|       |impl JailBackend for UnsupportedBackend {
+   12|      1|    fn name(&self) -> &'static str {
+   13|      1|        "unsupported"
+   14|      1|    }
+   15|       |
+   16|      1|    fn is_available(&self) -> bool {
+   17|      1|        false
+   18|      1|    }
+   19|       |
+   20|      1|    fn spawn(&self, _: &Jail, _: Command) -> std::io::Result<Child> {
+   21|      1|        Err(std::io::Error::new(
+   22|      1|            std::io::ErrorKind::Unsupported,
+   23|      1|            "no supported jail backend is available",
+   24|      1|        ))
+   25|      1|    }
+   26|       |}
+   27|       |
+   28|       |/// Picks the strongest available backend, returning an unsupported backend
+   29|       |/// when no OS sandbox works.
+   30|      2|pub fn pick_backend() -> Arc<dyn JailBackend> {
+   31|       |    #[cfg(target_os = "linux")]
+   32|       |    {
+   33|      2|        let lb = super::linux::LandlockBackend::new();
+   34|      2|        if lb.is_available() {
+   35|      2|            log::info!("[cwd_jail] backend=landlock");
+   36|      2|            return Arc::new(lb);
+   37|      0|        }
+   38|       |    }
+   39|       |    #[cfg(target_os = "macos")]
+   40|       |    {
+   41|       |        let sb = super::macos::SeatbeltBackend::new();
+   42|       |        if sb.is_available() {
+   43|       |            log::info!("[cwd_jail] backend=seatbelt");
+   44|       |            return Arc::new(sb);
+   45|       |        }
+   46|       |    }
+   47|       |    #[cfg(target_os = "windows")]
+   48|       |    {
+   49|       |        let ac = super::windows::AppContainerBackend::new();
+   50|       |        if ac.is_available() {
+   51|       |            log::info!("[cwd_jail] backend=appcontainer");
+   52|       |            return Arc::new(ac);
+   53|       |        }
+   54|       |    }
+   55|      0|    log::warn!("[cwd_jail] no OS sandbox available");
+   56|      0|    Arc::new(UnsupportedBackend)
+   57|      2|}
+   58|       |
+   59|       |#[cfg(test)]
+   60|       |#[path = "detect_tests.rs"]
+   61|       |mod tests;
+
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/crates/tinybox-jail/src/jail.rs:
+    1|       |//! Cross-platform directory-jail facade.
+    2|       |//!
+    3|       |//! A [`Jail`] describes *what* the agent is allowed to see; a [`JailBackend`]
+    4|       |//! enforces it on a specific OS. Callers only interact with [`Jail`] and the
+    5|       |//! top-level [`crate::spawn`] function — they
+    6|       |//! never pick a backend by name.
+    7|       |
+    8|       |use std::path::{Path, PathBuf};
+    9|       |use std::process::{Child, Command};
+   10|       |
+   11|       |/// Declarative description of a directory jail.
+   12|       |///
+   13|       |/// One `root` (read/write), zero or more `read_only` paths, an optional
+   14|       |/// allow-list of extra paths the child *may* read, and a network toggle.
+   15|       |/// Backends translate this into Landlock rules, a Seatbelt profile, or an
+   16|       |/// AppContainer ACL.
+   17|       |#[derive(Debug, Clone)]
+   18|       |pub struct Jail {
+   19|       |    /// Primary read/write root. The child cannot escape this directory for
+   20|       |    /// writes. Must be an existing, canonicalizable directory.
+   21|       |    pub root: PathBuf,
+   22|       |    /// Extra paths the child may read (e.g. `/usr/lib`, the runtime-node
+   23|       |    /// install). Writes are still denied.
+   24|       |    pub read_only: Vec<PathBuf>,
+   25|       |    /// Allow outbound network. Most agent tools need this; some risky tools
+   26|       |    /// (untrusted code execution) should disable it.
+   27|       |    pub allow_net: bool,
+   28|       |    /// Allow the child to spawn further child processes. AppContainer and
+   29|       |    /// Seatbelt can deny this; Landlock cannot.
+   30|       |    pub allow_subprocess: bool,
+   31|       |    /// Free-form label used by audit logs and (on Windows) as the basis for
+   32|       |    /// the AppContainer profile name. Keep it short and ASCII.
+   33|       |    pub label: String,
+   34|       |}
+   35|       |
+   36|       |impl Jail {
+   37|       |    /// Convenience: read/write jail rooted at `root` with networking enabled
+   38|       |    /// and no additional read-only mounts.
+   39|     19|    pub fn new(root: impl AsRef<Path>, label: impl Into<String>) -> Self {
+   40|     19|        Self {
+   41|     19|            root: root.as_ref().to_path_buf(),
+   42|     19|            read_only: Vec::new(),
+   43|     19|            allow_net: true,
+   44|     19|            allow_subprocess: true,
+   45|     19|            label: label.into(),
+   46|     19|        }
+   47|     19|    }
+   48|       |
+   49|       |    /// Grants read (and execute) access to an extra path outside the root.
+   50|     14|    pub fn add_read_only(mut self, path: impl AsRef<Path>) -> Self {
+   51|     14|        self.read_only.push(path.as_ref().to_path_buf());
+   52|     14|        self
+   53|     14|    }
+   54|       |
+   55|       |    /// Asks the backend to block network access where it can.
+   56|      3|    pub fn deny_net(mut self) -> Self {
+   57|      3|        self.allow_net = false;
+   58|      3|        self
+   59|      3|    }
+   60|       |
+   61|       |    /// Asks the backend to forbid spawning further subprocesses where it can.
+   62|      3|    pub fn deny_subprocess(mut self) -> Self {
+   63|      3|        self.allow_subprocess = false;
+   64|      3|        self
+   65|      3|    }
+   66|       |
+   67|       |    /// Canonicalize `root` and `read_only` so backends never see `..` or
+   68|       |    /// symlink trickery. Returns an error if `root` does not exist.
+   69|     11|    pub fn canonicalize(&mut self) -> std::io::Result<()> {
+   70|     11|        self.root = self.root.canonicalize()?;
+                      ^7                                  ^4
+   71|      7|        for p in self.read_only.iter_mut() {
+                          ^5
+   72|      5|            if let Ok(c) = p.canonicalize() {
+                                    ^4
+   73|      4|                *p = c;
+   74|      4|            }
+                          ^1
+   75|       |        }
+   76|      7|        Ok(())
+   77|     11|    }
+   78|       |
+   79|       |    /// Best-effort canonicalize that swallows errors and logs them. Most
+   80|       |    /// callers should use the validating [`Jail::canonicalize`] path that
+   81|       |    /// [`crate::spawn`] runs automatically.
+   82|      1|    pub fn canonicalize_or_log(&mut self) {
+   83|      1|        if let Err(e) = self.canonicalize() {
+   84|      1|            log::warn!(
+   85|       |                "[cwd_jail] failed to canonicalize jail root {}: {}",
+   86|      0|                self.root.display(),
+   87|       |                e
+   88|       |            );
+   89|      0|        }
+   90|      1|    }
+   91|       |}
+   92|       |
+   93|       |/// OS-specific enforcement of a [`Jail`].
+   94|       |///
+   95|       |/// We model spawning rather than `Command` mutation because Windows
+   96|       |/// AppContainer requires custom `CreateProcess` flags that `std`'s
+   97|       |/// `Command::spawn` does not expose.
+   98|       |pub trait JailBackend: Send + Sync {
+   99|       |    /// Stable identifier, used in logs / audit ("landlock", "seatbelt",
+  100|       |    /// "appcontainer", "noop").
+  101|       |    fn name(&self) -> &'static str;
+  102|       |
+  103|       |    /// Whether the backend can actually enforce the jail in this process /
+  104|       |    /// on this kernel build. Auto-detection consults this before returning
+  105|       |    /// a backend.
+  106|       |    fn is_available(&self) -> bool;
+  107|       |
+  108|       |    /// Spawn `cmd` under the jail described by `jail`. Backends own how the
+  109|       |    /// jail is materialized (Landlock ruleset, sandbox-exec wrapper,
+  110|       |    /// AppContainer profile + restricted token).
+  111|       |    fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child>;
+  112|       |}
+  113|       |
+  114|       |#[cfg(test)]
+  115|       |#[path = "jail_tests.rs"]
+  116|       |mod tests;
+
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/crates/tinybox-jail/src/lib.rs:
+    1|       |//! Directory jail (cwd_jail): jail an agent/tool into a single workspace.
+    2|       |//!
+    3|       |//! ## Why this exists
+    4|       |//!
+    5|       |//! `tinybox-linux` isolates a whole box with namespaces; this crate is a
+    6|       |//! different, lighter mechanism: it confines a single spawned `Command` to one
+    7|       |//! directory tree using whatever the host OS offers, with no daemon and no
+    8|       |//! container runtime.
+    9|       |//!
+   10|       |//! This crate is the user-facing facade. Callers describe *what* the
+   11|       |//! jail looks like ([`Jail`]) and the module picks the right OS backend:
+   12|       |//!
+   13|       |//! | OS      | Backend       | Mechanism                                  |
+   14|       |//! |---------|---------------|--------------------------------------------|
+   15|       |//! | Linux   | landlock      | Kernel 5.13+ LSM, applied in `pre_exec`    |
+   16|       |//! | macOS   | seatbelt      | `sandbox-exec -p '<profile>' …`            |
+   17|       |//! | Windows | appcontainer  | `CreateAppContainerProfile` + `STARTUPINFOEX` |
+   18|       |//! | other   | unsupported   | Spawning is rejected                       |
+   19|       |//!
+   20|       |//! ## Quick start
+   21|       |//!
+   22|       |//! ```ignore
+   23|       |//! use tinybox_jail::{spawn, Jail};
+   24|       |//! use std::process::Command;
+   25|       |//!
+   26|       |//! let mut jail = Jail::new("/Users/x/work/proj", "agent.delegate")
+   27|       |//!     .add_read_only("/usr/lib")
+   28|       |//!     .deny_subprocess();
+   29|       |//! jail.canonicalize_or_log();
+   30|       |//!
+   31|       |//! let mut cmd = Command::new("node");
+   32|       |//! cmd.arg("script.js");
+   33|       |//! let child = spawn(&jail, cmd)?;
+   34|       |//! ```
+   35|       |//!
+   36|       |//! ## What this does *not* do
+   37|       |//!
+   38|       |//! - It does not jail the current process. Backends spawn a child. The core
+   39|       |//!   itself is trusted; only the things it shells out to are caged.
+   40|       |//! - It does not decide *whether* a command may run. The host applies its own
+   41|       |//!   policy first; this crate decides *what filesystem* the command sees once
+   42|       |//!   approved.
+   43|       |//! - It does not encrypt files. ACLs / Landlock rules / Seatbelt profiles
+   44|       |//!   are the wall — anything inside `root` is fully visible to the child.
+   45|       |
+   46|       |#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+   47|       |
+   48|       |pub mod detect;
+   49|       |pub mod jail;
+   50|       |pub mod noop;
+   51|       |pub mod registry;
+   52|       |
+   53|       |#[cfg(target_os = "linux")]
+   54|       |pub mod linux;
+   55|       |#[cfg(target_os = "macos")]
+   56|       |pub mod macos;
+   57|       |#[cfg(target_os = "windows")]
+   58|       |pub mod windows;
+   59|       |
+   60|       |pub use jail::{Jail, JailBackend};
+   61|       |pub use noop::{NOOP_BACKEND_NAME, NoopBackend};
+   62|       |pub use registry::{JailRecord, JailRegistry};
+   63|       |
+   64|       |use std::process::{Child, Command};
+   65|       |use std::sync::{Arc, OnceLock};
+   66|       |
+   67|       |/// Cached default backend for the current platform.
+   68|       |static DEFAULT_BACKEND: OnceLock<Arc<dyn JailBackend>> = OnceLock::new();
+   69|       |
+   70|       |/// Returns the process-wide default backend, lazily auto-detected.
+   71|     66|pub fn default_backend() -> Arc<dyn JailBackend> {
+   72|     66|    DEFAULT_BACKEND.get_or_init(detect::pick_backend).clone()
+   73|     66|}
+   74|       |
+   75|       |/// Spawn `cmd` inside the jail described by `jail`, using the default backend.
+   76|       |///
+   77|       |/// `jail.canonicalize()` is called once here so the backends never see
+   78|       |/// `..` or symlinks. If the root does not exist, the spawn fails with
+   79|       |/// `NotFound` (canonicalize bubbles it up) — callers should create the
+   80|       |/// workspace before encapsulating.
+   81|      2|pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
+   82|      2|    let mut jail = jail.clone();
+   83|      2|    jail.canonicalize()?;
+                                     ^0
+   84|      2|    default_backend().spawn(&jail, cmd)
+   85|      2|}
+   86|       |
+   87|       |/// Same as [`spawn`] but with a caller-supplied backend. Useful in
+   88|       |/// tests and for callers that want to opt into a weaker backend
+   89|       |/// explicitly (e.g. forcing [`NoopBackend`] during local dev).
+   90|      3|pub fn spawn_with(backend: &dyn JailBackend, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
+   91|      3|    let mut jail = jail.clone();
+   92|      3|    jail.canonicalize()?;
+                                     ^1
+   93|      2|    backend.spawn(&jail, cmd)
+   94|      3|}
+   95|       |
+   96|       |#[cfg(test)]
+   97|       |#[path = "mod_tests.rs"]
+   98|       |mod tests;
+
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/crates/tinybox-jail/src/linux.rs:
+    1|       |//! Linux backend: Landlock LSM (kernel 5.13+).
+    2|       |//!
+    3|       |//! Mirrors the host-side Landlock implementation
+    4|       |//! but wraps it behind the [`JailBackend`] trait so callers don't have to
+    5|       |//! plumb `SecurityConfig`. Landlock is applied via `pre_exec`, which runs
+    6|       |//! in the *child* process after `fork()` and before `exec()` — the parent
+    7|       |//! retains its broader privileges, the child gets the ruleset before any
+    8|       |//! user code runs. Same model used by Chromium's Linux sandbox.
+    9|       |
+   10|       |#![cfg(target_os = "linux")]
+   11|       |
+   12|       |use std::process::{Child, Command};
+   13|       |
+   14|       |use super::jail::{Jail, JailBackend};
+   15|       |
+   16|       |/// Landlock LSM backend (kernel 5.13+).
+   17|       |#[derive(Debug)]
+   18|       |pub struct LandlockBackend;
+   19|       |
+   20|       |impl Default for LandlockBackend {
+   21|      1|    fn default() -> Self {
+   22|      1|        Self::new()
+   23|      1|    }
+   24|       |}
+   25|       |
+   26|       |impl LandlockBackend {
+   27|       |    /// Creates the backend; availability is checked by `is_available`.
+   28|      6|    pub fn new() -> Self {
+   29|      6|        Self
+   30|      6|    }
+   31|       |}
+   32|       |
+   33|       |impl JailBackend for LandlockBackend {
+   34|     64|    fn name(&self) -> &'static str {
+   35|     64|        "landlock"
+   36|     64|    }
+   37|       |
+   38|      5|    fn is_available(&self) -> bool {
+   39|       |        #[cfg(feature = "landlock")]
+   40|       |        {
+   41|       |            use landlock::{AccessFs, Ruleset, RulesetAttr};
+   42|      5|            Ruleset::default()
+   43|      5|                .handle_access(AccessFs::ReadFile)
+   44|      5|                .and_then(|r| r.create())
+   45|      5|                .is_ok()
+   46|       |        }
+   47|       |        #[cfg(not(feature = "landlock"))]
+   48|       |        {
+   49|       |            false
+   50|       |        }
+   51|      5|    }
+   52|       |
+   53|      4|    fn spawn(&self, jail: &Jail, mut cmd: Command) -> std::io::Result<Child> {
+   54|       |        #[cfg(feature = "landlock")]
+   55|       |        {
+   56|       |            use landlock::{
+   57|       |                AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+   58|       |            };
+   59|       |            use std::os::unix::process::CommandExt;
+   60|       |
+   61|      4|            let writes = AccessFs::WriteFile
+   62|      4|                | AccessFs::RemoveDir
+   63|      4|                | AccessFs::RemoveFile
+   64|      4|                | AccessFs::MakeChar
+   65|      4|                | AccessFs::MakeDir
+   66|      4|                | AccessFs::MakeReg
+   67|      4|                | AccessFs::MakeSock
+   68|      4|                | AccessFs::MakeFifo
+   69|      4|                | AccessFs::MakeBlock
+   70|      4|                | AccessFs::MakeSym
+   71|      4|                | AccessFs::Refer
+   72|      4|                | AccessFs::Truncate;
+   73|      4|            let reads = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
+   74|      4|            let mut ruleset = Ruleset::default()
+   75|      4|                .handle_access(writes | reads)
+   76|      4|                .and_then(|ruleset| ruleset.create())
+   77|      4|                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                                               ^0                    ^0    ^0           ^0
+   78|      4|            let root_fd = PathFd::new(&jail.root)
+   79|      4|                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                                               ^0                    ^0    ^0           ^0
+   80|      4|            ruleset = ruleset
+   81|      4|                .add_rule(PathBeneath::new(root_fd, writes | reads))
+   82|      4|                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                                               ^0                    ^0    ^0           ^0
+   83|      9|            for path in &jail.read_only {
+                                      ^4
+   84|      8|                let fd =
+   85|      9|                    PathFd::new(path).map_err(|error| std::io::Error::other(error.to_string()))?;
+                                                                    ^1                    ^1    ^1           ^1
+   86|      8|                ruleset = ruleset
+   87|      8|                    .add_rule(PathBeneath::new(fd, reads))
+   88|      8|                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                                                   ^0                    ^0    ^0           ^0
+   89|       |            }
+   90|      3|            let mut ruleset = Some(ruleset);
+   91|       |
+   92|       |            // SAFETY: the child callback only applies this prebuilt ruleset.
+   93|       |            unsafe {
+   94|      3|                cmd.pre_exec(move || match ruleset.take() {
+                                                         ^0
+   95|      0|                    Some(ruleset) => match ruleset.restrict_self() {
+   96|      0|                        Ok(_) => Ok(()),
+   97|      0|                        Err(_) => Err(std::io::Error::from_raw_os_error(5)),
+   98|       |                    },
+   99|      0|                    None => Err(std::io::Error::from_raw_os_error(22)),
+  100|      0|                });
+  101|       |            }
+  102|       |
+  103|      3|            cmd.spawn()
+  104|       |        }
+  105|       |        #[cfg(not(feature = "landlock"))]
+  106|       |        {
+  107|       |            let _ = jail;
+  108|       |            cmd.spawn()
+  109|       |        }
+  110|      4|    }
+  111|       |}
+  112|       |
+  113|       |#[cfg(test)]
+  114|       |#[path = "linux_tests.rs"]
+  115|       |mod tests;
+
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/crates/tinybox-jail/src/noop.rs:
+    1|       |//! Fallback backend: no enforcement, just spawns.
+    2|       |//!
+    3|       |//! Used when no OS-level jail is available (unsupported platform, missing
+    4|       |//! kernel feature, etc.). Callers can still rely on application-layer
+    5|       |//! `validate_path_within_root` checks.
+    6|       |
+    7|       |use std::process::{Child, Command};
+    8|       |
+    9|       |use super::jail::{Jail, JailBackend};
+   10|       |
+   11|       |/// The name `NoopBackend` reports, and the value callers compare against to
+   12|       |/// detect that no OS confinement is in force.
+   13|       |///
+   14|       |/// Single-sourced deliberately: `sandbox::ops::create_sandbox_backend` decides
+   15|       |/// whether the local sandbox handle reports `Ready` or `Inactive` by comparing
+   16|       |/// against this, so a rename here must not silently turn an unconfined host
+   17|       |/// back into a `Ready` report.
+   18|       |pub const NOOP_BACKEND_NAME: &str = "noop";
+   19|       |
+   20|       |/// Backend that spawns the command unmodified. Always available; audit-only.
+   21|       |#[derive(Debug, Default)]
+   22|       |pub struct NoopBackend;
+   23|       |
+   24|       |impl JailBackend for NoopBackend {
+   25|      2|    fn name(&self) -> &'static str {
+   26|      2|        NOOP_BACKEND_NAME
+   27|      2|    }
+   28|       |
+   29|      2|    fn is_available(&self) -> bool {
+   30|      2|        true
+   31|      2|    }
+   32|       |
+   33|      3|    fn spawn(&self, _jail: &Jail, mut cmd: Command) -> std::io::Result<Child> {
+   34|      3|        cmd.spawn()
+   35|      3|    }
+   36|       |}
+   37|       |
+   38|       |#[cfg(test)]
+   39|       |#[path = "noop_tests.rs"]
+   40|       |mod tests;
+
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/crates/tinybox-jail/src/registry.rs:
+    1|       |//! Jail registry — manage many jailed workspaces side-by-side.
+    2|       |//!
+    3|       |//! A [`JailRegistry`] is rooted at a single base directory (typically
+    4|       |//! `~/.openhuman/jails/` or `<workspace>/jails/`) and owns every active
+    5|       |//! jail underneath it. Each jail has:
+    6|       |//!
+    7|       |//! - A stable **id** (UUID-ish, used in paths and the index).
+    8|       |//! - A user-visible **label** (free text, displayed in UI, used for
+    9|       |//!   AppContainer profile derivation on Windows).
+   10|       |//! - A **directory** at `<base>/<id>/` that the [`crate::Jail`]
+   11|       |//!   is rooted in.
+   12|       |//! - **Metadata**: created/updated timestamps, backend used at create
+   13|       |//!   time, optional notes.
+   14|       |//!
+   15|       |//! All metadata is persisted to `<base>/index.json`. The on-disk index is
+   16|       |//! the source of truth; the in-memory state is rebuilt from it on every
+   17|       |//! [`JailRegistry::open`].
+   18|       |//!
+   19|       |//! Concurrency: a `std::sync::Mutex` guards mutations. The index file
+   20|       |//! is rewritten atomically via write-temp + rename. This is sufficient
+   21|       |//! for the single-process core; if we ever want multi-process registry
+   22|       |//! access we'll need OS-level file locking — explicit non-goal for now.
+   23|       |
+   24|       |// A poisoned index mutex means a panic mid-mutation; propagating it is the
+   25|       |// behaviour this module always had.
+   26|       |#![allow(clippy::unwrap_used)]
+   27|       |
+   28|       |use std::collections::BTreeMap;
+   29|       |use std::fs;
+   30|       |use std::io;
+   31|       |use std::path::{Path, PathBuf};
+   32|       |use std::process::{Child, Command};
+   33|       |use std::sync::Arc;
+   34|       |use std::sync::Mutex;
+   35|       |use std::time::UNIX_EPOCH;
+   36|       |
+   37|       |use serde::{Deserialize, Serialize};
+   38|       |use tinybox_core::clock::{Clock, SystemClock};
+   39|       |
+   40|       |use super::jail::{Jail, JailBackend};
+   41|       |use super::{default_backend, spawn_with};
+   42|       |
+   43|       |/// Metadata persisted for each jail.
+   44|       |#[derive(Debug, Clone, Serialize, Deserialize)]
+   45|       |pub struct JailRecord {
+   46|       |    /// Stable identifier, also the directory name under the registry base.
+   47|       |    pub id: String,
+   48|       |    /// Caller-supplied human label.
+   49|       |    pub label: String,
+   50|       |    /// Absolute jail directory.
+   51|       |    pub dir: PathBuf,
+   52|       |    /// Name of the backend that was the default when the jail was created.
+   53|       |    pub backend_at_create: String,
+   54|       |    /// Creation time, seconds since the Unix epoch.
+   55|       |    pub created_at_unix: u64,
+   56|       |    /// Last-modified time, seconds since the Unix epoch.
+   57|       |    pub updated_at_unix: u64,
+   58|       |    #[serde(default)]
+   59|       |    /// Free-form notes.
+   60|       |    pub notes: Option<String>,
+   61|       |}
+   62|       |
+   63|       |#[derive(Debug, Default, Serialize, Deserialize)]
+   64|       |struct Index {
+   65|       |    /// id → record. BTreeMap so list() is deterministically ordered.
+   66|       |    records: BTreeMap<String, JailRecord>,
+   67|       |    #[serde(default)]
+   68|       |    schema_version: u32,
+   69|       |}
+   70|       |
+   71|       |const INDEX_SCHEMA_VERSION: u32 = 1;
+   72|       |const INDEX_FILENAME: &str = "index.json";
+   73|       |
+   74|       |/// Top-level manager for multiple jailed workspaces.
+   75|       |#[derive(Debug)]
+   76|       |pub struct JailRegistry {
+   77|       |    base: PathBuf,
+   78|       |    index: Mutex<Index>,
+   79|       |    clock: Arc<dyn Clock>,
+   80|       |}
+   81|       |
+   82|       |impl JailRegistry {
+   83|       |    /// Open (or create) a registry rooted at `base`. The directory is
+   84|       |    /// created if it does not exist; the index file is loaded if present
+   85|       |    /// and seeded blank otherwise.
+   86|     31|    pub fn open(base: impl AsRef<Path>) -> io::Result<Self> {
+   87|     31|        Self::open_with_clock(base, Arc::new(SystemClock::new()))
+   88|     31|    }
+   89|       |
+   90|       |    /// Open a registry with a caller-supplied clock.
+   91|       |    ///
+   92|       |    /// # Errors
+   93|       |    ///
+   94|       |    /// Returns an error if the registry directory cannot be created or its
+   95|       |    /// index cannot be read or decoded.
+   96|     32|    pub fn open_with_clock(base: impl AsRef<Path>, clock: Arc<dyn Clock>) -> io::Result<Self> {
+   97|     32|        let base = base.as_ref().to_path_buf();
+   98|     32|        fs::create_dir_all(&base)?;
+                                               ^1
+   99|     31|        let idx_path = base.join(INDEX_FILENAME);
+  100|     31|        let index = if idx_path.exists() {
+                          ^30
+  101|      2|            log::debug!(
+  102|       |                "[cwd_jail] registry.open loading index {}",
+  103|      0|                idx_path.display()
+  104|       |            );
+  105|      2|            let raw = fs::read(&idx_path)?;
+                                                       ^0
+  106|      2|            serde_json::from_slice::<Index>(&raw)
+  107|      2|                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                                           ^1             ^1                          ^1 ^1
+  108|       |        } else {
+  109|     29|            log::debug!("[cwd_jail] registry.open fresh index at {}", base.display());
+                                                                                    ^0
+  110|     29|            Index {
+  111|     29|                records: BTreeMap::new(),
+  112|     29|                schema_version: INDEX_SCHEMA_VERSION,
+  113|     29|            }
+  114|       |        };
+  115|     30|        log::debug!(
+  116|       |            "[cwd_jail] registry.open base={} records={}",
+  117|      0|            base.display(),
+  118|      0|            index.records.len()
+  119|       |        );
+  120|     30|        Ok(Self {
+  121|     30|            base,
+  122|     30|            index: Mutex::new(index),
+  123|     30|            clock,
+  124|     30|        })
+  125|     32|    }
+  126|       |
+  127|       |    /// Root directory of this registry.
+  128|      1|    pub fn base(&self) -> &Path {
+  129|      1|        &self.base
+  130|      1|    }
+  131|       |
+  132|       |    /// Create a new jail directory. Returns the persisted record.
+  133|     60|    pub fn create(&self, label: impl Into<String>) -> io::Result<JailRecord> {
+  134|     60|        let label = label.into();
+  135|       |        // Label is free-form user input — log only its length so we get
+  136|       |        // a useful breadcrumb without leaking arbitrary text into logs.
+  137|     60|        log::debug!("[cwd_jail] registry.create label_len={}", label.len());
+                                                                             ^0    ^0
+  138|       |
+  139|       |        // Loop until we find an id not already in the index. After a
+  140|       |        // process restart in the same second, the time+counter id can
+  141|       |        // repeat — without this loop we would silently overwrite an
+  142|       |        // existing record.
+  143|     60|        let mut idx = self.index.lock().unwrap();
+  144|     60|        let (id, dir) = loop {
+  145|     60|            let candidate = generate_id(now_unix(self.clock.as_ref()));
+  146|     60|            if !idx.records.contains_key(&candidate) {
+  147|     60|                let dir = self.base.join(&candidate);
+  148|     60|                fs::create_dir_all(&dir)?;
+                                                      ^0
+  149|     60|                break (candidate, dir);
+  150|      0|            }
+  151|      0|            log::trace!("[cwd_jail] id collision, regenerating");
+  152|       |        };
+  153|       |
+  154|     60|        let now = now_unix(self.clock.as_ref());
+  155|     60|        let record = JailRecord {
+  156|     60|            id: id.clone(),
+  157|     60|            label,
+  158|     60|            dir,
+  159|     60|            backend_at_create: default_backend().name().to_string(),
+  160|     60|            created_at_unix: now,
+  161|     60|            updated_at_unix: now,
+  162|     60|            notes: None,
+  163|     60|        };
+  164|     60|        idx.records.insert(id.clone(), record.clone());
+  165|       |        // Roll back both the in-memory insert and the freshly-created
+  166|       |        // directory if persistence fails — otherwise the registry would
+  167|       |        // expose a record through get()/list() that does not exist on
+  168|       |        // disk, and a subsequent reopen would silently lose it.
+  169|     60|        if let Err(e) = self.persist(&idx) {
+                                 ^1
+  170|      1|            idx.records.remove(&id);
+  171|      1|            let _ = fs::remove_dir_all(&record.dir);
+  172|      1|            log::warn!("[cwd_jail] registry.create persist failed; rolled back: {e}");
+  173|      1|            return Err(e);
+  174|     59|        }
+  175|     59|        log::debug!(
+  176|       |            "[cwd_jail] registry.create id={id} dir={}",
+  177|      0|            record.dir.display()
+  178|       |        );
+  179|     59|        Ok(record)
+  180|     60|    }
+  181|       |
+  182|       |    /// Look up a jail by id.
+  183|     11|    pub fn get(&self, id: &str) -> Option<JailRecord> {
+  184|     11|        self.index.lock().unwrap().records.get(id).cloned()
+  185|     11|    }
+  186|       |
+  187|       |    /// List every active jail. Deterministic order (by id).
+  188|      6|    pub fn list(&self) -> Vec<JailRecord> {
+  189|      6|        self.index
+  190|      6|            .lock()
+  191|      6|            .unwrap()
+  192|      6|            .records
+  193|      6|            .values()
+  194|      6|            .cloned()
+  195|      6|            .collect()
+  196|      6|    }
+  197|       |
+  198|       |    /// Search by label substring (case-insensitive). Useful for UI.
+  199|      4|    pub fn find_by_label(&self, needle: &str) -> Vec<JailRecord> {
+  200|      4|        let needle = needle.to_lowercase();
+  201|      4|        self.index
+  202|      4|            .lock()
+  203|      4|            .unwrap()
+  204|      4|            .records
+  205|      4|            .values()
+  206|      9|            .filter(|r| r.label.to_lowercase().contains(&needle))
+                           ^4
+  207|      4|            .cloned()
+  208|      4|            .collect()
+  209|      4|    }
+  210|       |
+  211|       |    /// Rename: changes the *label* only. The directory id stays put so
+  212|       |    /// existing path references keep working. AppContainer profile names
+  213|       |    /// are derived from `id` (stable), not `label`, for the same reason.
+  214|      4|    pub fn rename(&self, id: &str, new_label: impl Into<String>) -> io::Result<JailRecord> {
+  215|      4|        let new_label = new_label.into();
+  216|      4|        log::debug!(
+  217|       |            "[cwd_jail] registry.rename id={id} new_label_len={}",
+  218|      0|            new_label.len()
+  219|       |        );
+  220|      4|        let mut idx = self.index.lock().unwrap();
+  221|      4|        let record = idx
+                          ^3
+  222|      4|            .records
+  223|      4|            .get_mut(id)
+  224|      4|            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no jail {id}")))?;
+                                         ^1             ^1                       ^1                       ^1
+  225|       |        // Snapshot the prior label/timestamp so we can revert on
+  226|       |        // persist failure — without that the in-memory record would
+  227|       |        // diverge from disk.
+  228|      3|        let prev_label = std::mem::replace(&mut record.label, new_label);
+  229|      3|        let prev_updated =
+  230|      3|            std::mem::replace(&mut record.updated_at_unix, now_unix(self.clock.as_ref()));
+  231|      3|        let cloned = record.clone();
+  232|      3|        if let Err(e) = self.persist(&idx) {
+                                 ^1
+  233|      1|            if let Some(r) = idx.records.get_mut(id) {
+  234|      1|                r.label = prev_label;
+  235|      1|                r.updated_at_unix = prev_updated;
+  236|      1|            }
+                          ^0
+  237|      1|            log::warn!("[cwd_jail] registry.rename persist failed; rolled back: {e}");
+  238|      1|            return Err(e);
+  239|      2|        }
+  240|      2|        Ok(cloned)
+  241|      4|    }
+  242|       |
+  243|       |    /// Update the free-form notes field.
+  244|      4|    pub fn set_notes(&self, id: &str, notes: Option<String>) -> io::Result<JailRecord> {
+  245|      4|        log::debug!(
+  246|       |            "[cwd_jail] registry.set_notes id={id} has_notes={}",
+  247|      0|            notes.is_some()
+  248|       |        );
+  249|      4|        let mut idx = self.index.lock().unwrap();
+  250|      4|        let record = idx
+                          ^3
+  251|      4|            .records
+  252|      4|            .get_mut(id)
+  253|      4|            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no jail {id}")))?;
+                                         ^1             ^1                       ^1                       ^1
+  254|      3|        let prev_notes = std::mem::replace(&mut record.notes, notes);
+  255|      3|        let prev_updated =
+  256|      3|            std::mem::replace(&mut record.updated_at_unix, now_unix(self.clock.as_ref()));
+  257|      3|        let cloned = record.clone();
+  258|      3|        if let Err(e) = self.persist(&idx) {
+                                 ^1
+  259|      1|            if let Some(r) = idx.records.get_mut(id) {
+  260|      1|                r.notes = prev_notes;
+  261|      1|                r.updated_at_unix = prev_updated;
+  262|      1|            }
+                          ^0
+  263|      1|            log::warn!("[cwd_jail] registry.set_notes persist failed; rolled back: {e}");
+  264|      1|            return Err(e);
+  265|      2|        }
+  266|      2|        Ok(cloned)
+  267|      4|    }
+  268|       |
+  269|       |    /// Delete a jail. Removes both the directory and the index entry.
+  270|       |    ///
+  271|       |    /// Refuses to delete a jail whose directory is not under `self.base` —
+  272|       |    /// belt-and-suspenders against a corrupted index pointing at `/`.
+  273|       |    /// Disk deletion happens *before* the in-memory record is removed,
+  274|       |    /// so a filesystem error doesn't leave the registry in a state
+  275|       |    /// where the entry is gone in-memory but the directory survives on
+  276|       |    /// disk until the next `open()` reload.
+  277|     10|    pub fn delete(&self, id: &str) -> io::Result<()> {
+  278|     10|        let mut idx = self.index.lock().unwrap();
+  279|     10|        let record = idx
+                          ^8
+  280|     10|            .records
+  281|     10|            .get(id)
+  282|     10|            .cloned()
+  283|     10|            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no jail {id}")))?;
+                                         ^2             ^2                       ^2                       ^2
+  284|      8|        log::debug!(
+  285|       |            "[cwd_jail] registry.delete id={id} dir={}",
+  286|      0|            record.dir.display()
+  287|       |        );
+  288|       |
+  289|      8|        let resolved = record
+  290|      8|            .dir
+  291|      8|            .canonicalize()
+  292|      8|            .unwrap_or_else(|_| record.dir.clone());
+                                              ^1         ^1
+  293|      8|        let resolved_base = self
+  294|      8|            .base
+  295|      8|            .canonicalize()
+  296|      8|            .unwrap_or_else(|_| self.base.clone());
+                                              ^0        ^0
+  297|      8|        if !resolved.starts_with(&resolved_base) {
+  298|       |            // Index is suspicious — don't touch anything on disk and
+  299|       |            // leave the in-memory record alone too. The caller can
+  300|       |            // diagnose and fix.
+  301|      1|            log::warn!(
+  302|       |                "[cwd_jail] refusing delete: dir {} not under base {}",
+  303|      0|                resolved.display(),
+  304|      0|                resolved_base.display()
+  305|       |            );
+  306|      1|            return Err(io::Error::new(
+  307|      1|                io::ErrorKind::PermissionDenied,
+  308|      1|                format!(
+  309|      1|                    "refusing to delete jail outside registry base: {}",
+  310|      1|                    resolved.display()
+  311|      1|                ),
+  312|      1|            ));
+  313|      7|        }
+  314|       |
+  315|      7|        if record.dir.exists() {
+  316|      6|            fs::remove_dir_all(&record.dir)?;
+                                                         ^0
+  317|      1|        }
+  318|       |        // Disk side succeeded — now remove from the index and persist.
+  319|       |        // If persist fails here the directory is already gone, so we
+  320|       |        // can't fully roll back; we keep the in-memory removal aligned
+  321|       |        // with disk reality and surface the error.
+  322|      7|        idx.records.remove(id);
+  323|      7|        if let Err(e) = self.persist(&idx) {
+                                 ^1
+  324|      1|            log::warn!(
+  325|       |                "[cwd_jail] registry.delete persist failed after dir removal; \
+  326|       |                 index.json may resurrect id={id} on next reopen: {e}"
+  327|       |            );
+  328|      1|            return Err(e);
+  329|      6|        }
+  330|      6|        Ok(())
+  331|     10|    }
+  332|       |
+  333|       |    /// Drop *all* jails. Convenience for tests / "reset everything"
+  334|       |    /// flows. Returns the number of jails removed.
+  335|      2|    pub fn clear(&self) -> io::Result<usize> {
+  336|      2|        let ids: Vec<String> = self.index.lock().unwrap().records.keys().cloned().collect();
+  337|      2|        let n = ids.len();
+  338|      2|        log::debug!("[cwd_jail] registry.clear dropping n={n}");
+  339|      3|        for id in ids {
+                                ^2
+  340|      3|            self.delete(&id)?;
+                                          ^0
+  341|       |        }
+  342|      2|        Ok(n)
+  343|      2|    }
+  344|       |
+  345|       |    /// Spawn `cmd` inside the named jail, using the default backend.
+  346|       |    /// Convenience wrapper — the same effect as
+  347|       |    /// `spawn(&Jail::new(record.dir, record.label), cmd)`.
+  348|      0|    pub fn spawn_in(&self, id: &str, cmd: Command) -> io::Result<Child> {
+  349|      0|        let jail = self.jail_for(id)?;
+  350|      0|        log::debug!("[cwd_jail] registry.spawn_in id={id}");
+  351|      0|        spawn_with(default_backend().as_ref(), &jail, cmd)
+  352|      0|    }
+  353|       |
+  354|       |    /// Same as [`Self::spawn_in`] but with a caller-supplied backend.
+  355|      4|    pub fn spawn_in_with(
+  356|      4|        &self,
+  357|      4|        id: &str,
+  358|      4|        backend: &dyn JailBackend,
+  359|      4|        cmd: Command,
+  360|      4|    ) -> io::Result<Child> {
+  361|      4|        let jail = self.jail_for(id)?;
+                          ^1                      ^3
+  362|      1|        log::debug!(
+  363|       |            "[cwd_jail] registry.spawn_in_with id={id} backend={}",
+  364|      0|            backend.name()
+  365|       |        );
+  366|      1|        spawn_with(backend, &jail, cmd)
+  367|      4|    }
+  368|       |
+  369|       |    /// Build a canonicalized [`Jail`] for the given id, refusing if the
+  370|       |    /// persisted record points outside `self.base`. Centralizes the
+  371|       |    /// containment check so both `spawn_in` and `spawn_in_with` are
+  372|       |    /// protected against a corrupted index that could otherwise be used
+  373|       |    /// to bypass the directory jail root.
+  374|      4|    fn jail_for(&self, id: &str) -> io::Result<Jail> {
+  375|      4|        let record = self
+                          ^3
+  376|      4|            .get(id)
+  377|      4|            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no jail {id}")))?;
+                                         ^1             ^1                       ^1                       ^1
+  378|       |
+  379|      3|        let resolved = record
+  380|      3|            .dir
+  381|      3|            .canonicalize()
+  382|      3|            .unwrap_or_else(|_| record.dir.clone());
+                                              ^1         ^1
+  383|      3|        let resolved_base = self
+  384|      3|            .base
+  385|      3|            .canonicalize()
+  386|      3|            .unwrap_or_else(|_| self.base.clone());
+                                              ^0        ^0
+  387|      3|        if !resolved.starts_with(&resolved_base) {
+  388|      1|            log::warn!(
+  389|       |                "[cwd_jail] refusing spawn: jail {id} dir {} not under base {}",
+  390|      0|                resolved.display(),
+  391|      0|                resolved_base.display()
+  392|       |            );
+  393|      1|            return Err(io::Error::new(
+  394|      1|                io::ErrorKind::PermissionDenied,
+  395|      1|                format!(
+  396|      1|                    "jail {id} dir {} is outside registry base {}",
+  397|      1|                    resolved.display(),
+  398|      1|                    resolved_base.display()
+  399|      1|                ),
+  400|      1|            ));
+  401|      2|        }
+  402|       |
+  403|      2|        let mut jail = Jail::new(&record.dir, &record.label);
+  404|      2|        jail.canonicalize()?;
+                                         ^1
+  405|      1|        Ok(jail)
+  406|      4|    }
+  407|       |
+  408|       |    /// Atomic-rename write of the index. Falls back to direct write on
+  409|       |    /// Windows if rename-over fails (Windows traditionally refused
+  410|       |    /// rename-over-existing, though modern NTFS/Win10 supports it).
+  411|     73|    fn persist(&self, idx: &Index) -> io::Result<()> {
+  412|     73|        let path = self.base.join(INDEX_FILENAME);
+  413|     73|        let tmp = self.base.join(format!("{INDEX_FILENAME}.tmp"));
+  414|     73|        let bytes = serde_json::to_vec_pretty(idx)
+  415|     73|            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                                       ^0             ^0                          ^0 ^0
+  416|     73|        fs::write(&tmp, &bytes)?;
+                                             ^4
+  417|     69|        match fs::rename(&tmp, &path) {
+  418|       |            Ok(()) => {
+  419|     69|                log::trace!(
+  420|       |                    "[cwd_jail] registry.persist atomic-rename n={}",
+  421|      0|                    idx.records.len()
+  422|       |                );
+  423|     69|                Ok(())
+  424|       |            }
+  425|      0|            Err(e) => {
+  426|       |                // Fallback: direct overwrite.
+  427|      0|                log::debug!(
+  428|       |                    "[cwd_jail] registry.persist rename failed ({e}); falling back to overwrite"
+  429|       |                );
+  430|      0|                fs::write(&path, &bytes)?;
+  431|      0|                let _ = fs::remove_file(&tmp);
+  432|      0|                Ok(())
+  433|       |            }
+  434|       |        }
+  435|     73|    }
+  436|       |}
+  437|       |
+  438|    126|fn now_unix(clock: &dyn Clock) -> u64 {
+  439|    126|    clock
+  440|    126|        .now()
+  441|    126|        .duration_since(UNIX_EPOCH)
+  442|    126|        .map(|d| d.as_secs())
+  443|    126|        .unwrap_or(0)
+  444|    126|}
+  445|       |
+  446|       |/// Short, URL-safe id. Not cryptographically random — we use it as a
+  447|       |/// directory name, not a token.
+  448|     60|fn generate_id(timestamp: u64) -> String {
+  449|       |    use std::sync::atomic::{AtomicU64, Ordering};
+  450|       |    static COUNTER: AtomicU64 = AtomicU64::new(0);
+  451|     60|    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+  452|     60|    format!("j{timestamp:x}{n:x}")
+  453|     60|}
+  454|       |
+  455|       |#[cfg(test)]
+  456|       |#[path = "registry_tests.rs"]
+  457|       |mod tests;
+
+/home/enamakel/work/libraries/tinybox/worktrees/pr-13/vendor/tinybus/crates/tinybus-module/src/lib.rs:
+    1|       |//! Module-side runtime for trusted tinybus `cdylib` integrations.
+    2|       |//!
+    3|       |//! Each module owns a Tokio runtime. A statically linked `cdylib` has its own
+    4|       |//! Tokio thread-locals, so attempting to borrow the host runtime is both
+    5|       |//! incorrect and capable of silently blocking a host worker thread.
+    6|       |
+    7|       |use std::ffi::c_void;
+    8|       |use std::future::Future;
+    9|       |use std::panic::{AssertUnwindSafe, catch_unwind};
+   10|       |use std::sync::atomic::{AtomicU64, Ordering};
+   11|       |use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+   12|       |use std::time::Duration;
+   13|       |
+   14|       |use async_trait::async_trait;
+   15|       |use tinybus::message::Message;
+   16|       |use tinybus::message::codec::MAX_FRAME_LEN;
+   17|       |use tinybus::module::abi::{
+   18|       |    TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_MODULE_VTABLE_BASE_SIZE, TB_OK, TB_PANICKED,
+   19|       |    TB_TIMEOUT, TbHostVtable, TbModuleVtable, TbModuleVtableV1Prefix,
+   20|       |};
+   21|       |use tinybus::{Connection, Error, Result, Transport};
+   22|       |use tokio::sync::{Mutex, mpsc};
+   23|       |
+   24|       |const MODULE_QUEUE_CAPACITY: usize = 256;
+   25|       |#[cfg(not(test))]
+   26|       |const MODULE_REINITIALIZE_DEADLINE: Duration = Duration::from_secs(4);
+   27|       |#[cfg(test)]
+   28|       |const MODULE_REINITIALIZE_DEADLINE: Duration = Duration::from_millis(100);
+   29|       |const MODULE_PANIC_ERROR: &str = "ai.tinyhumans.tinybus.Error.ModulePanicked";
+   30|       |static MANIFEST_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+   31|       |
+   32|       |/// Build and retain the exported manifest bytes for the process lifetime.
+   33|       |#[doc(hidden)]
+   34|       |pub struct ManifestDeclaration<'a> {
+   35|       |    pub name: &'a str,
+   36|       |    pub version: &'a str,
+   37|       |    pub provides: &'a [&'a str],
+   38|       |    pub methods: &'a [&'a str],
+   39|       |    pub signals: &'a [&'a str],
+   40|       |    pub requires: &'a [&'a str],
+   41|       |    pub optional: &'a [&'a str],
+   42|       |    pub lazy: bool,
+   43|       |    pub worker_threads: u32,
+   44|       |}
+   45|       |
+   46|       |/// Build and retain the exported manifest bytes for the process lifetime.
+   47|       |#[doc(hidden)]
+   48|       |pub fn manifest_slice(declaration: ManifestDeclaration<'_>) -> tinybus::module::abi::TbSlice {
+   49|       |    manifest_slice_in(&MANIFEST_BYTES, declaration)
+   50|       |}
+   51|       |
+   52|       |/// Retain a manifest in the caller's slot, allowing multiple linked modules.
+   53|       |#[doc(hidden)]
+   54|       |pub fn manifest_slice_in(
+   55|       |    slot: &'static OnceLock<Vec<u8>>,
+   56|       |    declaration: ManifestDeclaration<'_>,
+   57|       |) -> tinybus::module::abi::TbSlice {
+   58|       |    catch_unwind(AssertUnwindSafe(|| build_manifest_slice(slot, declaration))).unwrap_or(
+   59|       |        tinybus::module::abi::TbSlice {
+   60|       |            ptr: std::ptr::null(),
+   61|       |            len: 0,
+   62|       |        },
+   63|       |    )
+   64|       |}
+   65|       |
+   66|       |fn build_manifest_slice(
+   67|       |    slot: &'static OnceLock<Vec<u8>>,
+   68|       |    declaration: ManifestDeclaration<'_>,
+   69|       |) -> tinybus::module::abi::TbSlice {
+   70|       |    use tinybus::module::manifest::{
+   71|       |        Dependency, MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy, ProvidedInterface,
+   72|       |    };
+   73|       |    use tinybus::{BusName, InterfaceName, InterfaceVersion, ObjectPath, Version};
+   74|       |
+   75|       |    let bytes = slot.get_or_init(|| {
+   76|       |        let package_version =
+   77|       |            Version::parse(declaration.version).expect("package version is semver");
+   78|       |        let provided = |(index, interface): (usize, &&str)| ProvidedInterface {
+   79|       |            version: InterfaceVersion::provided(
+   80|       |                InterfaceName::new(*interface).expect("provided interface is valid"),
+   81|       |                package_version.clone(),
+   82|       |            ),
+   83|       |            methods: if index == 0 {
+   84|       |                declaration
+   85|       |                    .methods
+   86|       |                    .iter()
+   87|       |                    .map(|member| tinybus::MemberName::new(*member).expect("method is valid"))
+   88|       |                    .collect()
+   89|       |            } else {
+   90|       |                Vec::new()
+   91|       |            },
+   92|       |            signals: if index == 0 {
+   93|       |                declaration
+   94|       |                    .signals
+   95|       |                    .iter()
+   96|       |                    .map(|member| tinybus::MemberName::new(*member).expect("signal is valid"))
+   97|       |                    .collect()
+   98|       |            } else {
+   99|       |                Vec::new()
+  100|       |            },
+  101|       |        };
+  102|       |        let dependency = |interface: &&str, optional| Dependency {
+  103|       |            interface: InterfaceVersion::consumed(
+  104|       |                InterfaceName::new(*interface).expect("dependency interface is valid"),
+  105|       |                package_version.clone(),
+  106|       |            ),
+  107|       |            optional,
+  108|       |            reason: String::new(),
+  109|       |        };
+  110|       |        let bus_name = declaration
+  111|       |            .provides
+  112|       |            .first()
+  113|       |            .copied()
+  114|       |            .unwrap_or("ai.tinyhumans.module.Empty");
+  115|       |        let object_path = format!("/{}", bus_name.replace('.', "/"));
+  116|       |        serde_json::to_vec(&ModuleManifest {
+  117|       |            schema: MANIFEST_SCHEMA,
+  118|       |            module: ModuleIdentity {
+  119|       |                name: declaration.name.to_string(),
+  120|       |                version: package_version.clone(),
+  121|       |                description: String::new(),
+  122|       |                homepage: None,
+  123|       |                license: String::new(),
+  124|       |            },
+  125|       |            bus_name: BusName::new(bus_name).expect("provided interface is a bus name"),
+  126|       |            object_path: ObjectPath::new(object_path).expect("derived object path is valid"),
+  127|       |            provides: declaration
+  128|       |                .provides
+  129|       |                .iter()
+  130|       |                .enumerate()
+  131|       |                .map(provided)
+  132|       |                .collect(),
+  133|       |            requires: declaration
+  134|       |                .requires
+  135|       |                .iter()
+  136|       |                .map(|interface| dependency(interface, false))
+  137|       |                .chain(
+  138|       |                    declaration
+  139|       |                        .optional
+  140|       |                        .iter()
+  141|       |                        .map(|interface| dependency(interface, true)),
+  142|       |                )
+  143|       |                .collect(),
+  144|       |            environment: Vec::new(),
+  145|       |            capabilities: Vec::new(),
+  146|       |            lazy_init: declaration.lazy,
+  147|       |            worker_threads: declaration.worker_threads,
+  148|       |            on_panic: PanicPolicy::Detach,
+  149|       |        })
+  150|       |        .expect("module manifest is serializable")
+  151|       |    });
+  152|       |    tinybus::module::abi::TbSlice {
+  153|       |        ptr: bytes.as_ptr(),
+  154|       |        len: bytes.len(),
+  155|       |    }
+  156|       |}
+  157|       |
+  158|       |#[derive(Clone, Copy)]
+  159|       |struct HostCalls(TbHostVtable);
+  160|       |
+  161|       |// The opaque pointer belongs to the host and is explicitly valid for the
+  162|       |// process lifetime. Calls are required to be thread-safe by the ABI contract.
+  163|       |unsafe impl Send for HostCalls {}
+  164|       |unsafe impl Sync for HostCalls {}
+  165|       |
+  166|       |impl HostCalls {
+  167|       |    fn send(&self, bytes: &[u8]) -> i32 {
+  168|       |        unsafe { (self.0.send)(self.0.host_ctx, bytes.as_ptr(), bytes.len()) }
+  169|       |    }
+  170|       |
+  171|       |    fn wake(&self) {
+  172|       |        unsafe { (self.0.wake)(self.0.host_ctx) }
+  173|       |    }
+  174|       |
+  175|       |    fn fault(&self) {
+  176|       |        unsafe { (self.0.fault)(self.0.host_ctx, std::ptr::null(), 0) }
+  177|       |    }
+  178|       |
+  179|       |    fn log(&self, level: u32, message: &[u8]) {
+  180|       |        unsafe { (self.0.log)(self.0.host_ctx, level, message.as_ptr(), message.len()) }
+  181|       |    }
+  182|       |
+  183|       |    fn ready(&self) {
+  184|       |        unsafe { (self.0.ready)(self.0.host_ctx) }
+  185|       |    }
+  186|       |}
+  187|       |
+  188|       |struct HostSubscriber {
+  189|       |    host: HostCalls,
+  190|       |    next_span: AtomicU64,
+  191|       |    max_level: tracing::level_filters::LevelFilter,
+  192|       |}
+  193|       |
+  194|       |impl tracing::Subscriber for HostSubscriber {
+  195|       |    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+  196|       |        self.max_level >= *metadata.level()
+  197|       |    }
+  198|       |
+  199|       |    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+  200|       |        Some(self.max_level)
+  201|       |    }
+  202|       |
+  203|       |    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+  204|       |        tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+  205|       |    }
+  206|       |
+  207|       |    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+  208|       |
+  209|       |    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+  210|       |
+  211|       |    fn event(&self, event: &tracing::Event<'_>) {
+  212|       |        use std::fmt::Write as _;
+  213|       |
+  214|       |        let metadata = event.metadata();
+  215|       |        let mut visitor = LogVisitor(String::new());
+  216|       |        event.record(&mut visitor);
+  217|       |        let mut line = String::new();
+  218|       |        let _ = write!(line, "{} {}", metadata.target(), visitor.0);
+  219|       |        let level = match *metadata.level() {
+  220|       |            tracing::Level::ERROR => 1,
+  221|       |            tracing::Level::WARN => 2,
+  222|       |            tracing::Level::INFO => 3,
+  223|       |            tracing::Level::DEBUG => 4,
+  224|       |            tracing::Level::TRACE => 5,
+  225|       |        };
+  226|       |        self.host.log(level, line.as_bytes());
+  227|       |    }
+  228|       |
+  229|       |    fn enter(&self, _: &tracing::span::Id) {}
+  230|       |
+  231|       |    fn exit(&self, _: &tracing::span::Id) {}
+  232|       |}
+  233|       |
+  234|       |struct LogVisitor(String);
+  235|       |
+  236|       |impl tracing::field::Visit for LogVisitor {
+  237|       |    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+  238|       |        use std::fmt::Write as _;
+  239|       |
+  240|       |        if !self.0.is_empty() {
+  241|       |            self.0.push(' ');
+  242|       |        }
+  243|       |        let _ = write!(self.0, "{}={value:?}", field.name());
+  244|       |    }
+  245|       |}
+  246|       |
+  247|       |struct ModuleTransport {
+  248|       |    host: HostCalls,
+  249|       |    inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
+  250|       |    detach_on_panic: bool,
+  251|       |}
+  252|       |
+  253|       |#[async_trait]
+  254|       |impl Transport for ModuleTransport {
+  255|       |    async fn send(&self, message: Message) -> Result<()> {
+  256|       |        let panicked = message.header.error_name.as_deref() == Some(MODULE_PANIC_ERROR);
+  257|       |        let bytes = serde_json::to_vec(&message)?;
+  258|       |        if bytes.len() > MAX_FRAME_LEN {
+  259|       |            return Err(Error::protocol("module frame exceeds the size cap"));
+  260|       |        }
+  261|       |        match self.host.send(&bytes) {
+  262|       |            TB_OK => {
+  263|       |                if panicked && self.detach_on_panic {
+  264|       |                    self.host.fault();
+  265|       |                }
+  266|       |                Ok(())
+  267|       |            }
+  268|       |            TB_BACKPRESSURE => Err(Error::Backpressure),
+  269|       |            TB_CLOSED => Err(Error::ConnectionClosed),
+  270|       |            _ => Err(Error::transport("module host refused a frame")),
+  271|       |        }
+  272|       |    }
+  273|       |
+  274|       |    async fn recv(&self) -> Result<Option<Message>> {
+  275|       |        let bytes = self.inbound.lock().await.recv().await;
+  276|       |        let Some(bytes) = bytes else {
+  277|       |            return Ok(None);
+  278|       |        };
+  279|       |        self.host.wake();
+  280|       |        Ok(Some(serde_json::from_slice(&bytes)?))
+  281|       |    }
+  282|       |
+  283|       |    async fn close(&self) -> Result<()> {
+  284|       |        self.inbound.lock().await.close();
+  285|       |        Ok(())
+  286|       |    }
+  287|       |
+  288|       |    fn describe(&self) -> String {
+  289|       |        "module".to_string()
+  290|       |    }
+  291|       |}
+  292|       |
+  293|       |struct RuntimeState {
+  294|       |    inbound: StdMutex<Option<mpsc::Sender<Vec<u8>>>>,
+  295|       |    runtime: StdMutex<Option<tokio::runtime::Runtime>>,
+  296|       |    reinitialize: Option<Reinitialize>,
+  297|       |}
+  298|       |
+  299|       |type Reinitialize = Box<dyn Fn(*const u8, usize) -> i32 + Send + Sync>;
+  300|       |type ReinitializeFactory = Box<
+  301|       |    dyn FnOnce(tokio::runtime::Handle, Arc<StdMutex<Option<Connection>>>) -> Reinitialize + Send,
+  302|       |>;
+  303|       |
+  304|       |unsafe extern "C" fn deliver(ctx: *mut c_void, ptr: *const u8, len: usize) -> i32 {
+  305|       |    match catch_unwind(AssertUnwindSafe(|| {
+  306|       |        if ctx.is_null() || ptr.is_null() || len > MAX_FRAME_LEN {
+  307|       |            return TB_BAD_ARGUMENT;
+  308|       |        }
+  309|       |        let state = unsafe { &*(ctx.cast::<RuntimeState>()) };
+  310|       |        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+  311|       |        let sender = state.inbound.lock().expect("module inbound lock").clone();
+  312|       |        match sender {
+  313|       |            Some(sender) => match sender.try_send(bytes) {
+  314|       |                Ok(()) => TB_OK,
+  315|       |                Err(mpsc::error::TrySendError::Full(_)) => TB_BACKPRESSURE,
+  316|       |                Err(mpsc::error::TrySendError::Closed(_)) => TB_CLOSED,
+  317|       |            },
+  318|       |            None => TB_CLOSED,
+  319|       |        }
+  320|       |    })) {
+  321|       |        Ok(code) => code,
+  322|       |        Err(_) => TB_PANICKED,
+  323|       |    }
+  324|       |}
+  325|       |
+  326|       |unsafe extern "C" fn shutdown(ctx: *mut c_void, deadline_ms: u64) -> i32 {
+  327|       |    match catch_unwind(AssertUnwindSafe(|| {
+  328|       |        if ctx.is_null() {
+  329|       |            return TB_BAD_ARGUMENT;
+  330|       |        }
+  331|       |        let state = unsafe { &*(ctx.cast::<RuntimeState>()) };
+  332|       |        state.inbound.lock().expect("module inbound lock").take();
+  333|       |        match state.runtime.lock().expect("module runtime lock").take() {
+  334|       |            Some(runtime) => {
+  335|       |                runtime.shutdown_timeout(Duration::from_millis(deadline_ms));
+  336|       |                TB_OK
+  337|       |            }
+  338|       |            None => TB_CLOSED,
+  339|       |        }
+  340|       |    })) {
+  341|       |        Ok(code) => code,
+  342|       |        Err(_) => TB_PANICKED,
+  343|       |    }
+  344|       |}
+  345|       |
+  346|       |unsafe extern "C" fn reinitialize(ctx: *mut c_void, ptr: *const u8, len: usize) -> i32 {
+  347|       |    match catch_unwind(AssertUnwindSafe(|| {
+  348|       |        if ctx.is_null() || len > 1024 * 1024 || (ptr.is_null() && len != 0) {
+  349|       |            return TB_BAD_ARGUMENT;
+  350|       |        }
+  351|       |        let state = unsafe { &*(ctx.cast::<RuntimeState>()) };
+  352|       |        let Some(reinitialize) = &state.reinitialize else {
+  353|       |            return TB_CLOSED;
+  354|       |        };
+  355|       |        reinitialize(ptr, len)
+  356|       |    })) {
+  357|       |        Ok(code) => code,
+  358|       |        Err(_) => TB_PANICKED,
+  359|       |    }
+  360|       |}
+  361|       |
+  362|       |unsafe fn write_module_vtable(
+  363|       |    out: *mut TbModuleVtable,
+  364|       |    out_capacity: u32,
+  365|       |    state: *mut c_void,
+  366|       |    supports_reinitialize: bool,
+  367|       |) {
+  368|       |    if out_capacity >= size_of::<TbModuleVtable>() as u32 {
+  369|       |        unsafe {
+  370|       |            out.write(TbModuleVtable {
+  371|       |                size: if supports_reinitialize {
+  372|       |                    size_of::<TbModuleVtable>() as u32
+  373|       |                } else {
+  374|       |                    TB_MODULE_VTABLE_BASE_SIZE
+  375|       |                },
+  376|       |                _reserved: 0,
+  377|       |                module_ctx: state,
+  378|       |                deliver,
+  379|       |                shutdown,
+  380|       |                reinitialize: Some(reinitialize),
+  381|       |            });
+  382|       |        }
+  383|       |    } else {
+  384|       |        unsafe {
+  385|       |            out.cast::<TbModuleVtableV1Prefix>()
+  386|       |                .write(TbModuleVtableV1Prefix {
+  387|       |                    size: TB_MODULE_VTABLE_BASE_SIZE,
+  388|       |                    _reserved: 0,
+  389|       |                    module_ctx: state,
+  390|       |                    deliver,
+  391|       |                    shutdown,
+  392|       |                });
+  393|       |        }
+  394|       |    }
+  395|       |}
+  396|       |
+  397|       |/// Initialize the module runtime and start its async setup function.
+  398|       |///
+  399|       |/// This is public only for [`module_export!`] expansions. Module authors call
+  400|       |/// the macro, not this function directly.
+  401|       |#[doc(hidden)]
+  402|       |pub unsafe fn start_module<F, Fut>(
+  403|       |    host: *const TbHostVtable,
+  404|       |    out: *mut TbModuleVtable,
+  405|       |    worker_threads: usize,
+  406|       |    detach_on_panic: bool,
+  407|       |    setup: F,
+  408|       |) -> i32
+  409|       |where
+  410|       |    F: FnOnce(Connection) -> Fut + Send + 'static,
+  411|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  412|       |{
+  413|       |    unsafe {
+  414|       |        start_module_runtime(
+  415|       |            host,
+  416|       |            out,
+  417|       |            worker_threads,
+  418|       |            detach_on_panic,
+  419|       |            setup,
+  420|       |            None,
+  421|       |            false,
+  422|       |        )
+  423|       |    }
+  424|       |}
+  425|       |
+  426|       |/// Start a linked module without replacing the host's process-global hooks.
+  427|       |#[doc(hidden)]
+  428|       |pub unsafe fn start_linked_module<F, Fut>(
+  429|       |    host: *const TbHostVtable,
+  430|       |    out: *mut TbModuleVtable,
+  431|       |    worker_threads: usize,
+  432|       |    detach_on_panic: bool,
+  433|       |    setup: F,
+  434|       |) -> i32
+  435|       |where
+  436|       |    F: FnOnce(Connection) -> Fut + Send + 'static,
+  437|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  438|       |{
+  439|       |    unsafe {
+  440|       |        start_module_runtime(
+  441|       |            host,
+  442|       |            out,
+  443|       |            worker_threads,
+  444|       |            detach_on_panic,
+  445|       |            setup,
+  446|       |            None,
+  447|       |            true,
+  448|       |        )
+  449|       |    }
+  450|       |}
+  451|       |
+  452|       |unsafe fn start_module_runtime<F, Fut>(
+  453|       |    host: *const TbHostVtable,
+  454|       |    out: *mut TbModuleVtable,
+  455|       |    worker_threads: usize,
+  456|       |    detach_on_panic: bool,
+  457|       |    setup: F,
+  458|       |    reinitialize_factory: Option<ReinitializeFactory>,
+  459|       |    linked: bool,
+  460|       |) -> i32
+  461|       |where
+  462|       |    F: FnOnce(Connection) -> Fut + Send + 'static,
+  463|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  464|       |{
+  465|       |    match catch_unwind(AssertUnwindSafe(|| {
+  466|       |        if host.is_null() || out.is_null() || worker_threads == 0 {
+  467|       |            return TB_BAD_ARGUMENT;
+  468|       |        }
+  469|       |        // `out.size` is input as well as output: an older ABI-v1 host owns a
+  470|       |        // shorter allocation. Read only the frozen first field until its
+  471|       |        // capacity is known, then write no further than that boundary.
+  472|       |        let out_capacity = unsafe { out.cast::<u32>().read() };
+  473|       |        if out_capacity < TB_MODULE_VTABLE_BASE_SIZE {
+  474|       |            return TB_BAD_ARGUMENT;
+  475|       |        }
+  476|       |        // `size` is the frozen prefix field; do not copy the full vtable until
+  477|       |        // the host has proved that all v1 fields are present.
+  478|       |        if unsafe { host.cast::<u32>().read() } < size_of::<TbHostVtable>() as u32 {
+  479|       |            return TB_BAD_ARGUMENT;
+  480|       |        }
+  481|       |        let host = HostCalls(unsafe { *host });
+  482|       |
+  483|       |        // A cdylib carries its own statically linked `tracing` and `std` state;
+  484|       |        // this registration is global to the module's copy, not the embedding
+  485|       |        // host's. Failure therefore means this module runtime was initialized
+  486|       |        // more than once and cannot safely replace the existing subscriber.
+  487|       |        if !linked
+  488|       |            && tracing::subscriber::set_global_default(HostSubscriber {
+  489|       |                host,
+  490|       |                next_span: AtomicU64::new(1),
+  491|       |                max_level: tracing::level_filters::LevelFilter::TRACE,
+  492|       |            })
+  493|       |            .is_err()
+  494|       |        {
+  495|       |            return TB_CLOSED;
+  496|       |        }
+  497|       |
+  498|       |        let panic_host = host;
+  499|       |        let panic_location = std::sync::Arc::new(StdMutex::new(None::<String>));
+  500|       |        let hook_location = panic_location.clone();
+  501|       |        if !linked {
+  502|       |            std::panic::set_hook(Box::new(move |panic| {
+  503|       |                let location = panic.location().map_or_else(
+  504|       |                    || "module panicked at an unknown location".to_string(),
+  505|       |                    |location| {
+  506|       |                        let file = std::path::Path::new(location.file())
+  507|       |                            .file_name()
+  508|       |                            .and_then(|file| file.to_str())
+  509|       |                            .unwrap_or("module");
+  510|       |                        format!(
+  511|       |                            "module panicked at {}:{}:{}",
+  512|       |                            file,
+  513|       |                            location.line(),
+  514|       |                            location.column()
+  515|       |                        )
+  516|       |                    },
+  517|       |                );
+  518|       |                // The payload is intentionally neither formatted nor forwarded:
+  519|       |                // it may contain arguments, credentials, or recovery material.
+  520|       |                *hook_location.lock().expect("panic location lock") = Some(location.clone());
+  521|       |                panic_host.log(1, location.as_bytes());
+  522|       |            }));
+  523|       |        }
+  524|       |
+  525|       |        let runtime = match tokio::runtime::Builder::new_multi_thread()
+  526|       |            .worker_threads(worker_threads)
+  527|       |            .enable_all()
+  528|       |            .build()
+  529|       |        {
+  530|       |            Ok(runtime) => runtime,
+  531|       |            Err(_) => return TB_CLOSED,
+  532|       |        };
+  533|       |        let (inbound_tx, inbound_rx) = mpsc::channel(MODULE_QUEUE_CAPACITY);
+  534|       |        let transport = Box::new(ModuleTransport {
+  535|       |            host,
+  536|       |            inbound: Mutex::new(inbound_rx),
+  537|       |            detach_on_panic,
+  538|       |        });
+  539|       |        let connection_slot = Arc::new(StdMutex::new(None));
+  540|       |        let task_connection_slot = connection_slot.clone();
+  541|       |
+  542|       |        runtime.spawn(async move {
+  543|       |            let outcome = match Connection::connect(transport).await {
+  544|       |                Ok(connection) => {
+  545|       |                    connection.__set_panic_handler(std::sync::Arc::new(move || {
+  546|       |                        let location = panic_location
+  547|       |                            .lock()
+  548|       |                            .expect("panic location lock")
+  549|       |                            .take()
+  550|       |                            .unwrap_or_else(|| "an unknown location".to_string());
+  551|       |                        Error::MethodFailed {
+  552|       |                            name: MODULE_PANIC_ERROR.to_string(),
+  553|       |                            message: format!("a module method panicked at {location}"),
+  554|       |                        }
+  555|       |                    }));
+  556|       |                    match setup(connection.clone()).await {
+  557|       |                        Ok(()) => {
+  558|       |                            *task_connection_slot.lock().expect("module connection lock") =
+  559|       |                                Some(connection.clone());
+  560|       |                            host.ready();
+  561|       |                            // Keep the connection (and therefore the served
+  562|       |                            // object tree and transport) alive until shutdown
+  563|       |                            // stops this runtime. Setup returning means ready,
+  564|       |                            // not that the module has finished serving.
+  565|       |                            std::future::pending::<()>().await;
+  566|       |                            Ok(())
+  567|       |                        }
+  568|       |                        Err(error) => Err(error),
+  569|       |                    }
+  570|       |                }
+  571|       |                Err(error) => Err(error),
+  572|       |            };
+  573|       |            if let Err(error) = outcome {
+  574|       |                tracing::error!(error = %error, "tinybus module failed");
+  575|       |                host.fault();
+  576|       |            }
+  577|       |        });
+  578|       |
+  579|       |        let reinitializer =
+  580|       |            reinitialize_factory.map(|factory| factory(runtime.handle().clone(), connection_slot));
+  581|       |        let supports_reinitialize = reinitializer.is_some();
+  582|       |
+  583|       |        let state = Box::new(RuntimeState {
+  584|       |            inbound: StdMutex::new(Some(inbound_tx)),
+  585|       |            runtime: StdMutex::new(Some(runtime)),
+  586|       |            reinitialize: reinitializer,
+  587|       |        });
+  588|       |        let state = Box::into_raw(state).cast::<c_void>();
+  589|       |        unsafe { write_module_vtable(out, out_capacity, state, supports_reinitialize) };
+  590|       |        TB_OK
+  591|       |    })) {
+  592|       |        Ok(code) => code,
+  593|       |        Err(_) => TB_PANICKED,
+  594|       |    }
+  595|       |}
+  596|       |
+  597|       |unsafe fn parse_config<C: serde::de::DeserializeOwned>(
+  598|       |    host: *const TbHostVtable,
+  599|       |) -> std::result::Result<C, i32> {
+  600|       |    if host.is_null() {
+  601|       |        return Err(TB_BAD_ARGUMENT);
+  602|       |    }
+  603|       |    if unsafe { host.cast::<u32>().read() } < size_of::<TbHostVtable>() as u32 {
+  604|       |        return Err(TB_BAD_ARGUMENT);
+  605|       |    }
+  606|       |    let host_ref = unsafe { &*host };
+  607|       |    if host_ref.config.len > 1024 * 1024
+  608|       |        || (host_ref.config.ptr.is_null() && host_ref.config.len != 0)
+  609|       |    {
+  610|       |        return Err(TB_BAD_ARGUMENT);
+  611|       |    }
+  612|       |    let bytes = if host_ref.config.len == 0 {
+  613|       |        b"{}".as_slice()
+  614|       |    } else {
+  615|       |        unsafe { std::slice::from_raw_parts(host_ref.config.ptr, host_ref.config.len) }
+  616|       |    };
+  617|       |    serde_json::from_slice::<C>(bytes).map_err(|_| TB_BAD_ARGUMENT)
+  618|       |}
+  619|       |
+  620|       |/// Initialize a configured module without enabling live reconfiguration.
+  621|       |///
+  622|       |/// This retains the original `FnOnce` contract for direct SDK callers. The
+  623|       |/// export macro uses [`start_reconfigurable_module`] because a named setup
+  624|       |/// function can safely be called again.
+  625|       |#[doc(hidden)]
+  626|       |pub unsafe fn start_module_with_config<C, F, Fut>(
+  627|       |    host: *const TbHostVtable,
+  628|       |    out: *mut TbModuleVtable,
+  629|       |    worker_threads: usize,
+  630|       |    detach_on_panic: bool,
+  631|       |    setup: F,
+  632|       |) -> i32
+  633|       |where
+  634|       |    C: serde::de::DeserializeOwned + Send + 'static,
+  635|       |    F: FnOnce(Connection, C) -> Fut + Send + 'static,
+  636|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  637|       |{
+  638|       |    let parsed = catch_unwind(AssertUnwindSafe(|| unsafe { parse_config::<C>(host) }));
+  639|       |    let config = match parsed {
+  640|       |        Ok(Ok(config)) => config,
+  641|       |        Ok(Err(code)) => return code,
+  642|       |        Err(_) => return TB_PANICKED,
+  643|       |    };
+  644|       |    unsafe {
+  645|       |        start_module(
+  646|       |            host,
+  647|       |            out,
+  648|       |            worker_threads,
+  649|       |            detach_on_panic,
+  650|       |            move |connection| setup(connection, config),
+  651|       |        )
+  652|       |    }
+  653|       |}
+  654|       |
+  655|       |/// Initialize a configured module whose setup function may be called again.
+  656|       |#[doc(hidden)]
+  657|       |pub unsafe fn start_reconfigurable_module<C, F, Fut>(
+  658|       |    host: *const TbHostVtable,
+  659|       |    out: *mut TbModuleVtable,
+  660|       |    worker_threads: usize,
+  661|       |    detach_on_panic: bool,
+  662|       |    setup: F,
+  663|       |) -> i32
+  664|       |where
+  665|       |    C: serde::de::DeserializeOwned + Send + 'static,
+  666|       |    F: Fn(Connection, C) -> Fut + Clone + Send + Sync + 'static,
+  667|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  668|       |{
+  669|       |    unsafe {
+  670|       |        start_reconfigurable_module_mode(host, out, worker_threads, detach_on_panic, setup, false)
+  671|       |    }
+  672|       |}
+  673|       |
+  674|       |/// Start a configurable linked module without process-global hooks.
+  675|       |#[doc(hidden)]
+  676|       |pub unsafe fn start_linked_reconfigurable_module<C, F, Fut>(
+  677|       |    host: *const TbHostVtable,
+  678|       |    out: *mut TbModuleVtable,
+  679|       |    worker_threads: usize,
+  680|       |    detach_on_panic: bool,
+  681|       |    setup: F,
+  682|       |) -> i32
+  683|       |where
+  684|       |    C: serde::de::DeserializeOwned + Send + 'static,
+  685|       |    F: Fn(Connection, C) -> Fut + Clone + Send + Sync + 'static,
+  686|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  687|       |{
+  688|       |    unsafe {
+  689|       |        start_reconfigurable_module_mode(host, out, worker_threads, detach_on_panic, setup, true)
+  690|       |    }
+  691|       |}
+  692|       |
+  693|       |unsafe fn start_reconfigurable_module_mode<C, F, Fut>(
+  694|       |    host: *const TbHostVtable,
+  695|       |    out: *mut TbModuleVtable,
+  696|       |    worker_threads: usize,
+  697|       |    detach_on_panic: bool,
+  698|       |    setup: F,
+  699|       |    linked: bool,
+  700|       |) -> i32
+  701|       |where
+  702|       |    C: serde::de::DeserializeOwned + Send + 'static,
+  703|       |    F: Fn(Connection, C) -> Fut + Clone + Send + Sync + 'static,
+  704|       |    Fut: Future<Output = Result<()>> + Send + 'static,
+  705|       |{
+  706|       |    let parsed = catch_unwind(AssertUnwindSafe(|| unsafe { parse_config::<C>(host) }));
+  707|       |    let config = match parsed {
+  708|       |        Ok(Ok(config)) => config,
+  709|       |        Ok(Err(code)) => return code,
+  710|       |        Err(_) => return TB_PANICKED,
+  711|       |    };
+  712|       |    let initial_setup = setup.clone();
+  713|       |    let reinitialize_factory: ReinitializeFactory = Box::new(move |handle, connection_slot| {
+  714|       |        let reinitialize_lock = StdMutex::new(());
+  715|       |        Box::new(move |ptr, len| {
+  716|       |            // Setup mutates the module's live object tree. Serializing retries
+  717|       |            // keeps two operators from interleaving partial configurations.
+  718|       |            let _guard = reinitialize_lock.lock().expect("module reinitialize lock");
+  719|       |            let bytes = if len == 0 {
+  720|       |                b"{}".as_slice()
+  721|       |            } else {
+  722|       |                // SAFETY: the ABI callback validates this borrowed slice and
+  723|       |                // keeps it alive for the duration of this call.
+  724|       |                unsafe { std::slice::from_raw_parts(ptr, len) }
+  725|       |            };
+  726|       |            let Ok(config) = serde_json::from_slice::<C>(bytes) else {
+  727|       |                return TB_BAD_ARGUMENT;
+  728|       |            };
+  729|       |            let Some(connection) = connection_slot
+  730|       |                .lock()
+  731|       |                .expect("module connection lock")
+  732|       |                .clone()
+  733|       |            else {
+  734|       |                return TB_CLOSED;
+  735|       |            };
+  736|       |            match handle.block_on(async {
+  737|       |                tokio::time::timeout(MODULE_REINITIALIZE_DEADLINE, setup(connection, config)).await
+  738|       |            }) {
+  739|       |                Ok(Ok(())) => TB_OK,
+  740|       |                Ok(Err(_)) => TB_CLOSED,
+  741|       |                Err(_) => TB_TIMEOUT,
+  742|       |            }
+  743|       |        })
+  744|       |    });
+  745|       |    unsafe {
+  746|       |        start_module_runtime(
+  747|       |            host,
+  748|       |            out,
+  749|       |            worker_threads,
+  750|       |            detach_on_panic,
+  751|       |            move |connection| initial_setup(connection, config),
+  752|       |            Some(reinitialize_factory),
+  753|       |            linked,
+  754|       |        )
+  755|       |    }
+  756|       |}
+  757|       |
+  758|       |/// Export a tinybus module's descriptor, manifest and initialization entrypoint.
+  759|       |///
+  760|       |/// ```ignore
+  761|       |/// tinybus_module::module_export! { setup = setup, worker_threads = 1 }
+  762|       |/// ```
+  763|       |#[macro_export]
+  764|       |macro_rules! module_export {
+  765|       |    (@linked) => {
+  766|       |        /// Entry points and parsed manifest for a host that links this module.
+  767|       |        ///
+  768|       |        /// # Errors
+  769|       |        /// Returns an error if the generated manifest is invalid.
+  770|       |        pub fn linked_module() -> ::tinybus::Result<::tinybus::module::LinkedModule> {
+  771|       |            unsafe {
+  772|       |                ::tinybus::module::LinkedModule::from_exports(
+  773|       |                    &TINYBUS_MODULE_ABI_V1,
+  774|       |                    tinybus_module_manifest_v1,
+  775|       |                    tinybus_module_init_v1,
+  776|       |                )
+  777|       |            }
+  778|       |        }
+  779|       |    };
+  780|       |    (@common
+  781|       |        export = {$($export:tt)*},
+  782|       |        worker_threads = $threads:expr,
+  783|       |        provides = [$($provides:literal),* $(,)?],
+  784|       |        methods = [$($methods:literal),* $(,)?],
+  785|       |        signals = [$($signals:literal),* $(,)?],
+  786|       |        requires = [$($requires:literal),* $(,)?],
+  787|       |        optional = [$($optional:literal),* $(,)?],
+  788|       |        lazy = $lazy:expr $(,)?
+  789|       |    ) => {
+  790|       |        $($export)*
+  791|       |        pub static TINYBUS_MODULE_ABI_V1: ::tinybus::module::abi::TbAbiDescriptor =
+  792|       |            ::tinybus::module::abi::TbAbiDescriptor::current(
+  793|       |                env!("CARGO_PKG_NAME"),
+  794|       |                env!("CARGO_PKG_VERSION"),
+  795|       |            );
+  796|       |
+  797|       |        $($export)*
+  798|      0|        pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
+  799|       |            static MANIFEST_BYTES: ::std::sync::OnceLock<::std::vec::Vec<u8>> =
+  800|       |                ::std::sync::OnceLock::new();
+  801|      0|            $crate::manifest_slice_in(&MANIFEST_BYTES, $crate::ManifestDeclaration {
+  802|      0|                name: env!("CARGO_PKG_NAME"),
+  803|      0|                version: env!("CARGO_PKG_VERSION"),
+  804|      0|                provides: &[$($provides),*],
+  805|      0|                methods: &[$($methods),*],
+  806|      0|                signals: &[$($signals),*],
+  807|      0|                requires: &[$($requires),*],
+  808|      0|                optional: &[$($optional),*],
+  809|      0|                lazy: $lazy,
+  810|      0|                worker_threads: $threads as u32,
+  811|      0|            })
+  812|      0|        }
+  813|       |    };
+  814|       |    (@configured
+  815|       |        export = {$($export:tt)*},
+  816|       |        start = $start:path,
+  817|       |        setup = $setup:path,
+  818|       |        config = $config:ty,
+  819|       |        worker_threads = $threads:expr,
+  820|       |        provides = [$($provides:literal),* $(,)?],
+  821|       |        methods = [$($methods:literal),* $(,)?],
+  822|       |        signals = [$($signals:literal),* $(,)?],
+  823|       |        requires = [$($requires:literal),* $(,)?],
+  824|       |        optional = [$($optional:literal),* $(,)?],
+  825|       |        lazy = $lazy:expr $(,)?
+  826|       |    ) => {
+  827|       |        $crate::module_export! {
+  828|       |            @common
+  829|       |            export = {$($export)*},
+  830|       |            worker_threads = $threads,
+  831|       |            provides = [$($provides),*],
+  832|       |            methods = [$($methods),*],
+  833|       |            signals = [$($signals),*],
+  834|       |            requires = [$($requires),*],
+  835|       |            optional = [$($optional),*],
+  836|       |            lazy = $lazy,
+  837|       |        }
+  838|       |
+  839|       |        $($export)*
+  840|       |        pub unsafe extern "C" fn tinybus_module_init_v1(
+  841|       |            host: *const ::tinybus::module::abi::TbHostVtable,
+  842|       |            out: *mut ::tinybus::module::abi::TbModuleVtable,
+  843|       |        ) -> i32 {
+  844|       |            use $start as start;
+  845|       |            unsafe {
+  846|       |                start::<$config, _, _>(
+  847|       |                    host,
+  848|       |                    out,
+  849|       |                    $threads,
+  850|       |                    true,
+  851|       |                    $setup,
+  852|       |                )
+  853|       |            }
+  854|       |        }
+  855|       |    };
+  856|       |    (setup = $setup:path, worker_threads = $threads:expr $(,)?) => {
+  857|       |        $crate::module_export! {
+  858|       |            setup = $setup,
+  859|       |            worker_threads = $threads,
+  860|       |            provides = [],
+  861|       |            methods = [],
+  862|       |            signals = [],
+  863|       |            requires = [],
+  864|       |            optional = [],
+  865|       |            lazy = false,
+  866|       |        }
+  867|       |    };
+  868|       |    (@plain
+  869|       |        export = {$($export:tt)*},
+  870|       |        start = $start:path,
+  871|       |        setup = $setup:path,
+  872|       |        worker_threads = $threads:expr,
+  873|       |        provides = [$($provides:literal),* $(,)?],
+  874|       |        methods = [$($methods:literal),* $(,)?],
+  875|       |        signals = [$($signals:literal),* $(,)?],
+  876|       |        requires = [$($requires:literal),* $(,)?],
+  877|       |        optional = [$($optional:literal),* $(,)?],
+  878|       |        lazy = $lazy:expr $(,)?
+  879|       |    ) => {
+  880|       |        $crate::module_export! {
+  881|       |            @common
+  882|       |            export = {$($export)*},
+  883|       |            worker_threads = $threads,
+  884|       |            provides = [$($provides),*],
+  885|       |            methods = [$($methods),*],
+  886|       |            signals = [$($signals),*],
+  887|       |            requires = [$($requires),*],
+  888|       |            optional = [$($optional),*],
+  889|       |            lazy = $lazy,
+  890|       |        }
+  891|       |
+  892|       |        $($export)*
+  893|      0|        pub unsafe extern "C" fn tinybus_module_init_v1(
+  894|      0|            host: *const ::tinybus::module::abi::TbHostVtable,
+  895|      0|            out: *mut ::tinybus::module::abi::TbModuleVtable,
+  896|      0|        ) -> i32 {
+  897|      0|            unsafe { $start(host, out, $threads, true, $setup) }
+  898|      0|        }
+  899|       |    };
+  900|       |    (
+  901|       |        setup = $setup:path,
+  902|       |        config = $config:ty,
+  903|       |        $($rest:tt)*
+  904|       |    ) => {
+  905|       |        $crate::module_export! {
+  906|       |            @configured export = {#[unsafe(no_mangle)]},
+  907|       |            start = $crate::start_reconfigurable_module,
+  908|       |            setup = $setup,
+  909|       |            config = $config,
+  910|       |            $($rest)*
+  911|       |        }
+  912|       |    };
+  913|       |    (setup = $setup:path, $($rest:tt)*) => {
+  914|       |        $crate::module_export! {
+  915|       |            @plain export = {#[unsafe(no_mangle)]},
+  916|       |            start = $crate::start_module,
+  917|       |            setup = $setup,
+  918|       |            $($rest)*
+  919|       |        }
+  920|       |    };
+  921|       |}
+  922|       |
+  923|       |/// Generate Rust-addressable entry points for linking several modules into a
+  924|       |/// single executable. The entry points have no shared C linker symbol names.
+  925|       |#[macro_export]
+  926|       |macro_rules! module_export_static {
+  927|       |    (setup = $setup:path, config = $config:ty, $($rest:tt)*) => {
+  928|       |        $crate::module_export! {
+  929|       |            @configured export = {},
+  930|       |            start = $crate::start_linked_reconfigurable_module,
+  931|       |            setup = $setup,
+  932|       |            config = $config,
+  933|       |            $($rest)*
+  934|       |        }
+  935|       |        $crate::module_export! { @linked }
+  936|       |    };
+  937|       |    (setup = $setup:path, $($rest:tt)*) => {
+  938|       |        $crate::module_export! {
+  939|       |            @plain export = {},
+  940|       |            start = $crate::start_linked_module,
+  941|       |            setup = $setup,
+  942|       |            $($rest)*
+  943|       |        }
+  944|       |        $crate::module_export! { @linked }
+  945|       |    };
+  946|       |}
+  947|       |
+  948|       |/// Select the dynamic or linked export from one declaration.
+  949|       |///
+  950|       |/// The consuming crate declares a `static-link` feature. Its default build
+  951|       |/// retains the C exports, while the linked build uses Rust-addressable entry
+  952|       |/// points and the linked runtime mode.
+  953|       |#[macro_export]
+  954|       |macro_rules! module_export_optional_static {
+  955|       |    ($($declaration:tt)*) => {
+  956|       |        #[cfg(not(feature = "static-link"))]
+  957|       |        $crate::module_export! { $($declaration)* }
+  958|       |        #[cfg(feature = "static-link")]
+  959|       |        $crate::module_export_static! { $($declaration)* }
+  960|       |    };
+  961|       |}
+  962|       |
+  963|       |#[cfg(test)]
+  964|       |mod tests {
+  965|       |
+  966|       |    use super::*;
+  967|       |    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
+  968|       |    use std::sync::{OnceLock, mpsc::SyncSender};
+  969|       |
+  970|       |    static HOST_SEND_CODE: AtomicI32 = AtomicI32::new(TB_OK);
+  971|       |    static HOST_WAKES: AtomicUsize = AtomicUsize::new(0);
+  972|       |    static HOST_LOGS: AtomicUsize = AtomicUsize::new(0);
+  973|       |    static HOST_READY: AtomicBool = AtomicBool::new(false);
+  974|       |    static HOST_FAULTED: AtomicBool = AtomicBool::new(false);
+  975|       |    static START_OUTGOING: OnceLock<StdMutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::new();
+  976|       |    // These tests share host callbacks and the module's process-global runtime
+  977|       |    // capture, so overlapping tests would make their assertions order-dependent.
+  978|       |    static HOST_STATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+  979|       |
+  980|       |    async fn host_state_guard() -> tokio::sync::MutexGuard<'static, ()> {
+  981|       |        HOST_STATE_LOCK
+  982|       |            .get_or_init(|| tokio::sync::Mutex::new(()))
+  983|       |            .lock()
+  984|       |            .await
+  985|       |    }
+  986|       |
+  987|       |    fn blocking_host_state_guard() -> tokio::sync::MutexGuard<'static, ()> {
+  988|       |        HOST_STATE_LOCK
+  989|       |            .get_or_init(|| tokio::sync::Mutex::new(()))
+  990|       |            .blocking_lock()
+  991|       |    }
+  992|       |
+  993|       |    unsafe extern "C" fn host_send(_: *mut c_void, _: *const u8, _: usize) -> i32 {
+  994|       |        HOST_SEND_CODE.load(Ordering::Acquire)
+  995|       |    }
+  996|       |
+  997|       |    unsafe extern "C" fn capture_host_send(_: *mut c_void, ptr: *const u8, len: usize) -> i32 {
+  998|       |        let Some(sender) = START_OUTGOING
+  999|       |            .get()
+ 1000|       |            .expect("startup capture is initialized")
+ 1001|       |            .lock()
+ 1002|       |            .expect("startup capture lock")
+ 1003|       |            .clone()
+ 1004|       |        else {
+ 1005|       |            return TB_CLOSED;
+ 1006|       |        };
+ 1007|       |        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+ 1008|       |        sender.send(bytes).map_or(TB_CLOSED, |_| TB_OK)
+ 1009|       |    }
+ 1010|       |
+ 1011|       |    unsafe extern "C" fn host_wake(_: *mut c_void) {
+ 1012|       |        HOST_WAKES.fetch_add(1, Ordering::AcqRel);
+ 1013|       |    }
+ 1014|       |
+ 1015|       |    unsafe extern "C" fn host_log(_: *mut c_void, level: u32, _: *const u8, _: usize) {
+ 1016|       |        HOST_LOGS.store(level as usize, Ordering::Release);
+ 1017|       |    }
+ 1018|       |
+ 1019|       |    unsafe extern "C" fn host_fault(_: *mut c_void, _: *const u8, _: usize) {
+ 1020|       |        HOST_FAULTED.store(true, Ordering::Release);
+ 1021|       |    }
+ 1022|       |
+ 1023|       |    unsafe extern "C" fn host_ready(_: *mut c_void) {
+ 1024|       |        HOST_READY.store(true, Ordering::Release);
+ 1025|       |    }
+ 1026|       |
+ 1027|       |    fn host(config: &[u8]) -> TbHostVtable {
+ 1028|       |        TbHostVtable {
+ 1029|       |            size: size_of::<TbHostVtable>() as u32,
+ 1030|       |            _reserved: 0,
+ 1031|       |            host_ctx: std::ptr::null_mut(),
+ 1032|       |            send: host_send,
+ 1033|       |            wake: host_wake,
+ 1034|       |            log: host_log,
+ 1035|       |            fault: host_fault,
+ 1036|       |            config: tinybus::module::abi::TbSlice {
+ 1037|       |                ptr: config.as_ptr(),
+ 1038|       |                len: config.len(),
+ 1039|       |            },
+ 1040|       |            ready: host_ready,
+ 1041|       |        }
+ 1042|       |    }
+ 1043|       |
+ 1044|       |    fn message() -> Message {
+ 1045|       |        Message::signal(
+ 1046|       |            "/org/example/Module".parse().unwrap(),
+ 1047|       |            "org.example.Module".parse().unwrap(),
+ 1048|       |            "Changed".parse().unwrap(),
+ 1049|       |            serde_json::Value::Null,
+ 1050|       |        )
+ 1051|       |    }
+ 1052|       |
+ 1053|       |    #[test]
+ 1054|       |    fn a_module_whose_queue_is_full_reports_backpressure_rather_than_blocking_the_broker() {
+ 1055|       |        let (sender, _receiver) = mpsc::channel(1);
+ 1056|       |        sender.try_send(vec![1]).unwrap();
+ 1057|       |        let state = RuntimeState {
+ 1058|       |            inbound: StdMutex::new(Some(sender)),
+ 1059|       |            runtime: StdMutex::new(None),
+ 1060|       |            reinitialize: None,
+ 1061|       |        };
+ 1062|       |        let bytes = b"{}";
+ 1063|       |        let code = unsafe {
+ 1064|       |            deliver(
+ 1065|       |                std::ptr::from_ref(&state).cast_mut().cast(),
+ 1066|       |                bytes.as_ptr(),
+ 1067|       |                bytes.len(),
+ 1068|       |            )
+ 1069|       |        };
+ 1070|       |        assert_eq!(code, TB_BACKPRESSURE);
+ 1071|       |    }
+ 1072|       |
+ 1073|       |    #[test]
+ 1074|       |    fn a_frame_over_the_size_cap_is_rejected_rather_than_truncated() {
+ 1075|       |        let state = RuntimeState {
+ 1076|       |            inbound: StdMutex::new(None),
+ 1077|       |            runtime: StdMutex::new(None),
+ 1078|       |            reinitialize: None,
+ 1079|       |        };
+ 1080|       |        let code = unsafe {
+ 1081|       |            deliver(
+ 1082|       |                std::ptr::from_ref(&state).cast_mut().cast(),
+ 1083|       |                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+ 1084|       |                MAX_FRAME_LEN + 1,
+ 1085|       |            )
+ 1086|       |        };
+ 1087|       |        assert_eq!(code, TB_BAD_ARGUMENT);
+ 1088|       |    }
+ 1089|       |
+ 1090|       |    #[test]
+ 1091|       |    fn a_new_module_never_writes_past_an_older_hosts_vtable_capacity() {
+ 1092|       |        #[repr(C)]
+ 1093|       |        struct GuardedPrefix {
+ 1094|       |            table: TbModuleVtableV1Prefix,
+ 1095|       |            guard: u64,
+ 1096|       |        }
+ 1097|       |
+ 1098|       |        let mut output = GuardedPrefix {
+ 1099|       |            table: TbModuleVtableV1Prefix {
+ 1100|       |                size: TB_MODULE_VTABLE_BASE_SIZE,
+ 1101|       |                _reserved: 0,
+ 1102|       |                module_ctx: std::ptr::null_mut(),
+ 1103|       |                deliver,
+ 1104|       |                shutdown,
+ 1105|       |            },
+ 1106|       |            guard: 0xfeed_face_dead_beef,
+ 1107|       |        };
+ 1108|       |        let capacity = output.table.size;
+ 1109|       |        unsafe {
+ 1110|       |            write_module_vtable(
+ 1111|       |                std::ptr::from_mut(&mut output.table).cast(),
+ 1112|       |                capacity,
+ 1113|       |                std::ptr::dangling_mut(),
+ 1114|       |                true,
+ 1115|       |            );
+ 1116|       |        }
+ 1117|       |        assert_eq!(output.table.size, TB_MODULE_VTABLE_BASE_SIZE);
+ 1118|       |        assert_eq!(output.table.module_ctx, std::ptr::dangling_mut());
+ 1119|       |        assert_eq!(output.guard, 0xfeed_face_dead_beef);
+ 1120|       |    }
+ 1121|       |
+ 1122|       |    fn invalid_manifest_declaration() -> ManifestDeclaration<'static> {
+ 1123|       |        ManifestDeclaration {
+ 1124|       |            name: "invalid",
+ 1125|       |            version: "not-semver",
+ 1126|       |            provides: &[],
+ 1127|       |            methods: &[],
+ 1128|       |            signals: &[],
+ 1129|       |            requires: &[],
+ 1130|       |            optional: &[],
+ 1131|       |            lazy: false,
+ 1132|       |            worker_threads: 1,
+ 1133|       |        }
+ 1134|       |    }
+ 1135|       |
+ 1136|       |    #[test]
+ 1137|       |    fn a_manifest_declaration_exports_the_declared_surface_and_dependencies() {
+ 1138|       |        let invalid = manifest_slice(invalid_manifest_declaration());
+ 1139|       |        assert!(invalid.ptr.is_null());
+ 1140|       |        assert_eq!(invalid.len, 0);
+ 1141|       |        let slice = manifest_slice(ManifestDeclaration {
+ 1142|       |            name: "clock",
+ 1143|       |            version: "1.2.3",
+ 1144|       |            provides: &["ai.tinyhumans.module.Clock", "ai.tinyhumans.module.Time"],
+ 1145|       |            methods: &["Now"],
+ 1146|       |            signals: &["Changed"],
+ 1147|       |            requires: &["ai.tinyhumans.module.System"],
+ 1148|       |            optional: &["ai.tinyhumans.module.Optional"],
+ 1149|       |            lazy: true,
+ 1150|       |            worker_threads: 2,
+ 1151|       |        });
+ 1152|       |        let bytes = unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) };
+ 1153|       |        let manifest: tinybus::module::manifest::ModuleManifest =
+ 1154|       |            serde_json::from_slice(bytes).unwrap();
+ 1155|       |        assert_eq!(manifest.module.name, "clock");
+ 1156|       |        assert_eq!(manifest.provides.len(), 2);
+ 1157|       |        assert_eq!(manifest.provides[0].methods[0].as_str(), "Now");
+ 1158|       |        assert_eq!(manifest.provides[0].signals[0].as_str(), "Changed");
+ 1159|       |        assert_eq!(manifest.requires.len(), 2);
+ 1160|       |        assert!(manifest.requires[1].optional);
+ 1161|       |        assert!(manifest.lazy_init);
+ 1162|       |    }
+ 1163|       |
+ 1164|       |    #[test]
+ 1165|       |    fn a_panicking_shutdown_callback_reports_panicked_not_timed_out() {
+ 1166|       |        let state = RuntimeState {
+ 1167|       |            inbound: StdMutex::new(None),
+ 1168|       |            runtime: StdMutex::new(None),
+ 1169|       |            reinitialize: None,
+ 1170|       |        };
+ 1171|       |        let _ = catch_unwind(AssertUnwindSafe(|| {
+ 1172|       |            let _guard = state.runtime.lock().unwrap();
+ 1173|       |            panic!("poison runtime lock");
+ 1174|       |        }));
+ 1175|       |        let code = unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) };
+ 1176|       |        assert_eq!(code, TB_PANICKED);
+ 1177|       |    }
+ 1178|       |
+ 1179|       |    #[test]
+ 1180|       |    fn deliver_and_shutdown_validate_their_arguments_and_closed_state() {
+ 1181|       |        assert_eq!(
+ 1182|       |            unsafe { deliver(std::ptr::null_mut(), std::ptr::null(), 0) },
+ 1183|       |            TB_BAD_ARGUMENT
+ 1184|       |        );
+ 1185|       |        assert_eq!(
+ 1186|       |            unsafe { shutdown(std::ptr::null_mut(), 1) },
+ 1187|       |            TB_BAD_ARGUMENT
+ 1188|       |        );
+ 1189|       |        let state = RuntimeState {
+ 1190|       |            inbound: StdMutex::new(None),
+ 1191|       |            runtime: StdMutex::new(None),
+ 1192|       |            reinitialize: None,
+ 1193|       |        };
+ 1194|       |        let bytes = b"{}";
+ 1195|       |        assert_eq!(
+ 1196|       |            unsafe {
+ 1197|       |                deliver(
+ 1198|       |                    std::ptr::from_ref(&state).cast_mut().cast(),
+ 1199|       |                    bytes.as_ptr(),
+ 1200|       |                    bytes.len(),
+ 1201|       |                )
+ 1202|       |            },
+ 1203|       |            TB_CLOSED
+ 1204|       |        );
+ 1205|       |        assert_eq!(
+ 1206|       |            unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) },
+ 1207|       |            TB_CLOSED
+ 1208|       |        );
+ 1209|       |    }
+ 1210|       |
+ 1211|       |    #[tokio::test]
+ 1212|       |    async fn module_transport_maps_host_results_and_wakes_after_receiving() {
+ 1213|       |        let _host_state = host_state_guard().await;
+ 1214|       |        let (sender, receiver) = mpsc::channel(2);
+ 1215|       |        let transport = ModuleTransport {
+ 1216|       |            host: HostCalls(host(&[])),
+ 1217|       |            inbound: Mutex::new(receiver),
+ 1218|       |            detach_on_panic: true,
+ 1219|       |        };
+ 1220|       |        HOST_SEND_CODE.store(TB_BACKPRESSURE, Ordering::Release);
+ 1221|       |        assert!(matches!(
+ 1222|       |            transport.send(message()).await,
+ 1223|       |            Err(Error::Backpressure)
+ 1224|       |        ));
+ 1225|       |        HOST_SEND_CODE.store(TB_CLOSED, Ordering::Release);
+ 1226|       |        assert!(matches!(
+ 1227|       |            transport.send(message()).await,
+ 1228|       |            Err(Error::ConnectionClosed)
+ 1229|       |        ));
+ 1230|       |        HOST_SEND_CODE.store(TB_BAD_ARGUMENT, Ordering::Release);
+ 1231|       |        assert!(matches!(
+ 1232|       |            transport.send(message()).await,
+ 1233|       |            Err(Error::Transport { .. })
+ 1234|       |        ));
+ 1235|       |        HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+ 1236|       |        HOST_FAULTED.store(false, Ordering::Release);
+ 1237|       |        let mut panic_message = message();
+ 1238|       |        panic_message.header.error_name = Some(MODULE_PANIC_ERROR.to_string());
+ 1239|       |        transport.send(panic_message).await.unwrap();
+ 1240|       |        assert!(HOST_FAULTED.load(Ordering::Acquire));
+ 1241|       |        HOST_WAKES.store(0, Ordering::Release);
+ 1242|       |        sender
+ 1243|       |            .send(serde_json::to_vec(&message()).unwrap())
+ 1244|       |            .await
+ 1245|       |            .unwrap();
+ 1246|       |        assert_eq!(transport.recv().await.unwrap().unwrap(), message());
+ 1247|       |        assert_eq!(HOST_WAKES.load(Ordering::Acquire), 1);
+ 1248|       |        transport.close().await.unwrap();
+ 1249|       |        assert!(transport.recv().await.unwrap().is_none());
+ 1250|       |        assert_eq!(transport.describe(), "module");
+ 1251|       |    }
+ 1252|       |
+ 1253|       |    #[tokio::test]
+ 1254|       |    async fn host_calls_and_subscriber_forward_logs_at_their_original_level() {
+ 1255|       |        let _host_state = host_state_guard().await;
+ 1256|       |        let calls = HostCalls(host(&[]));
+ 1257|       |        HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+ 1258|       |        HOST_WAKES.store(0, Ordering::Release);
+ 1259|       |        HOST_LOGS.store(0, Ordering::Release);
+ 1260|       |        HOST_READY.store(false, Ordering::Release);
+ 1261|       |        HOST_FAULTED.store(false, Ordering::Release);
+ 1262|       |        assert_eq!(calls.send(b"frame"), TB_OK);
+ 1263|       |        calls.wake();
+ 1264|       |        calls.log(4, b"debug");
+ 1265|       |        calls.ready();
+ 1266|       |        calls.fault();
+ 1267|       |        assert_eq!(HOST_WAKES.load(Ordering::Acquire), 1);
+ 1268|       |        assert_eq!(HOST_LOGS.load(Ordering::Acquire), 4);
+ 1269|       |        assert!(HOST_READY.load(Ordering::Acquire));
+ 1270|       |        assert!(HOST_FAULTED.load(Ordering::Acquire));
+ 1271|       |
+ 1272|       |        let subscriber = HostSubscriber {
+ 1273|       |            host: calls,
+ 1274|       |            next_span: AtomicU64::new(1),
+ 1275|       |            max_level: tracing::level_filters::LevelFilter::TRACE,
+ 1276|       |        };
+ 1277|       |        tracing::subscriber::with_default(subscriber, || {
+ 1278|       |            tracing::error!("module error");
+ 1279|       |            tracing::warn!("module warning");
+ 1280|       |            tracing::info!(answer = 42, "module log");
+ 1281|       |            tracing::debug!("module debug");
+ 1282|       |            tracing::trace!("module trace");
+ 1283|       |        });
+ 1284|       |        let span = tracing::span::Id::from_u64(1);
+ 1285|       |        let subscriber = HostSubscriber {
+ 1286|       |            host: calls,
+ 1287|       |            next_span: AtomicU64::new(1),
+ 1288|       |            max_level: tracing::level_filters::LevelFilter::TRACE,
+ 1289|       |        };
+ 1290|       |        tracing::Subscriber::record_follows_from(&subscriber, &span, &span);
+ 1291|       |        tracing::Subscriber::enter(&subscriber, &span);
+ 1292|       |        tracing::Subscriber::exit(&subscriber, &span);
+ 1293|       |        assert_eq!(HOST_LOGS.load(Ordering::Acquire), 5);
+ 1294|       |    }
+ 1295|       |
+ 1296|       |    #[tokio::test]
+ 1297|       |    async fn start_functions_reject_invalid_host_and_config_before_spawning_a_runtime() {
+ 1298|       |        let _host_state = host_state_guard().await;
+ 1299|       |        let mut out = TbModuleVtable::default();
+ 1300|       |        assert_eq!(
+ 1301|       |            unsafe { start_module(std::ptr::null(), &mut out, 1, true, |_| async { Ok(()) }) },
+ 1302|       |            TB_BAD_ARGUMENT
+ 1303|       |        );
+ 1304|       |        let mut short = host(&[]);
+ 1305|       |        short.size = 0;
+ 1306|       |        assert_eq!(
+ 1307|       |            unsafe { start_module(&short, &mut out, 1, true, |_| async { Ok(()) }) },
+ 1308|       |            TB_BAD_ARGUMENT
+ 1309|       |        );
+ 1310|       |        let config = b"not json";
+ 1311|       |        let invalid_config = host(config);
+ 1312|       |        assert_eq!(
+ 1313|       |            unsafe {
+ 1314|       |                start_module_with_config::<u32, _, _>(
+ 1315|       |                    &invalid_config,
+ 1316|       |                    &mut out,
+ 1317|       |                    1,
+ 1318|       |                    true,
+ 1319|       |                    |_, _| async { Ok(()) },
+ 1320|       |                )
+ 1321|       |            },
+ 1322|       |            TB_BAD_ARGUMENT
+ 1323|       |        );
+ 1324|       |        let (_tx, only_once) = std::sync::mpsc::channel::<()>();
+ 1325|       |        assert_eq!(
+ 1326|       |            unsafe {
+ 1327|       |                start_module_with_config::<serde_json::Value, _, _>(
+ 1328|       |                    std::ptr::null(),
+ 1329|       |                    &mut out,
+ 1330|       |                    1,
+ 1331|       |                    true,
+ 1332|       |                    move |_, _| async move {
+ 1333|       |                        drop(only_once);
+ 1334|       |                        Ok(())
+ 1335|       |                    },
+ 1336|       |                )
+ 1337|       |            },
+ 1338|       |            TB_BAD_ARGUMENT
+ 1339|       |        );
+ 1340|       |    }
+ 1341|       |
+ 1342|       |    #[test]
+ 1343|       |    fn configured_reinitializations_are_serialized_bounded_and_keep_the_runtime_alive() {
+ 1344|       |        let _host_state = blocking_host_state_guard();
+ 1345|       |        HOST_READY.store(false, Ordering::Release);
+ 1346|       |        HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+ 1347|       |        HOST_FAULTED.store(false, Ordering::Release);
+ 1348|       |        let config = br#"{"answer":42}"#;
+ 1349|       |        let (outgoing_tx, outgoing_rx) = std::sync::mpsc::sync_channel(2);
+ 1350|       |        let capture = START_OUTGOING.get_or_init(|| StdMutex::new(None));
+ 1351|       |        *capture.lock().expect("startup capture lock") = Some(outgoing_tx);
+ 1352|       |        let mut host = host(config);
+ 1353|       |        host.send = capture_host_send;
+ 1354|       |        let mut out = TbModuleVtable::default();
+ 1355|       |        let observed = Arc::new(AtomicUsize::new(0));
+ 1356|       |        let active = Arc::new(AtomicUsize::new(0));
+ 1357|       |        let max_active = Arc::new(AtomicUsize::new(0));
+ 1358|       |        let setup_observed = observed.clone();
+ 1359|       |        let setup_active = active.clone();
+ 1360|       |        let setup_max_active = max_active.clone();
+ 1361|       |        let code = unsafe {
+ 1362|       |            start_reconfigurable_module::<serde_json::Value, _, _>(
+ 1363|       |                &host,
+ 1364|       |                &mut out,
+ 1365|       |                1,
+ 1366|       |                true,
+ 1367|       |                move |_, parsed| {
+ 1368|       |                    let observed = setup_observed.clone();
+ 1369|       |                    let active = setup_active.clone();
+ 1370|       |                    let max_active = setup_max_active.clone();
+ 1371|       |                    async move {
+ 1372|       |                        if parsed["hang"].as_bool() == Some(true) {
+ 1373|       |                            std::future::pending::<()>().await;
+ 1374|       |                        }
+ 1375|       |                        let waits = parsed["wait"].as_bool() == Some(true);
+ 1376|       |                        if waits {
+ 1377|       |                            let now = active.fetch_add(1, Ordering::AcqRel) + 1;
+ 1378|       |                            max_active.fetch_max(now, Ordering::AcqRel);
+ 1379|       |                            tokio::time::sleep(Duration::from_millis(20)).await;
+ 1380|       |                            active.fetch_sub(1, Ordering::AcqRel);
+ 1381|       |                        }
+ 1382|       |                        observed.store(
+ 1383|       |                            parsed["answer"].as_u64().unwrap() as usize,
+ 1384|       |                            Ordering::Release,
+ 1385|       |                        );
+ 1386|       |                        Ok(())
+ 1387|       |                    }
+ 1388|       |                },
+ 1389|       |            )
+ 1390|       |        };
+ 1391|       |        assert_eq!(code, TB_OK);
+ 1392|       |        let captured = outgoing_rx.recv_timeout(Duration::from_secs(1));
+ 1393|       |        let hello: Message =
+ 1394|       |            serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
+ 1395|       |        let reply =
+ 1396|       |            Message::method_return(&hello.header, serde_json::Value::String(":1.1".to_string()));
+ 1397|       |        let reply = serde_json::to_vec(&reply).unwrap();
+ 1398|       |        assert_eq!(
+ 1399|       |            unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) },
+ 1400|       |            TB_OK
+ 1401|       |        );
+ 1402|       |        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+ 1403|       |        while !HOST_READY.load(Ordering::Acquire) {
+ 1404|       |            assert!(
+ 1405|       |                std::time::Instant::now() < deadline,
+ 1406|       |                "module did not become ready"
+ 1407|       |            );
+ 1408|       |            std::thread::yield_now();
+ 1409|       |        }
+ 1410|       |        assert_eq!(observed.load(Ordering::Acquire), 42);
+ 1411|       |        let callback = out.reinitialize.expect("configured module supports reinit");
+ 1412|       |        let replacement = br#"{"answer":7}"#;
+ 1413|       |        let replacement_code =
+ 1414|       |            unsafe { callback(out.module_ctx, replacement.as_ptr(), replacement.len()) };
+ 1415|       |        assert_eq!(replacement_code, TB_OK);
+ 1416|       |        assert_eq!(observed.load(Ordering::Acquire), 7);
+ 1417|       |        let context = out.module_ctx as usize;
+ 1418|       |        let first = std::thread::spawn(move || {
+ 1419|       |            let config = br#"{"answer":8,"wait":true}"#;
+ 1420|       |            unsafe { callback(context as *mut c_void, config.as_ptr(), config.len()) }
+ 1421|       |        });
+ 1422|       |        let context = out.module_ctx as usize;
+ 1423|       |        let second = std::thread::spawn(move || {
+ 1424|       |            let config = br#"{"answer":9,"wait":true}"#;
+ 1425|       |            unsafe { callback(context as *mut c_void, config.as_ptr(), config.len()) }
+ 1426|       |        });
+ 1427|       |        let first_code = first.join().unwrap();
+ 1428|       |        let second_code = second.join().unwrap();
+ 1429|       |        assert_eq!(first_code, TB_OK);
+ 1430|       |        assert_eq!(second_code, TB_OK);
+ 1431|       |        assert_eq!(max_active.load(Ordering::Acquire), 1);
+ 1432|       |        let hanging = br#"{"answer":10,"hang":true}"#;
+ 1433|       |        let hanging_code = unsafe { callback(out.module_ctx, hanging.as_ptr(), hanging.len()) };
+ 1434|       |        assert_eq!(hanging_code, TB_TIMEOUT);
+ 1435|       |        assert_eq!(
+ 1436|       |            unsafe { callback(out.module_ctx, b"bad".as_ptr(), 3) },
+ 1437|       |            TB_BAD_ARGUMENT
+ 1438|       |        );
+ 1439|       |        assert_eq!(
+ 1440|       |            unsafe { (out.deliver)(out.module_ctx, std::ptr::null(), 0) },
+ 1441|       |            TB_BAD_ARGUMENT
+ 1442|       |        );
+ 1443|       |        assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
+ 1444|       |        assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_CLOSED);
+ 1445|       |    }
+ 1446|       |
+ 1447|       |    /// Startup refuses a host vtable it cannot trust, before it builds anything.
+ 1448|       |    ///
+ 1449|       |    /// Every branch here returns before a runtime, a panic hook or a transport
+ 1450|       |    /// exists, which is the property worth pinning: this is the first code a
+ 1451|       |    /// `dlopen`ed module runs, it is handed a raw pointer by the host, and the
+ 1452|       |    /// refusals are what stand between a malformed descriptor and a
+ 1453|       |    /// dereference. A regression would not fail loudly — it would read off the
+ 1454|       |    /// end of a struct the host never filled in.
+ 1455|       |    ///
+ 1456|       |    /// Deliberately takes no host-state guard: none of these paths touches the
+ 1457|       |    /// shared statics or the module's process-global runtime capture, because
+ 1458|       |    /// none of them gets far enough to.
+ 1459|       |    #[test]
+ 1460|       |    fn configured_startup_refuses_a_host_vtable_it_cannot_trust() {
+ 1461|       |        fn attempt(host: *const TbHostVtable) -> i32 {
+ 1462|       |            let mut out = TbModuleVtable::default();
+ 1463|       |            unsafe {
+ 1464|       |                start_module_with_config::<serde_json::Value, _, _>(
+ 1465|       |                    host,
+ 1466|       |                    &mut out,
+ 1467|       |                    1,
+ 1468|       |                    true,
+ 1469|       |                    // Never runs: every case below is refused before setup.
+ 1470|       |                    |_, _| async { Ok(()) },
+ 1471|       |                )
+ 1472|       |            }
+ 1473|       |        }
+ 1474|       |
+ 1475|       |        assert_eq!(
+ 1476|       |            attempt(std::ptr::null()),
+ 1477|       |            TB_BAD_ARGUMENT,
+ 1478|       |            "a null host vtable is refused rather than dereferenced"
+ 1479|       |        );
+ 1480|       |
+ 1481|       |        // A host built against an older, smaller descriptor. Reading our
+ 1482|       |        // fields out of it would run off the end of what it allocated.
+ 1483|       |        let mut truncated = host(b"{}");
+ 1484|       |        truncated.size = (size_of::<TbHostVtable>() - 1) as u32;
+ 1485|       |        assert_eq!(
+ 1486|       |            attempt(&truncated),
+ 1487|       |            TB_BAD_ARGUMENT,
+ 1488|       |            "a vtable shorter than this ABI's is refused"
+ 1489|       |        );
+ 1490|       |
+ 1491|       |        // A length with no buffer behind it.
+ 1492|       |        let mut dangling = host(b"{}");
+ 1493|       |        dangling.config.ptr = std::ptr::null();
+ 1494|       |        dangling.config.len = 8;
+ 1495|       |        assert_eq!(
+ 1496|       |            attempt(&dangling),
+ 1497|       |            TB_BAD_ARGUMENT,
+ 1498|       |            "a config length with a null pointer is refused"
+ 1499|       |        );
+ 1500|       |
+ 1501|       |        // Past the 1 MiB config cap. The pointer is valid; only the claimed
+ 1502|       |        // length is not, so this asserts the cap and not the null check.
+ 1503|       |        let real = b"{}";
+ 1504|       |        let mut oversized = host(real);
+ 1505|       |        oversized.config.len = 1024 * 1024 + 1;
+ 1506|       |        assert_eq!(
+ 1507|       |            attempt(&oversized),
+ 1508|       |            TB_BAD_ARGUMENT,
+ 1509|       |            "a config past the size cap is refused"
+ 1510|       |        );
+ 1511|       |
+ 1512|       |        // Well-formed descriptor, unparseable config for the declared type.
+ 1513|       |        let malformed = host(b"not json");
+ 1514|       |        assert_eq!(
+ 1515|       |            attempt(&malformed),
+ 1516|       |            TB_BAD_ARGUMENT,
+ 1517|       |            "a config that does not deserialize is refused"
+ 1518|       |        );
+ 1519|       |
+ 1520|       |        // A config the module cannot deserialize into its own type is the same
+ 1521|       |        // refusal, which is what stops a type mismatch reaching `setup`.
+ 1522|       |        let wrong_shape = host(br#"{"answer":42}"#);
+ 1523|       |        let mut out = TbModuleVtable::default();
+ 1524|       |        assert_eq!(
+ 1525|       |            unsafe {
+ 1526|       |                start_module_with_config::<Vec<String>, _, _>(
+ 1527|       |                    &wrong_shape,
+ 1528|       |                    &mut out,
+ 1529|       |                    1,
+ 1530|       |                    true,
+ 1531|       |                    |_, _| async { Ok(()) },
+ 1532|       |                )
+ 1533|       |            },
+ 1534|       |            TB_BAD_ARGUMENT,
+ 1535|       |            "an object is not a Vec<String>, and that is caught before setup"
+ 1536|       |        );
+ 1537|       |    }
+ 1538|       |}
+ 1539|       |
+ 1540|       |#[cfg(test)]
+ 1541|       |#[path = "static_link_tests.rs"]
+ 1542|       |mod static_link_tests;
+
