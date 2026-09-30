@@ -91,14 +91,7 @@ impl JailBackend for LandlockBackend {
 
             // SAFETY: the child callback only applies this prebuilt ruleset.
             unsafe {
-                cmd.pre_exec(move || {
-                    apply_ruleset(ruleset.take(), |ruleset| {
-                        ruleset
-                            .restrict_self()
-                            .map(|_| ())
-                            .map_err(|_| std::io::Error::from_raw_os_error(5))
-                    })
-                });
+                cmd.pre_exec(move || apply_ruleset(ruleset.take(), restrict_self));
             }
 
             cmd.spawn()
@@ -120,6 +113,14 @@ fn apply_ruleset<T>(
         Some(ruleset) => restrict(ruleset),
         None => Err(std::io::Error::from_raw_os_error(22)),
     }
+}
+
+#[cfg(feature = "landlock")]
+fn restrict_self(ruleset: landlock::Ruleset) -> std::io::Result<()> {
+    ruleset
+        .restrict_self()
+        .map(|_| ())
+        .map_err(|_| std::io::Error::from_raw_os_error(5))
 }
 
 #[cfg(test)]
