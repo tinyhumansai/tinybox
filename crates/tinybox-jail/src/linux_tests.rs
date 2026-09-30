@@ -12,6 +12,7 @@ fn backend_reports_name_and_availability() {
 }
 
 #[test]
+#[cfg(feature = "landlock")]
 fn spawn_rejects_a_missing_read_only_path() {
     let root = tempfile::tempdir().expect("temporary jail root");
     let jail = Jail::new(root.path(), "missing-read-only")
