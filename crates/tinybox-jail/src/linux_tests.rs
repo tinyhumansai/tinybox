@@ -34,9 +34,19 @@ fn spawn_applies_rules_before_running_the_command_when_supported() {
             jail = jail.add_read_only(path);
         }
     }
-    let result = LandlockBackend::new().spawn(&jail, Command::new("/usr/bin/true"));
-    if let Ok(mut child) = result {
-        let status = child.wait().expect("wait for jailed command");
-        assert!(status.success());
+    let backend = LandlockBackend::new();
+    if !backend.is_available() {
+        let error = backend
+            .spawn(&jail, Command::new("/usr/bin/true"))
+            .err()
+            .map(|error| error.kind());
+        assert_eq!(error, Some(std::io::ErrorKind::PermissionDenied));
+        return;
     }
+
+    let mut child = backend
+        .spawn(&jail, Command::new("/usr/bin/true"))
+        .expect("spawn with Landlock restrictions");
+    let status = child.wait().expect("wait for jailed command");
+    assert!(status.success());
 }
