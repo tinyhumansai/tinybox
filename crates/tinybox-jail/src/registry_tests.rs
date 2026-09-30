@@ -219,6 +219,18 @@ fn open_creates_base_directory_if_missing() {
 }
 
 #[test]
+fn open_creates_a_missing_nested_base_directory() {
+    let parent = tempdir("missing-parent");
+    let base = parent.path().join("nested").join("registry");
+    assert!(!base.exists());
+
+    let registry = JailRegistry::open(&base).unwrap();
+
+    assert!(base.is_dir());
+    assert!(registry.list().is_empty());
+}
+
+#[test]
 fn corrupt_index_returns_invalid_data() {
     let base = tempdir("corrupt");
     fs::write(base.path().join("index.json"), b"this is not json").unwrap();
@@ -360,4 +372,16 @@ fn delete_keeps_memory_aligned_when_index_persistence_fails() {
     assert!(reg.delete(&created.id).is_err());
     assert!(reg.get(&created.id).is_none());
     assert!(!created.dir.exists());
+}
+
+#[test]
+fn delete_persists_when_the_jail_directory_is_already_missing() {
+    let base = tempdir("delete-missing-directory");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let created = reg.create("removed-outside").unwrap();
+    fs::remove_dir_all(&created.dir).unwrap();
+
+    reg.delete(&created.id).unwrap();
+
+    assert!(reg.get(&created.id).is_none());
 }

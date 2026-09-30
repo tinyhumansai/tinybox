@@ -7,6 +7,7 @@ fn backend_reports_name_and_availability() {
     let backend = LandlockBackend::new();
     assert_eq!(backend.name(), "landlock");
     let _ = backend.is_available();
+    assert_eq!(LandlockBackend::default().name(), "landlock");
 }
 
 #[test]
