@@ -416,6 +416,9 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
     if operators.is_empty() {
         return Cow::Borrowed(command);
     }
+    if delimiters.iter().all(|(_, quoted)| !quoted) {
+        return Cow::Borrowed(command);
+    }
 
     // Walk the lines. Once the line carrying the Nth operator ends, every
     // following line is body until its terminator line appears.
@@ -451,12 +454,9 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
 
         out.push_str(line);
         let line_end = line_start + line.len();
-        let first = next_delim;
-        while next_delim < operators.len() && operators[next_delim] < line_end {
+        if next_delim < operators.len() && operators[next_delim] < line_end {
+            open = Some(delimiters[next_delim].clone());
             next_delim += 1;
-        }
-        if first < next_delim {
-            open = Some(delimiters[first].clone());
         }
     }
 
@@ -496,6 +496,9 @@ fn heredoc_delimiter(rest: &str) -> Option<(String, bool, usize)> {
             continue;
         }
         if let Some(active) = quote {
+            if c == '\n' {
+                return None;
+            }
             if c == active {
                 quote = None;
             } else {
