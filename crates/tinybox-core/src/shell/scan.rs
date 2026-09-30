@@ -8,6 +8,8 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::iter::Peekable;
+use std::str::Chars;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuoteState {
@@ -205,55 +207,14 @@ pub fn contains_unquoted_background_ampersand(command: &str) -> bool {
                 }
                 if ch == '$' && chars.peek() == Some(&'(') {
                     chars.next();
-                    let mut nested = String::new();
-                    let mut depth = 1usize;
-                    let mut nested_quote = QuoteState::None;
-                    let mut nested_escaped = false;
-                    for inner in chars.by_ref() {
-                        if nested_escaped {
-                            nested_escaped = false;
-                            nested.push(inner);
-                            continue;
-                        }
-                        match nested_quote {
-                            QuoteState::Single if inner == '\'' => nested_quote = QuoteState::None,
-                            QuoteState::Double => match inner {
-                                '\\' => nested_escaped = true,
-                                '"' => nested_quote = QuoteState::None,
-                                _ => {}
-                            },
-                            QuoteState::None => match inner {
-                                '\\' => nested_escaped = true,
-                                '\'' => nested_quote = QuoteState::Single,
-                                '"' => nested_quote = QuoteState::Double,
-                                '(' => depth += 1,
-                                ')' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            },
-                            QuoteState::Single => {}
-                        }
-                        nested.push(inner);
-                    }
+                    let nested = command_substitution_body(&mut chars);
                     if contains_unquoted_background_ampersand(&nested) {
                         return true;
                     }
                     continue;
                 }
                 if ch == '`' {
-                    let mut nested = String::new();
-                    let mut escaped_tick = false;
-                    for inner in chars.by_ref() {
-                        if inner == '`' && !escaped_tick {
-                            break;
-                        }
-                        escaped_tick = inner == '\\' && !escaped_tick;
-                        nested.push(inner);
-                    }
+                    let nested = backtick_substitution_body(&mut chars);
                     if contains_unquoted_background_ampersand(&nested) {
                         return true;
                     }
@@ -297,6 +258,59 @@ pub fn contains_unquoted_background_ampersand(command: &str) -> bool {
     }
 
     false
+}
+
+fn command_substitution_body(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut nested = String::new();
+    let mut depth = 1usize;
+    let mut quote = QuoteState::None;
+    let mut escaped = false;
+
+    for inner in chars.by_ref() {
+        if escaped {
+            escaped = false;
+            nested.push(inner);
+            continue;
+        }
+        match quote {
+            QuoteState::Single if inner == '\'' => quote = QuoteState::None,
+            QuoteState::Double => match inner {
+                '\\' => escaped = true,
+                '"' => quote = QuoteState::None,
+                _ => {}
+            },
+            QuoteState::None => match inner {
+                '\\' => escaped = true,
+                '\'' => quote = QuoteState::Single,
+                '"' => quote = QuoteState::Double,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            },
+            QuoteState::Single => {}
+        }
+        nested.push(inner);
+    }
+
+    nested
+}
+
+fn backtick_substitution_body(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut nested = String::new();
+    let mut escaped_tick = false;
+    for inner in chars.by_ref() {
+        if inner == '`' && !escaped_tick {
+            break;
+        }
+        escaped_tick = inner == '\\' && !escaped_tick;
+        nested.push(inner);
+    }
+    nested
 }
 
 /// Detect an unquoted character in a shell command.
