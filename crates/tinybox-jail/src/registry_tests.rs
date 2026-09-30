@@ -385,3 +385,25 @@ fn delete_persists_when_the_jail_directory_is_already_missing() {
 
     assert!(reg.get(&created.id).is_none());
 }
+
+#[test]
+fn open_rejects_a_file_as_registry_directory() {
+    let base = tempdir("not-directory");
+    let file = base.path().join("file");
+    fs::write(&file, b"not a directory").unwrap();
+    assert!(JailRegistry::open(file).is_err());
+}
+
+#[test]
+fn spawn_rejects_a_jail_directory_removed_after_creation() {
+    let base = tempdir("removed-jail");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let record = reg.create("removed").unwrap();
+    fs::remove_dir_all(&record.dir).unwrap();
+
+    let error = reg
+        .spawn_in_with(&record.id, &super::super::NoopBackend, Command::new("true"))
+        .err()
+        .map(|error| error.kind());
+    assert_eq!(error, Some(io::ErrorKind::NotFound));
+}

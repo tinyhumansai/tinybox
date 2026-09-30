@@ -49,14 +49,15 @@ fn default_backend_is_cached() {
 }
 
 #[test]
-#[cfg(not(feature = "landlock"))]
 fn spawn_uses_default_backend() {
     let dir = std::env::temp_dir();
-    let jail = Jail::new(&dir, "default-spawn")
-        .add_read_only("/usr")
-        .add_read_only("/bin")
-        .add_read_only("/lib")
-        .add_read_only("/lib64");
+    let mut jail = Jail::new(&dir, "default-spawn");
+    #[cfg(target_os = "linux")]
+    for path in ["/usr", "/bin", "/lib", "/lib64"] {
+        if std::path::Path::new(path).exists() {
+            jail = jail.add_read_only(path);
+        }
+    }
     let cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", "exit"]);

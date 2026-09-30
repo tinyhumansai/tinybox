@@ -143,6 +143,12 @@ impl JailBackend for AppContainerBackend {
     }
 
     fn spawn(&self, jail: &Jail, cmd: Command) -> io::Result<Child> {
+        if !self.is_available() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "AppContainer cannot return a waitable process handle",
+            ));
+        }
         unsafe { spawn_in_container(jail, cmd) }
     }
 }

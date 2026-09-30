@@ -1,6 +1,7 @@
 //! Tests for Landlock setup and child spawning.
 
 use super::*;
+use std::path::Path;
 
 #[test]
 fn backend_reports_name_and_availability() {
@@ -27,7 +28,12 @@ fn spawn_rejects_a_missing_read_only_path() {
 #[test]
 fn spawn_applies_rules_before_running_the_command_when_supported() {
     let root = tempfile::tempdir().expect("temporary jail root");
-    let jail = Jail::new(root.path(), "landlock-spawn").add_read_only("/usr");
+    let mut jail = Jail::new(root.path(), "landlock-spawn");
+    for path in ["/usr", "/bin", "/lib", "/lib64"] {
+        if Path::new(path).exists() {
+            jail = jail.add_read_only(path);
+        }
+    }
     let result = LandlockBackend::new().spawn(&jail, Command::new("/usr/bin/true"));
     if let Ok(mut child) = result {
         let status = child.wait().expect("wait for jailed command");
