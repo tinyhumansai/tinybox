@@ -55,3 +55,7 @@ pub fn pick_backend() -> Arc<dyn JailBackend> {
     log::warn!("[cwd_jail] no OS sandbox available");
     Arc::new(UnsupportedBackend)
 }
+
+#[cfg(test)]
+#[path = "detect_tests.rs"]
+mod tests;

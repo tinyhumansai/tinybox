@@ -84,6 +84,24 @@ fn spawn_uses_default_backend() {
 }
 
 #[test]
+fn spawn_uses_default_backend_for_an_existing_root() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let result = super::spawn(
+        &Jail::new(dir.path(), "default-spawn"),
+        Command::new("true"),
+    );
+    match result {
+        Ok(mut child) => {
+            let _ = child.wait();
+        }
+        Err(error) => assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+        )),
+    }
+}
+
+#[test]
 fn canonicalize_or_log_does_not_panic_on_missing() {
     // The lossy helper is supposed to log + continue rather than
     // propagate. Verify it doesn't panic for the missing-root case.
