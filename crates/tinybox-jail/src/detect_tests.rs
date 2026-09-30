@@ -9,8 +9,7 @@ fn unsupported_backend_reports_and_rejects_spawns() {
     assert!(!backend.is_available());
     let error = backend
         .spawn(&Jail::new("/", "unsupported"), Command::new("true"))
-        .err()
-        .expect("unsupported backend must reject a spawn");
+        .expect_err("unsupported backend must reject a spawn");
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
