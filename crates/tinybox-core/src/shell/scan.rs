@@ -216,24 +216,32 @@ pub fn contains_unquoted_background_ampersand(command: &str) -> bool {
                             QuoteState::None if inner == '(' => depth += 1,
                             QuoteState::None if inner == ')' => {
                                 depth -= 1;
-                                if depth == 0 { break; }
+                                if depth == 0 {
+                                    break;
+                                }
                             }
                             _ => {}
                         }
                         nested.push(inner);
                     }
-                    if contains_unquoted_background_ampersand(&nested) { return true; }
+                    if contains_unquoted_background_ampersand(&nested) {
+                        return true;
+                    }
                     continue;
                 }
                 if ch == '`' {
                     let mut nested = String::new();
                     let mut escaped_tick = false;
                     for inner in chars.by_ref() {
-                        if inner == '`' && !escaped_tick { break; }
+                        if inner == '`' && !escaped_tick {
+                            break;
+                        }
                         escaped_tick = inner == '\\' && !escaped_tick;
                         nested.push(inner);
                     }
-                    if contains_unquoted_background_ampersand(&nested) { return true; }
+                    if contains_unquoted_background_ampersand(&nested) {
+                        return true;
+                    }
                     continue;
                 }
                 if ch == '"' {
@@ -349,7 +357,7 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
         return Cow::Borrowed(command);
     }
 
-    let mut delimiters: Vec<String> = Vec::new();
+    let mut delimiters: Vec<(String, bool)> = Vec::new();
     let mut quote = QuoteState::None;
     let mut escaped = false;
     let mut chars = command.char_indices().peekable();
@@ -389,11 +397,11 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
                             continue;
                         }
                         let rest = &command[idx + 2..];
-                        if let Some((delim, consumed)) = quoted_heredoc_delimiter(rest) {
-                            delimiters.push(delim);
+                        if let Some((delim, quoted, consumed)) = heredoc_delimiter(rest) {
+                            delimiters.push((delim, quoted));
                             operators.push(idx);
-                            // Skip past the delimiter token so its quotes do not
-                            // re-enter the quote state machine.
+                            // Skip past the delimiter word so its quotes do not
+                            // re-enter the outer quote state machine.
                             for _ in 0..consumed {
                                 chars.next();
                             }
@@ -413,21 +421,29 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
     // following line is body until its terminator line appears.
     let mut out = String::with_capacity(command.len());
     let mut next_delim = 0usize;
-    let mut open: Option<String> = None;
+    let mut open: Option<(String, bool)> = None;
     let mut consumed_bytes = 0usize;
 
     for line in command.split_inclusive('\n') {
         let line_start = consumed_bytes;
         consumed_bytes += line.len();
 
-        if let Some(delim) = open.clone() {
+        if let Some((delim, quoted)) = open.clone() {
             if line.trim() == delim {
                 open = None;
                 out.push_str(line);
+                if next_delim < delimiters.len() {
+                    open = Some(delimiters[next_delim].clone());
+                    next_delim += 1;
+                }
             } else {
-                // Blank the body, keeping the newline so offsets stay sane.
-                if line.ends_with('\n') {
-                    out.push('\n');
+                if quoted {
+                    // Blank only bodies the shell does not expand.
+                    if line.ends_with('\n') {
+                        out.push('\n');
+                    }
+                } else {
+                    out.push_str(line);
                 }
             }
             continue;
@@ -435,23 +451,21 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
 
         out.push_str(line);
         let line_end = line_start + line.len();
+        let first = next_delim;
         while next_delim < operators.len() && operators[next_delim] < line_end {
-            // The last operator on a line wins: `cat << 'A' << 'B'` reads A's
-            // body first, but only tracking one at a time is enough for the
-            // guard, and a nested case simply keeps scanning as today.
-            open = Some(delimiters[next_delim].clone());
             next_delim += 1;
+        }
+        if first < next_delim {
+            open = Some(delimiters[first].clone());
         }
     }
 
     Cow::Owned(out)
 }
 
-/// Parse a heredoc delimiter token immediately after `<<`, returning the
-/// delimiter and how many chars of `rest` it spans — **only** when the token is
-/// quoted (`'EOF'` or `"EOF"`), optionally preceded by `-` and whitespace.
-/// An unquoted delimiter returns `None`, because its body is still expanded.
-fn quoted_heredoc_delimiter(rest: &str) -> Option<(String, usize)> {
+/// Parse one complete shell delimiter word after `<<`, preserving whether any
+/// part was quoted or escaped and how many characters it occupies.
+fn heredoc_delimiter(rest: &str) -> Option<(String, bool, usize)> {
     let mut consumed = 0usize;
     let mut chars = rest.chars().peekable();
 
@@ -464,23 +478,40 @@ fn quoted_heredoc_delimiter(rest: &str) -> Option<(String, usize)> {
         consumed += 1;
     }
 
-    let Some(quote @ ('\'' | '"')) = chars.next() else {
-        return None;
-    };
-    consumed += 1;
-
     let mut delim = String::new();
+    let mut quote = None;
+    let mut quoted = false;
+    let mut escaped = false;
     for c in chars {
         consumed += 1;
-        if c == quote {
-            return (!delim.is_empty()).then_some((delim, consumed));
+        if escaped {
+            delim.push(c);
+            escaped = false;
+            quoted = true;
+            continue;
         }
-        if c == '\n' {
-            return None;
+        if c == '\\' && quote != Some('\'') {
+            escaped = true;
+            quoted = true;
+            continue;
         }
-        delim.push(c);
+        if let Some(active) = quote {
+            if c == active {
+                quote = None;
+            } else {
+                delim.push(c);
+            }
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+            quoted = true;
+        } else if c.is_whitespace() {
+            consumed -= 1;
+            break;
+        } else {
+            delim.push(c);
+        }
     }
-    None
+    (quote.is_none() && !escaped && !delim.is_empty()).then_some((delim, quoted, consumed))
 }
 
 /// The last path component of a command word, splitting on both `/` and `\`.
@@ -535,6 +566,7 @@ pub fn has_leading_env_assignment(s: &str) -> bool {
 pub fn skip_env_assignments(s: &str) -> &str {
     let mut rest = s;
     loop {
+        rest = rest.trim_start();
         let Some(word) = rest.split_whitespace().next() else {
             return rest;
         };
@@ -546,7 +578,7 @@ pub fn skip_env_assignments(s: &str) -> &str {
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         {
             // Advance past this word
-            rest = rest[word.len()..].trim_start();
+            rest = &rest[word.len()..];
         } else {
             return rest;
         }

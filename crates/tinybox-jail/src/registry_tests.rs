@@ -191,7 +191,9 @@ fn spawn_in_uses_default_backend() {
         Command::new("true")
     };
     match reg.spawn_in(&a.id, cmd) {
-        Ok(mut child) => { let _ = child.wait(); }
+        Ok(mut child) => {
+            let _ = child.wait();
+        }
         Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied),
     }
     fs::remove_dir_all(&base).ok();

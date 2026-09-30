@@ -67,7 +67,9 @@ fn spawn_uses_default_backend() {
     // noop). The point of the test is that we go through the public
     // `spawn` entry rather than `spawn_with`.
     match spawn(&jail, cmd) {
-        Ok(mut child) => { let _ = child.wait(); }
+        Ok(mut child) => {
+            let _ = child.wait();
+        }
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
     }
 }

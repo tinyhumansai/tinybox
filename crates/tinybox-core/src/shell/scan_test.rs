@@ -83,6 +83,12 @@ fn background_ampersand_ignores_fd_duplication() {
     assert!(!contains_unquoted_background_ampersand("echo 'a & b'"));
     assert!(!contains_unquoted_background_ampersand(r#"echo "a & b""#));
     assert!(!contains_unquoted_background_ampersand(r"echo a\&b"));
+    assert!(contains_unquoted_background_ampersand(
+        r#"echo "$(malicious &)""#
+    ));
+    assert!(contains_unquoted_background_ampersand(
+        r#"echo "`malicious &`""#
+    ));
 }
 
 #[test]
@@ -110,6 +116,20 @@ fn quoted_heredoc_body_is_blanked_and_shape_preserved() {
     assert_eq!(out, "cat > out/meal_plan.md << 'EOF'\n\n\n\nEOF");
     assert_eq!(out.lines().count(), MEAL_PLAN.lines().count());
     assert!(out.contains('>'));
+}
+
+#[test]
+fn heredocs_are_consumed_in_input_order_and_delimiters_are_complete_words() {
+    let mixed = "cat <<EOF <<'END'\n$(danger)\nEOF\nsafe\nEND\necho live";
+    assert_eq!(
+        strip_quoted_heredoc_bodies(mixed),
+        "cat <<EOF <<'END'\n$(danger)\nEOF\n\nEND\necho live"
+    );
+    let concatenated = "cat <<'EOF'x\nbody\nEOFx\necho live";
+    assert_eq!(
+        strip_quoted_heredoc_bodies(concatenated),
+        "cat <<'EOF'x\n\nEOFx\necho live"
+    );
 }
 
 #[test]
@@ -230,6 +250,7 @@ fn leading_env_assignment_shape() {
 #[test]
 fn skipping_env_assignments() {
     assert_eq!(skip_env_assignments("A=1 B=2 git log"), "git log");
+    assert_eq!(skip_env_assignments("  A=1 B=2 git log"), "git log");
     assert_eq!(skip_env_assignments("git log"), "git log");
     assert_eq!(skip_env_assignments("A=1"), "");
     assert_eq!(skip_env_assignments(""), "");
