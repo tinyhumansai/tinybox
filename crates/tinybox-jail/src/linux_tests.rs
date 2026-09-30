@@ -3,6 +3,24 @@
 use super::*;
 use std::path::Path;
 
+#[cfg(feature = "landlock")]
+#[test]
+fn apply_ruleset_handles_success_failure_and_missing_ruleset() {
+    assert!(apply_ruleset(Some(()), |_| Ok(())).is_ok());
+    assert_eq!(
+        apply_ruleset(Some(()), |_| Err(std::io::Error::other("failed")))
+            .err()
+            .map(|error| error.kind()),
+        Some(std::io::ErrorKind::Other)
+    );
+    assert_eq!(
+        apply_ruleset::<()>(None, |_| Ok(()))
+            .err()
+            .map(|error| error.raw_os_error()),
+        Some(Some(22))
+    );
+}
+
 #[test]
 fn backend_reports_name_and_availability() {
     let backend = LandlockBackend::new();

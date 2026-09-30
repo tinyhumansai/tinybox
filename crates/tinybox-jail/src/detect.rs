@@ -28,10 +28,14 @@ impl JailBackend for UnsupportedBackend {
 /// Picks the strongest available backend, returning an unsupported backend
 /// when no OS sandbox works.
 pub fn pick_backend() -> Arc<dyn JailBackend> {
+    pick_backend_with(is_available)
+}
+
+fn pick_backend_with(mut is_available: impl FnMut(&str) -> bool) -> Arc<dyn JailBackend> {
     #[cfg(target_os = "linux")]
     {
         let lb = super::linux::LandlockBackend::new();
-        if lb.is_available() {
+        if is_available(lb.name()) {
             log::info!("[cwd_jail] backend=landlock");
             return Arc::new(lb);
         }
@@ -39,7 +43,7 @@ pub fn pick_backend() -> Arc<dyn JailBackend> {
     #[cfg(target_os = "macos")]
     {
         let sb = super::macos::SeatbeltBackend::new();
-        if sb.is_available() {
+        if is_available(sb.name()) {
             log::info!("[cwd_jail] backend=seatbelt");
             return Arc::new(sb);
         }
@@ -47,13 +51,29 @@ pub fn pick_backend() -> Arc<dyn JailBackend> {
     #[cfg(target_os = "windows")]
     {
         let ac = super::windows::AppContainerBackend::new();
-        if ac.is_available() {
+        if is_available(ac.name()) {
             log::info!("[cwd_jail] backend=appcontainer");
             return Arc::new(ac);
         }
     }
     log::warn!("[cwd_jail] no OS sandbox available");
     Arc::new(UnsupportedBackend)
+}
+
+fn is_available(name: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    if name == "landlock" {
+        return super::linux::LandlockBackend::new().is_available();
+    }
+    #[cfg(target_os = "macos")]
+    if name == "seatbelt" {
+        return super::macos::SeatbeltBackend::new().is_available();
+    }
+    #[cfg(target_os = "windows")]
+    if name == "appcontainer" {
+        return super::windows::AppContainerBackend::new().is_available();
+    }
+    false
 }
 
 #[cfg(test)]
