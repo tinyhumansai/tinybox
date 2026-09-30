@@ -7,6 +7,7 @@
 //! Every function is pure and none of them expands or evaluates anything.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuoteState {
@@ -207,20 +208,34 @@ pub fn contains_unquoted_background_ampersand(command: &str) -> bool {
                     let mut nested = String::new();
                     let mut depth = 1usize;
                     let mut nested_quote = QuoteState::None;
+                    let mut nested_escaped = false;
                     for inner in chars.by_ref() {
+                        if nested_escaped {
+                            nested_escaped = false;
+                            nested.push(inner);
+                            continue;
+                        }
                         match nested_quote {
                             QuoteState::Single if inner == '\'' => nested_quote = QuoteState::None,
-                            QuoteState::Double if inner == '"' => nested_quote = QuoteState::None,
-                            QuoteState::None if inner == '\'' => nested_quote = QuoteState::Single,
-                            QuoteState::None if inner == '"' => nested_quote = QuoteState::Double,
-                            QuoteState::None if inner == '(' => depth += 1,
-                            QuoteState::None if inner == ')' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
+                            QuoteState::Double => match inner {
+                                '\\' => nested_escaped = true,
+                                '"' => nested_quote = QuoteState::None,
+                                _ => {}
+                            },
+                            QuoteState::None => match inner {
+                                '\\' => nested_escaped = true,
+                                '\'' => nested_quote = QuoteState::Single,
+                                '"' => nested_quote = QuoteState::Double,
+                                '(' => depth += 1,
+                                ')' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
                                 }
-                            }
-                            _ => {}
+                                _ => {}
+                            },
+                            QuoteState::Single => {}
                         }
                         nested.push(inner);
                     }
@@ -357,14 +372,51 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
         return Cow::Borrowed(command);
     }
 
-    let mut delimiters: Vec<(String, bool)> = Vec::new();
+    let mut out = String::with_capacity(command.len());
+    let mut active_delimiters = VecDeque::new();
+    let mut changed = false;
+
+    for line in command.split_inclusive('\n') {
+        if let Some((delim, quoted)) = active_delimiters.front() {
+            if line.trim() == delim {
+                out.push_str(line);
+                active_delimiters.pop_front();
+            } else if quoted {
+                // Blank only bodies the shell does not expand.
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
+                changed = true;
+            } else {
+                out.push_str(line);
+            }
+            continue;
+        }
+
+        out.push_str(line);
+        let declarations = heredoc_declarations(line);
+        if declarations.iter().any(|(_, quoted)| *quoted) {
+            changed = true;
+        }
+        active_delimiters.extend(declarations);
+    }
+
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(command)
+    }
+}
+
+/// Finds heredocs declared on one executable shell line. Callers must skip
+/// heredoc body lines before invoking this function, since their text is data.
+fn heredoc_declarations(line: &str) -> VecDeque<(String, bool)> {
+    let mut declarations = VecDeque::new();
     let mut quote = QuoteState::None;
     let mut escaped = false;
-    let mut chars = command.char_indices().peekable();
-    // Byte offsets of the `<<` operators whose delimiter is quoted, in order.
-    let mut operators: Vec<usize> = Vec::new();
+    let mut chars = line.char_indices().peekable();
 
-    while let Some((idx, ch)) = chars.next() {
+    while let Some((index, ch)) = chars.next() {
         match quote {
             QuoteState::Single => {
                 if ch == '\'' {
@@ -374,12 +426,10 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
             QuoteState::Double => {
                 if escaped {
                     escaped = false;
-                    continue;
-                }
-                match ch {
-                    '\\' => escaped = true,
-                    '"' => quote = QuoteState::None,
-                    _ => {}
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    quote = QuoteState::None;
                 }
             }
             QuoteState::None => {
@@ -391,17 +441,15 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
                     '\\' => escaped = true,
                     '\'' => quote = QuoteState::Single,
                     '"' => quote = QuoteState::Double,
-                    '<' if chars.next_if(|(_, c)| *c == '<').is_some() => {
-                        // `<<<` is a here-string, not a heredoc: no body follows.
-                        if chars.next_if(|(_, c)| *c == '<').is_some() {
+                    '<' if chars.next_if(|(_, next)| *next == '<').is_some() => {
+                        // `<<<` is a here-string, not a heredoc.
+                        if chars.next_if(|(_, next)| *next == '<').is_some() {
                             continue;
                         }
-                        let rest = &command[idx + 2..];
-                        if let Some((delim, quoted, consumed)) = heredoc_delimiter(rest) {
-                            delimiters.push((delim, quoted));
-                            operators.push(idx);
-                            // Skip past the delimiter word so its quotes do not
-                            // re-enter the outer quote state machine.
+                        if let Some((delimiter, quoted, consumed)) =
+                            heredoc_delimiter(&line[index + 2..])
+                        {
+                            declarations.push_back((delimiter, quoted));
                             for _ in 0..consumed {
                                 chars.next();
                             }
@@ -413,52 +461,7 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
         }
     }
 
-    if operators.is_empty() {
-        return Cow::Borrowed(command);
-    }
-    if delimiters.iter().all(|(_, quoted)| !quoted) {
-        return Cow::Borrowed(command);
-    }
-
-    // Walk the lines. Once the line carrying the Nth operator ends, every
-    // following line is body until its terminator line appears.
-    let mut out = String::with_capacity(command.len());
-    let mut next_delim = 0usize;
-    let mut open: Option<(String, bool)> = None;
-    let mut consumed_bytes = 0usize;
-
-    for line in command.split_inclusive('\n') {
-        let line_start = consumed_bytes;
-        consumed_bytes += line.len();
-
-        if let Some((delim, quoted)) = open.clone() {
-            if line.trim() == delim {
-                open = None;
-                out.push_str(line);
-                if next_delim < delimiters.len() {
-                    open = Some(delimiters[next_delim].clone());
-                    next_delim += 1;
-                }
-            } else if quoted {
-                // Blank only bodies the shell does not expand.
-                if line.ends_with('\n') {
-                    out.push('\n');
-                }
-            } else {
-                out.push_str(line);
-            }
-            continue;
-        }
-
-        out.push_str(line);
-        let line_end = line_start + line.len();
-        if next_delim < operators.len() && operators[next_delim] < line_end {
-            open = Some(delimiters[next_delim].clone());
-            next_delim += 1;
-        }
-    }
-
-    Cow::Owned(out)
+    declarations
 }
 
 /// Parse one complete shell delimiter word after `<<`, preserving whether any
@@ -505,7 +508,7 @@ fn heredoc_delimiter(rest: &str) -> Option<(String, bool, usize)> {
         } else if c == '\'' || c == '"' {
             quote = Some(c);
             quoted = true;
-        } else if c.is_whitespace() {
+        } else if c.is_whitespace() || ";&|<>()".contains(c) {
             consumed -= 1;
             break;
         } else {
