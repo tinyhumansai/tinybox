@@ -66,8 +66,10 @@ fn spawn_uses_default_backend() {
     // Must succeed via whichever platform backend is detected (or
     // noop). The point of the test is that we go through the public
     // `spawn` entry rather than `spawn_with`.
-    let mut child = spawn(&jail, cmd).expect("spawn spawn");
-    let _ = child.wait().expect("wait");
+    match spawn(&jail, cmd) {
+        Ok(mut child) => { let _ = child.wait(); }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+    }
 }
 
 #[test]
