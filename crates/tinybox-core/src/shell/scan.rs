@@ -439,15 +439,13 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
                     open = Some(delimiters[next_delim].clone());
                     next_delim += 1;
                 }
-            } else {
-                if quoted {
-                    // Blank only bodies the shell does not expand.
-                    if line.ends_with('\n') {
-                        out.push('\n');
-                    }
-                } else {
-                    out.push_str(line);
+            } else if quoted {
+                // Blank only bodies the shell does not expand.
+                if line.ends_with('\n') {
+                    out.push('\n');
                 }
+            } else {
+                out.push_str(line);
             }
             continue;
         }
