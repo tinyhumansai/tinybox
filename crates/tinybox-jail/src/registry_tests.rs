@@ -55,6 +55,19 @@ fn delete_removes_dir_and_record() {
 }
 
 #[test]
+fn delete_persists_removal_after_jail_directory_is_already_missing() {
+    let base = tempdir("delete-missing-directory");
+    let reg = JailRegistry::open(&base).unwrap();
+    let record = reg.create("missing directory").unwrap();
+    fs::remove_dir_all(&record.dir).unwrap();
+
+    reg.delete(&record.id).unwrap();
+
+    assert!(reg.get(&record.id).is_none());
+    assert!(JailRegistry::open(&base).unwrap().list().is_empty());
+}
+
+#[test]
 fn delete_missing_errors() {
     let base = tempdir("missing");
     let reg = JailRegistry::open(&base).unwrap();
@@ -399,6 +412,21 @@ fn delete_persists_when_the_jail_directory_is_already_missing() {
     reg.delete(&created.id).unwrap();
 
     assert!(reg.get(&created.id).is_none());
+}
+
+#[test]
+fn failed_index_write_after_delete_keeps_in_memory_removal() {
+    let base = tempdir("delete-rollback");
+    let reg = JailRegistry::open(base.path()).unwrap();
+    let record = reg.create("deleted").unwrap();
+    let blocked_tmp = base.path().join("index.json.tmp");
+    fs::create_dir(&blocked_tmp).unwrap();
+
+    let error = reg.delete(&record.id).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+    assert!(!record.dir.exists());
+    assert!(reg.get(&record.id).is_none());
 }
 
 #[test]
