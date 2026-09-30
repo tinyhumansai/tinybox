@@ -381,7 +381,7 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
             if line.trim() == delim {
                 out.push_str(line);
                 active_delimiters.pop_front();
-            } else if quoted {
+            } else if *quoted {
                 // Blank only bodies the shell does not expand.
                 if line.ends_with('\n') {
                     out.push('\n');
