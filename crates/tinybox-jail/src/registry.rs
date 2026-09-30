@@ -7,7 +7,7 @@
 //! - A stable **id** (UUID-ish, used in paths and the index).
 //! - A user-visible **label** (free text, displayed in UI, used for
 //!   AppContainer profile derivation on Windows).
-//! - A **directory** at `<base>/<id>/` that the [`crate::sandbox::cwd_jail::Jail`]
+//! - A **directory** at `<base>/<id>/` that the [`crate::Jail`]
 //!   is rooted in.
 //! - **Metadata**: created/updated timestamps, backend used at create
 //!   time, optional notes.
@@ -335,7 +335,7 @@ impl JailRegistry {
         default_backend().spawn(&jail, cmd)
     }
 
-    /// Same as [`spawn_in`] but with a caller-supplied backend.
+    /// Same as [`Self::spawn_in`] but with a caller-supplied backend.
     pub fn spawn_in_with(
         &self,
         id: &str,

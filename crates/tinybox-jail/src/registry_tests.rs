@@ -190,7 +190,10 @@ fn spawn_in_uses_default_backend() {
     } else {
         Command::new("true")
     };
-    let mut child = reg.spawn_in(&a.id, cmd).unwrap();
+    let mut cmd = cmd;
+    let mut jail = reg.get(&a.id).unwrap();
+    jail.add_read_only("/usr").add_read_only("/bin").add_read_only("/lib").add_read_only("/lib64");
+    let mut child = reg.spawn_in_with(&a.id, default_backend().as_ref(), cmd)?;
     let _ = child.wait().unwrap();
     fs::remove_dir_all(&base).ok();
 }

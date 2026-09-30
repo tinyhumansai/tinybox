@@ -59,41 +59,6 @@ pub fn split_unquoted_segments(command: &str) -> Vec<String> {
                     current.push(ch);
                     continue;
                 }
-                if ch == '$' && chars.peek() == Some(&'(') {
-                    chars.next();
-                    let mut nested = String::new();
-                    let mut depth = 1usize;
-                    let mut nested_quote = QuoteState::None;
-                    let mut nested_escape = false;
-                    for inner in chars.by_ref() {
-                        match nested_quote {
-                            QuoteState::Single if inner == '\'' => nested_quote = QuoteState::None,
-                            QuoteState::Double if inner == '"' => nested_quote = QuoteState::None,
-                            QuoteState::None if inner == '\'' => nested_quote = QuoteState::Single,
-                            QuoteState::None if inner == '"' => nested_quote = QuoteState::Double,
-                            QuoteState::None if inner == '(' => depth += 1,
-                            QuoteState::None if inner == ')' => {
-                                depth -= 1;
-                                if depth == 0 { break; }
-                            }
-                            _ => {}
-                        }
-                        nested.push(inner);
-                    }
-                    if contains_unquoted_background_ampersand(&nested) { return true; }
-                    continue;
-                }
-                if ch == '`' {
-                    let mut nested = String::new();
-                    let mut escaped_tick = false;
-                    for inner in chars.by_ref() {
-                        if inner == '`' && !escaped_tick { break; }
-                        escaped_tick = inner == '\\' && !escaped_tick;
-                        nested.push(inner);
-                    }
-                    if contains_unquoted_background_ampersand(&nested) { return true; }
-                    continue;
-                }
                 if ch == '"' {
                     quote = QuoteState::None;
                 }
@@ -235,6 +200,40 @@ pub fn contains_unquoted_background_ampersand(command: &str) -> bool {
                 if ch == '\\' {
                     escaped = true;
                     prev = ch;
+                    continue;
+                }
+                if ch == '$' && chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut nested = String::new();
+                    let mut depth = 1usize;
+                    let mut nested_quote = QuoteState::None;
+                    for inner in chars.by_ref() {
+                        match nested_quote {
+                            QuoteState::Single if inner == '\'' => nested_quote = QuoteState::None,
+                            QuoteState::Double if inner == '"' => nested_quote = QuoteState::None,
+                            QuoteState::None if inner == '\'' => nested_quote = QuoteState::Single,
+                            QuoteState::None if inner == '"' => nested_quote = QuoteState::Double,
+                            QuoteState::None if inner == '(' => depth += 1,
+                            QuoteState::None if inner == ')' => {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
+                            _ => {}
+                        }
+                        nested.push(inner);
+                    }
+                    if contains_unquoted_background_ampersand(&nested) { return true; }
+                    continue;
+                }
+                if ch == '`' {
+                    let mut nested = String::new();
+                    let mut escaped_tick = false;
+                    for inner in chars.by_ref() {
+                        if inner == '`' && !escaped_tick { break; }
+                        escaped_tick = inner == '\\' && !escaped_tick;
+                        nested.push(inner);
+                    }
+                    if contains_unquoted_background_ampersand(&nested) { return true; }
                     continue;
                 }
                 if ch == '"' {
