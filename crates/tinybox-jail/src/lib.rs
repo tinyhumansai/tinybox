@@ -1,4 +1,4 @@
-//! Directory jail (`cwd_jail)`: jail an agent/tool into a single workspace.
+//! Directory jail (cwd_jail): jail an agent/tool into a single workspace.
 //!
 //! ## Why this exists
 //!
@@ -50,8 +50,12 @@ pub mod jail;
 pub mod noop;
 pub mod registry;
 
-// Platform backends are intentionally not compiled until they can preserve
-// the workspace unsafe-code policy and enforce the public jail contract.
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 pub use jail::{Jail, JailBackend};
 pub use noop::{NOOP_BACKEND_NAME, NoopBackend};
@@ -74,11 +78,6 @@ pub fn default_backend() -> Arc<dyn JailBackend> {
 /// `..` or symlinks. If the root does not exist, the spawn fails with
 /// `NotFound` (canonicalize bubbles it up) — callers should create the
 /// workspace before encapsulating.
-///
-/// # Errors
-///
-/// Returns an error if the jail root cannot be canonicalized or the backend
-/// rejects the command.
 pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
     let mut jail = jail.clone();
     jail.canonicalize()?;
@@ -88,11 +87,6 @@ pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
 /// Same as [`spawn`] but with a caller-supplied backend. Useful in
 /// tests and for callers that want to opt into a weaker backend
 /// explicitly (e.g. forcing [`NoopBackend`] during local dev).
-///
-/// # Errors
-///
-/// Returns an error if the jail root cannot be canonicalized or the backend
-/// rejects the command.
 pub fn spawn_with(backend: &dyn JailBackend, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
     let mut jail = jail.clone();
     jail.canonicalize()?;

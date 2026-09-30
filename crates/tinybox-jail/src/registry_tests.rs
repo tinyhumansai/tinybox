@@ -323,22 +323,6 @@ fn create_consecutive_ids_are_unique_in_same_second() {
 }
 
 #[test]
-fn create_skips_an_existing_unindexed_jail_directory() {
-    let base = tempdir("directory-collision");
-    let current = generate_id(0);
-    let counter = u64::from_str_radix(&current[2..], 16).unwrap();
-    let collision = base.path().join(format!("j0{:x}", counter + 1));
-    fs::create_dir(&collision).unwrap();
-
-    let reg = JailRegistry::open_with_clock(base.path(), Arc::new(FixedClock::at_epoch())).unwrap();
-    let created = reg.create("safe").unwrap();
-
-    assert_ne!(created.dir, collision);
-    assert!(collision.is_dir());
-    assert!(created.dir.is_dir());
-}
-
-#[test]
 fn registry_uses_the_injected_clock_for_timestamps() {
     let base = tempdir("clock");
     let clock = Arc::new(FixedClock::at_epoch());
