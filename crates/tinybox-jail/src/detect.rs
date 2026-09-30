@@ -27,6 +27,7 @@ impl JailBackend for UnsupportedBackend {
 
 /// Picks the strongest available backend, returning an unsupported backend
 /// when no OS sandbox works.
+#[must_use]
 pub fn pick_backend() -> Arc<dyn JailBackend> {
     pick_backend_with(is_available)
 }
