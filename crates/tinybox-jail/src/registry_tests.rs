@@ -164,7 +164,6 @@ fn spawn_in_with_missing_id_errors() {
 }
 
 #[test]
-#[cfg(not(feature = "landlock"))]
 fn spawn_in_uses_default_backend() {
     let base = tempdir("spawn-default");
     let reg = JailRegistry::open(&base).unwrap();
