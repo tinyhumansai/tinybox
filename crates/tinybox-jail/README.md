@@ -1,9 +1,11 @@
 # cwd_jail
 
-Cross-platform directory-jail facade. Given a declarative description of a
-workspace (`Jail`), it picks the strongest available OS sandbox backend and
-spawns a child process caged into a single read/write root (plus optional
-read-only paths), with toggles for outbound network and subprocess creation.
+Directory-jail facade. Given a declarative description of a workspace
+(`Jail`), it spawns a child through an available sandbox backend. Platform
+backends are currently disabled until they can satisfy the workspace safety
+policy and enforce the declared jail contract. The default backend therefore
+returns `Unsupported`; callers can explicitly select `NoopBackend` when
+unrestricted execution is intended.
 It is a per-process complement to the box-level isolation in `tinybox-linux`:
 the autonomy gate decides whether a command may run, and `cwd_jail` decides
 what filesystem the approved child process sees. It jails the child it
@@ -13,8 +15,8 @@ spawns, never the core process itself.
 
 - Describe a jail declaratively via a builder (`Jail::new(root, label)` plus
   `.add_read_only(...)`, `.deny_net()`, `.deny_subprocess()`).
-- Auto-detect and cache the strongest backend for the current OS (Landlock,
-  Seatbelt, or AppContainer).
+- Cache the default backend; currently this is an unsupported backend on every
+  platform while OS implementations are being brought into compliance.
 - Spawn a `std::process::Command` inside the jail, canonicalizing `root`
   (and read-only paths) first so backends never see `..` or symlink
   trickery.
@@ -30,11 +32,11 @@ spawns, never the core process itself.
 | --- | --- |
 | `crates/tinybox-jail/src/lib.rs` | Module docstring plus the thin facade: `spawn` / `spawn_with` / `default_backend` (cached via `OnceLock`). Re-exports the public surface. |
 | `crates/tinybox-jail/src/jail.rs` | Core types: the `Jail` description struct (builder plus `canonicalize`/`canonicalize_or_log`) and the `JailBackend` trait (`name`/`is_available`/`spawn`). |
-| `crates/tinybox-jail/src/detect.rs` | `pick_backend()`: cfg-gated platform selection; returns the first available backend or `NoopBackend`. |
+| `crates/tinybox-jail/src/detect.rs` | `pick_backend()`: returns an unsupported backend until a compliant platform backend is available. |
 | `crates/tinybox-jail/src/noop.rs` | `NoopBackend`: no enforcement, plain `Command::spawn`. Always available. |
-| `crates/tinybox-jail/src/linux.rs` | `LandlockBackend`: kernel 5.13+ Landlock LSM applied in `pre_exec` (child-side, after fork, before exec). Gated on the `landlock` cargo feature. |
-| `crates/tinybox-jail/src/macos.rs` | `SeatbeltBackend`: wraps the command in `/usr/bin/sandbox-exec -p '<profile>'`. Renders an allow-default-reads / deny-default-writes Seatbelt profile. |
-| `crates/tinybox-jail/src/windows.rs` | `AppContainerBackend`: `CreateAppContainerProfile` plus a DACL grant and `STARTUPINFOEX`/`CreateProcessW` via `windows-sys`. |
+| `crates/tinybox-jail/src/linux.rs` | Proposed Landlock implementation; currently not compiled or selected. |
+| `crates/tinybox-jail/src/macos.rs` | Proposed Seatbelt implementation; currently not compiled or selected. |
+| `crates/tinybox-jail/src/windows.rs` | Proposed AppContainer implementation; currently not compiled or selected. |
 | `crates/tinybox-jail/src/registry.rs` | `JailRegistry` and `JailRecord`: multi-jail manager persisted to `index.json`, with atomic-rename writes and containment checks. |
 | `crates/tinybox-jail/src/{lib,jail,noop,macos,windows,registry}_tests.rs` | Sibling test suites, each `#[path]`-included from its source file. |
 
