@@ -1,11 +1,12 @@
 # cwd_jail
 
 Directory-jail facade. Given a declarative description of a workspace
-(`Jail`), it spawns a child through an available sandbox backend. Platform
-backends are currently disabled until they can satisfy the workspace safety
-policy and enforce the declared jail contract. The default backend therefore
-returns `Unsupported`; callers can explicitly select `NoopBackend` when
-unrestricted execution is intended.
+(`Jail`), it spawns a child through an available sandbox backend. Linux
+(Landlock) and macOS (Seatbelt) backends are compiled and selected by
+`pick_backend()`. The Windows AppContainer backend is still not compiled (see
+below). When no backend is usable the default backend is `unsupported`
+(`is_available() == false`, `spawn` fails with `Unsupported`); callers can
+explicitly select `NoopBackend` when unrestricted execution is intended.
 It is a per-process complement to the box-level isolation in `tinybox-linux`:
 the autonomy gate decides whether a command may run, and `cwd_jail` decides
 what filesystem the approved child process sees. It jails the child it
@@ -19,8 +20,8 @@ spawns, never the core process itself.
   root the same access as the root (Landlock rule, Seatbelt `file-write*`
   subpath, `AppContainer` ACL), for host-owned scratch such as a per-call
   output-capture directory that must not land inside the root.
-- Cache the default backend; currently this is an unsupported backend on every
-  platform while OS implementations are being brought into compliance.
+- Cache the default backend: Landlock on Linux kernels that support it,
+  Seatbelt on macOS, otherwise the `unsupported` backend.
 - Spawn a `std::process::Command` inside the jail, canonicalizing `root`
   (and the read-only and read/write paths) first so backends never see `..` or symlink
   trickery.
@@ -36,11 +37,11 @@ spawns, never the core process itself.
 | --- | --- |
 | `crates/tinybox-jail/src/lib.rs` | Module docstring plus the thin facade: `spawn` / `spawn_with` / `default_backend` (cached via `OnceLock`). Re-exports the public surface. |
 | `crates/tinybox-jail/src/jail.rs` | Core types: the `Jail` description struct (builder plus `canonicalize`/`canonicalize_or_log`) and the `JailBackend` trait (`name`/`is_available`/`spawn`). |
-| `crates/tinybox-jail/src/detect.rs` | `pick_backend()`: returns an unsupported backend until a compliant platform backend is available. |
+| `crates/tinybox-jail/src/detect.rs` | `pick_backend()`: first available OS backend, else an unsupported backend that fails closed. |
 | `crates/tinybox-jail/src/noop.rs` | `NoopBackend`: no enforcement, plain `Command::spawn`. Always available. |
-| `crates/tinybox-jail/src/linux.rs` | Proposed Landlock implementation; currently not compiled or selected. |
-| `crates/tinybox-jail/src/macos.rs` | Proposed Seatbelt implementation; currently not compiled or selected. |
-| `crates/tinybox-jail/src/windows.rs` | Proposed AppContainer implementation; currently not compiled or selected. |
+| `crates/tinybox-jail/src/linux.rs` | Landlock backend (Linux only, `landlock` feature, on by default). Applies the ruleset to a dedicated spawn thread so no `unsafe` `pre_exec` is needed. |
+| `crates/tinybox-jail/src/macos.rs` | Seatbelt backend via `sandbox-exec`. Compiled on every host so the profile renderer is unit-tested everywhere; selected only on macOS. |
+| `crates/tinybox-jail/src/windows.rs` | AppContainer implementation; **not compiled**: it needs `unsafe` FFI the workspace forbids and cannot return a waitable `std::process::Child` yet. |
 | `crates/tinybox-jail/src/registry.rs` | `JailRegistry` and `JailRecord`: multi-jail manager persisted to `index.json`, with atomic-rename writes and containment checks. |
 | `crates/tinybox-jail/src/{lib,jail,noop,macos,windows,registry}_tests.rs` | Sibling test suites, each `#[path]`-included from its source file. |
 
@@ -130,9 +131,18 @@ not import that module.
   it does not grant `/dev` generally. Callers must canonicalize the root
   first (the `spawn` facade does this automatically) or writes inside it may
   be denied (for example `/tmp` resolving to `/private/tmp`).
-- Linux Landlock runs in `pre_exec` (child-side, after fork), so the parent
-  keeps its privileges; read-only paths also get `Execute` so the child can
-  run binaries found there (for example `/usr/bin/sh`).
+- Linux Landlock is applied to a short-lived dedicated thread that then
+  spawns the command; the child inherits the thread's domain and
+  `no_new_privs`, the caller's thread keeps its privileges. Read-only paths
+  also get `Execute` so the child can run binaries found there.
+- Linux baseline grants (see `SYSTEM_READ_PATHS`, `DEVICE_PATHS` in
+  `linux.rs`): `/usr /bin /sbin /lib* /etc` read+execute and a few harmless
+  `/dev` nodes read+write. Everything else is denied unless the `Jail` grants
+  it: the rest of `$HOME`, `/proc`, `/sys` and `/tmp` included. Grant scratch
+  space and toolchain caches with `add_read_write` / `add_read_only`.
+- On a kernel without Landlock (or a build without the `landlock` feature)
+  the backend reports unavailable and `spawn` returns `Unsupported`; it never
+  runs the command unconfined.
 - Registry containment guard: both `delete` and `jail_for` (used by
   `spawn_in`/`spawn_in_with`) refuse to operate on a record whose
   canonicalized `dir` is not under the canonicalized `base`, defending

@@ -13,8 +13,10 @@ categories.workspace = true
 publish = false
 
 [features]
-# Enables the Linux Landlock backend. Without it `LandlockBackend` reports
-# itself unavailable and default spawning returns an unsupported error.
+# On by default so a plain dependency is actually confined on Linux. Without
+# the feature `LandlockBackend` reports itself unavailable and `spawn` returns
+# `Unsupported` (it never runs the command unconfined).
+default = ["landlock"]
 landlock = ["dep:landlock"]
 
 [dependencies]

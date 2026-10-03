@@ -51,13 +51,12 @@ fn default_backend_is_cached() {
 #[test]
 fn spawn_uses_default_backend() {
     let dir = std::env::temp_dir();
-    let mut jail = Jail::new(&dir, "default-spawn");
-    #[cfg(target_os = "linux")]
-    for path in ["/usr", "/bin", "/lib", "/lib64"] {
-        if std::path::Path::new(path).exists() {
-            jail = jail.add_read_only(path);
-        }
-    }
+    // Landlock denies everything it is not told about; give it the system
+    // directories so `true` can run. Other backends ignore the extra grants.
+    let jail = ["/usr", "/bin", "/lib", "/lib64"]
+        .into_iter()
+        .filter(|path| std::path::Path::new(path).exists())
+        .fold(Jail::new(&dir, "default-spawn"), Jail::add_read_only);
     let cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", "exit"]);
