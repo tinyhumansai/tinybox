@@ -12,10 +12,13 @@
 //!
 //! | OS      | Backend       | Mechanism                                  |
 //! |---------|---------------|--------------------------------------------|
-//! | Linux   | landlock      | Kernel 5.13+ LSM, applied in `pre_exec`    |
+//! | Linux   | landlock      | Kernel 5.13+ LSM, applied on a spawn thread |
 //! | macOS   | seatbelt      | `sandbox-exec -p '<profile>' …`            |
-//! | Windows | appcontainer  | `CreateAppContainerProfile` + `STARTUPINFOEX` |
+//! | Windows | (not compiled)| `AppContainer`, pending a `Child` bridge   |
 //! | other   | unsupported   | Spawning is rejected                       |
+//!
+//! The Windows backend is not compiled yet (see `windows.rs`); on Windows the
+//! default backend is `unsupported` and a host must opt into `NoopBackend`.
 //!
 //! ## Quick start
 //!
@@ -50,10 +53,20 @@ pub mod jail;
 pub mod noop;
 pub mod registry;
 
-// Platform backends are intentionally not compiled until they can preserve
-// the workspace unsafe-code policy and enforce the public jail contract.
+// Platform backends. Linux (Landlock) is compiled on Linux only. The Seatbelt
+// module is plain `std` (it shells out to `sandbox-exec`), so it compiles
+// everywhere and its profile renderer is unit-tested on every host; it is only
+// *selected* on macOS. The Windows AppContainer module (`windows.rs`) is
+// deliberately not compiled: it needs `unsafe` FFI the workspace forbids and
+// cannot yet return a waitable `std::process::Child`.
+#[cfg(target_os = "linux")]
+pub mod linux;
+pub mod macos;
 
 pub use jail::{Jail, JailBackend};
+#[cfg(target_os = "linux")]
+pub use linux::LandlockBackend;
+pub use macos::SeatbeltBackend;
 pub use noop::{NOOP_BACKEND_NAME, NoopBackend};
 pub use registry::{JailRecord, JailRegistry};
 

@@ -1,3 +1,5 @@
+//! Tests for Seatbelt profiles and launcher command forwarding.
+
 use super::*;
 use std::fs;
 use std::process::Stdio;
@@ -222,4 +224,97 @@ fn profile_allows_writes_under_read_write_paths() {
 fn profile_without_read_write_paths_only_allows_root_and_tmp() {
     let p = render_profile(&Jail::new("/work/root", "x"));
     assert_eq!(p.matches("(subpath ").count(), 2);
+}
+
+#[test]
+fn launcher_preserves_arguments_environment_overrides_and_working_directory() {
+    let jail = Jail::new("/work", "forwarding");
+    let mut cmd = Command::new("/bin/tool");
+    cmd.arg("a b")
+        .arg("$(literal)")
+        .env("SET", "value")
+        .env_remove("REMOVE")
+        .current_dir("/work");
+    let wrapper = prepare_command(&jail, &cmd, std::ffi::OsStr::new("launcher"));
+    assert_eq!(wrapper.get_program(), "launcher");
+    let args: Vec<_> = wrapper.get_args().collect();
+    assert_eq!(
+        args,
+        vec![
+            "-p",
+            &render_profile(&jail),
+            "/bin/tool",
+            "a b",
+            "$(literal)"
+        ]
+    );
+    assert_eq!(
+        wrapper.get_current_dir(),
+        Some(std::path::Path::new("/work"))
+    );
+    let env: Vec<_> = wrapper.get_envs().collect();
+    assert!(env.contains(&(
+        std::ffi::OsStr::new("SET"),
+        Some(std::ffi::OsStr::new("value"))
+    )));
+    assert!(
+        env.iter()
+            .all(|(key, _)| *key != std::ffi::OsStr::new("REMOVE"))
+    );
+    let defaults = prepare_command(
+        &jail,
+        &Command::new("true"),
+        std::ffi::OsStr::new("launcher"),
+    );
+    assert!(defaults.get_current_dir().is_none());
+    assert_default_name::<SeatbeltBackend>("seatbelt");
+}
+
+#[test]
+fn missing_launcher_returns_an_error() {
+    let result = SeatbeltBackend::new().spawn(
+        &Jail::new("/work", "missing"),
+        Command::new("/nonexistent/tinybox-command"),
+    );
+    if !SeatbeltBackend::new().is_available() {
+        assert_eq!(
+            result.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+    }
+}
+
+/// Check the default-construction contract through the backend trait.
+fn assert_default_name<B: JailBackend + Default>(name: &str) {
+    assert_eq!(B::default().name(), name);
+}
+
+/// Exercise the real wrapper environment using a fake launcher on Unix hosts.
+#[cfg(unix)]
+#[test]
+fn launcher_does_not_restore_inherited_environment_after_env_clear() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir()?;
+    let launcher = root.path().join("launcher");
+    fs::write(&launcher, "#!/bin/sh\nshift 2\nexec \"$@\"\n")?;
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700))?;
+    let mut cmd = Command::new("/usr/bin/env");
+    cmd.env_clear().env("JAIL_EXPLICIT", "allowed");
+    let output = prepare_command(
+        &Jail::new(root.path(), "environment"),
+        &cmd,
+        launcher.as_os_str(),
+    )
+    .output()?;
+    assert!(output.status.success());
+    // Some shells add PWD while executing a script. No inherited parent keys
+    // should survive, and the explicitly supplied value must still be there.
+    let env = String::from_utf8_lossy(&output.stdout);
+    assert!(env.lines().any(|line| line == "JAIL_EXPLICIT=allowed"));
+    assert!(
+        env.lines()
+            .all(|line| line.starts_with("JAIL_EXPLICIT=") || line.starts_with("PWD="))
+    );
+    Ok(())
 }
