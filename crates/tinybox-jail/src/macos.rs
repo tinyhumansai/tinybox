@@ -46,7 +46,19 @@ impl JailBackend for SeatbeltBackend {
     }
 
     fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
-        prepare_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec")).spawn()
+        let mut wrapper =
+            prepare_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec"));
+        // The launcher is a fresh `Command`, so a process group the caller set
+        // on `cmd` does not carry over. Make the launcher a group leader here:
+        // a caller that times the child out signals that group, and without
+        // it only the launcher dies while the shell pipeline it started runs
+        // on. (Linux and the no-op backend spawn `cmd` itself, so the caller's
+        // setting applies there.)
+        {
+            use std::os::unix::process::CommandExt;
+            wrapper.process_group(0);
+        }
+        wrapper.spawn()
     }
 }
 
