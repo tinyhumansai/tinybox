@@ -318,3 +318,62 @@ fn launcher_does_not_restore_inherited_environment_after_env_clear() -> std::io:
     );
     Ok(())
 }
+
+/// The launcher must lead its own process group, or a caller that times the
+/// jailed command out can only kill `sandbox-exec` while the shell pipeline it
+/// launched keeps running. Spawn a shell with a background grandchild, signal
+/// the launcher's group, and the grandchild must be gone.
+#[test]
+fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
+    let backend = SeatbeltBackend::new();
+    if !backend.is_available() {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("oh-pg-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let mut jail = Jail::new(&root, "pg");
+    jail.canonicalize().unwrap();
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg("sleep 30 & echo $! > gc.pid; wait")
+        .current_dir(&root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = backend.spawn(&jail, cmd).expect("spawn");
+
+    let pidfile = root.join("gc.pid");
+    let grandchild = loop {
+        if let Ok(text) = fs::read_to_string(&pidfile) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // Signal the launcher's group, as a timeout would.
+    let killed = Command::new("kill")
+        .args(["-KILL", &format!("-{}", child.id())])
+        .status()
+        .expect("kill runs");
+    assert!(
+        killed.success(),
+        "the launcher must lead a group that can be signalled"
+    );
+    let _ = child.wait();
+
+    let mut gone = false;
+    for _ in 0..100 {
+        let alive = Command::new("kill")
+            .args(["-0", &grandchild.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    fs::remove_dir_all(&root).ok();
+    assert!(gone, "grandchild {grandchild} survived the group kill");
+}
