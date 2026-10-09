@@ -343,10 +343,10 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
 
     let pidfile = root.join("gc.pid");
     let grandchild = loop {
-        if let Ok(text) = fs::read_to_string(&pidfile) {
-            if let Ok(pid) = text.trim().parse::<u32>() {
-                break pid;
-            }
+        if let Ok(text) = fs::read_to_string(&pidfile)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
@@ -366,8 +366,7 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
         let alive = Command::new("kill")
             .args(["-0", &grandchild.to_string()])
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_ok_and(|s| s.success());
         if !alive {
             gone = true;
             break;
