@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 struct Resource {
     sandbox: Arc<dyn Sandbox>,
     id: BoxId,
+    execution_supported: bool,
     processes: BTreeMap<ResourceId, OwnedProcess>,
     local_sandbox: Option<Arc<tinybox_core::PassthroughSandbox>>,
     collector: Option<Arc<tinybox_host::LimitedLocalHost>>,
@@ -96,6 +97,16 @@ impl Resources {
             && !state.entries.contains_key(resource)
         {
             return Err(failure(tinybox_bus::UNKNOWN_RESOURCE, "unknown resource"));
+        }
+        if let ReserveRequest::Process(resource) = &request
+            && self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .closing
+                .contains(resource)
+        {
+            return Err(failure(tinybox_bus::EXEC_CANCELLED, "resource is closing"));
         }
         state.next = state.next.checked_add(1).ok_or_else(|| {
             failure(
@@ -246,6 +257,7 @@ impl Resources {
                         *slot = Some(Resource {
                             sandbox,
                             id: info.id,
+                            execution_supported: supports_execution(platform, &request.backend),
                             processes: BTreeMap::new(),
                             collector,
                             local_sandbox,
@@ -254,6 +266,7 @@ impl Resources {
                     return Err(backend_error(&error));
                 }
             };
+            let execution_supported = supports_execution(platform, &request.backend);
             let result = ResourceInfo {
                 resource: request.resource.clone(),
                 backend: request.backend,
@@ -262,6 +275,7 @@ impl Resources {
             *slot = Some(Resource {
                 sandbox,
                 id: info.id,
+                execution_supported,
                 processes: BTreeMap::new(),
                 collector,
                 local_sandbox,
@@ -316,6 +330,12 @@ impl Resources {
             .as_ref()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
         let resource = request.resource.clone();
+        if !entry.execution_supported {
+            return Err(failure(
+                tinybox_bus::UNSUPPORTED_OPERATION,
+                "module Exec is not supported for this backend on this platform",
+            ));
+        }
         if entry.collector.is_some()
             && entry.local_sandbox.is_none()
             && entry.sandbox.name() != tinybox_docker::NAME
@@ -414,6 +434,12 @@ impl Resources {
             return Err(failure(
                 tinybox_bus::EXEC_CANCELLED,
                 "process startup cancelled",
+            ));
+        }
+        if !entry.execution_supported {
+            return Err(failure(
+                tinybox_bus::UNSUPPORTED_OPERATION,
+                "module Spawn is not supported for this backend on this platform",
             ));
         }
         let resource = request.command.resource.clone();
@@ -574,9 +600,6 @@ impl Resources {
             state
                 .reservations
                 .retain(|_, (kind, _)| kind != &ReserveRequest::Process(resource.clone()));
-            slot
-        };
-        {
             let mut executions = self
                 .executions
                 .lock()
@@ -585,7 +608,8 @@ impl Resources {
             if let Some(native) = executions.native.get(resource) {
                 native.abort();
             }
-        }
+            slot
+        };
         let mut slot = slot.lock().await;
         let mut failure = None;
         if let Some(entry) = slot.as_mut() {
@@ -691,6 +715,11 @@ fn validate_platform_backend(platform: super::Platform, backend: &str) -> Result
             "sandbox backend is unavailable on this platform",
         ))
     }
+}
+
+fn supports_execution(platform: super::Platform, backend: &str) -> bool {
+    matches!(platform, super::Platform::Linux | super::Platform::Unix)
+        && matches!(backend, "passthrough" | "docker")
 }
 
 async fn stop_process(

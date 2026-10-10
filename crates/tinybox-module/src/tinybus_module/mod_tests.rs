@@ -217,6 +217,10 @@ async fn shell_analysis_preserves_quoted_heredoc_data() -> tinybus::Result<()> {
         .await?;
     assert!(unquoted.hidden_execution);
     assert!(!unquoted.redirection);
+    let heredoc_redirect = service
+        .analyze_shell("cat << EOF\nbody > is data\nEOF\n".into())
+        .await?;
+    assert!(!heredoc_redirect.redirection);
     Ok(())
 }
 

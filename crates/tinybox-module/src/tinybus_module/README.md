@@ -58,6 +58,10 @@ that is no longer retained. Command failures are reported once, separately from 
 reaped process/resource slots are released even when the command failed. Native
 cleanup errors retain the child and group for a public Cancel/Close/Shutdown retry.
 Callers must call terminal Shutdown before ABI unload or runtime shutdown.
+Shutdown is a lifecycle control for the trusted module host. TinyBus currently
+does not enforce per-peer method authorization, so the host must keep this
+interface on a bus shared only with trusted, admitted peers and authorize its
+lifecycle call.
 Shutdown freezes Reserve/Create/Spawn/Exec admission, cancels native execution,
 waits pending startup locks and queued process workers, stops every owned process
 group, drains supervisors, and destroys resources. A native startup already
@@ -72,7 +76,7 @@ transfer, forwarding, SSH and microVM configuration remain subsequent slices.
 Operations serialize within each resource; unrelated resources have independent
 locks. Spawn uses an owned local process group, never legacy pid-file detach helpers.
 Capabilities distinguishes Create backends from supervised execution backends.
-Exec/Spawn currently support Unix passthrough only; Docker/namespace execution
+Exec/Spawn currently support Unix passthrough and Docker; namespace execution
 and Windows job-object supervision require subsequent owning-provider slices.
 Unsupported operations fail explicitly without fallback. Legacy library APIs
 remain available. A detached process can be cancelled after Spawn returns. Close fences new
@@ -88,8 +92,10 @@ Spawn/Cancel cycles impose no lifetime admission limit and keep no history sets.
 Collected commands use LimitedLocalHost with a combined 1 MiB stdout/stderr
 budget enforced during reading; overflow fails rather than truncating output.
 
-AnalyzeShell removes quoted heredoc bodies before structural scanning. It
-returns segments and hidden-execution/redirection facts. Authorization,
+AnalyzeShell removes quoted heredoc bodies before segment analysis. Its
+redirection fact ignores all heredoc bodies, while hidden-execution analysis
+retains expansion-aware behavior for unquoted bodies. It returns segments and
+hidden-execution/redirection facts. Authorization,
 credential/path restrictions, and access-tier decisions remain host policy.
 Errors use the stable dotted names declared in `tinybox-bus`; backend failures
 retain the underlying diagnostic without exposing native handles.

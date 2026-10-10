@@ -440,7 +440,86 @@ async fn passthrough_create_on_an_unsupervised_platform_only_records_the_resourc
 
     assert_eq!(created.backend, "passthrough");
     assert_eq!(created.state, "ready");
+    let slot = resources.slot(&resource).await?;
+    slot.lock()
+        .await
+        .as_mut()
+        .ok_or_else(|| Error::failed("missing resource"))?
+        .collector = Some(Arc::new(tinybox_host::LimitedLocalHost::new(100)));
+    let command = ExecRequest {
+        resource: resource.clone(),
+        argv: vec!["true".into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        stdin: None,
+    };
+    let Err(error) = resources.exec(command.clone()).await else {
+        return Err(Error::failed(
+            "execution must follow the advertised platform capability",
+        ));
+    };
+    assert_eq!(error.wire_name(), tinybox_bus::UNSUPPORTED_OPERATION);
+    let Err(error) = resources
+        .spawn(SpawnRequest {
+            process: resources
+                .reserve(ReserveRequest::Process(resource.clone()))
+                .await?,
+            command,
+        })
+        .await
+    else {
+        return Err(Error::failed(
+            "spawn must follow the advertised platform capability",
+        ));
+    };
+    assert_eq!(error.wire_name(), tinybox_bus::UNSUPPORTED_OPERATION);
     resources.close(&resource).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn close_fences_process_reservations_before_waiting_for_resource_cleanup() -> Result<()> {
+    let resources = Arc::new(Resources::default());
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(".".into()),
+            env: BTreeMap::new(),
+        })
+        .await?;
+    let slot = resources.slot(&resource).await?;
+    let held_slot = slot.lock().await;
+    let closing_resources = resources.clone();
+    let closing_resource = resource.clone();
+    let closing = tokio::spawn(async move { closing_resources.close(&closing_resource).await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if resources
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .closing
+                .contains(&resource)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| Error::failed("close did not begin"))?;
+
+    let reservation = resources
+        .reserve(ReserveRequest::Process(resource.clone()))
+        .await;
+    drop(held_slot);
+    closing.await.map_err(Error::failed)??;
+    assert!(
+        reservation.is_err(),
+        "closing resources must reject new process reservations"
+    );
     Ok(())
 }
 
@@ -684,7 +763,9 @@ async fn native_cancel_and_close_terminate_descendants_and_reap_direct_children(
                 );
             }
         }
-        resources.close(&resource).await?;
+        if mode == "cancel" {
+            resources.close(&resource).await?;
+        }
     }
     Ok(())
 }

@@ -161,6 +161,7 @@ jobs:
         run: |
           set -euo pipefail
           perl -0pi -e 's/(\[workspace\.package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
+          perl -0pi -e 's~(^\s*tinybox-[A-Za-z0-9_-]+\s*=\s*\{[^\n]*\bversion\s*=\s*")[^"]+("[^\n]*\})~$1$ENV{NEXT_VERSION}$2~gm' Cargo.toml
           # Members inherit `version.workspace`, so refresh every member entry
           # in the lockfile rather than naming one package.
           cargo update --workspace

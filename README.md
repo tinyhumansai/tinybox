@@ -384,9 +384,13 @@ Arch Linux; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022 and
 
 ## Documentation
 
+- [Serialized module contract](crates/tinybox-module/src/tinybus_module/README.md)
+  — the TinyBus methods and lifecycle semantics
 - [`docs/specs/tinybox-runtime.md`](docs/specs/tinybox-runtime.md) — the runtime
   specification: the model, the capability contract, and the adopted
   optimizations
+- [`docs/specs/constraint-preflight.md`](docs/specs/constraint-preflight.md) —
+  hard preflight and current backend limitations
 - [`docs/adr/`](docs/adr/0001-record-architecture-decisions.md) — architecture
   decision records, including [why backends drive a CLI through the `Host`
   trait](docs/adr/0004-drive-backends-through-the-host-trait.md)
@@ -398,14 +402,3 @@ Arch Linux; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022 and
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
-
-### Serialized module contract
-
-Clients of the native module can depend on `crates/tinybox-bus` for serde-only
-requests and results without linking the sandbox runtime. The additive
-[lifecycle interface](crates/tinybox-module/src/tinybus_module/README.md)
-provides explicit local sandbox selection, command execution, detached process
-cancellation, inspection, cleanup, and policy-neutral shell structure analysis.
-
-Per-constraint hard preflight and current backend limitations are documented in
-[constraint preflight](docs/specs/constraint-preflight.md).

@@ -48,8 +48,16 @@ impl BoxService {
         finish_operation(tokio::spawn(async move { resources.shutdown().await })).await
     }
     /// Report which operations own native cleanup on this platform.
+    #[expect(
+        clippy::unused_async,
+        reason = "TinyBus exposes every interface method as an async operation"
+    )]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "TinyBus exposes every interface method as an async operation"
+    )]
     async fn capabilities(&self) -> TinyBusResult<tinybox_bus::ModuleCapabilities> {
-        std::future::ready(Ok(capabilities_for(Platform::current()))).await
+        Ok(capabilities_for(Platform::current()))
     }
     /// Mint a single-use startup reservation, without starting native work.
     async fn reserve(&self, request: tinybox_bus::ReserveRequest) -> TinyBusResult<ResourceId> {
@@ -103,15 +111,23 @@ impl BoxService {
     }
 
     /// Return shell structure facts without applying host security policy.
+    #[expect(
+        clippy::unused_async,
+        reason = "TinyBus exposes every interface method as an async operation"
+    )]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "TinyBus exposes every interface method as an async operation"
+    )]
     async fn analyze_shell(&self, command: String) -> TinyBusResult<ShellAnalysis> {
         use tinybox_core::shell::{classify, scan};
         let stripped = scan::strip_quoted_heredoc_bodies(&command);
-        std::future::ready(Ok(ShellAnalysis {
+        let structural = scan::strip_heredoc_bodies(&command);
+        Ok(ShellAnalysis {
             segments: scan::split_unquoted_segments(&stripped),
             hidden_execution: classify::has_hidden_execution(&command),
-            redirection: scan::contains_unquoted_char(&stripped, '>'),
-        }))
-        .await
+            redirection: scan::contains_unquoted_char(&structural, '>'),
+        })
     }
 
     /// Report what this build of tinybox can do.
@@ -119,8 +135,16 @@ impl BoxService {
     /// Returns the crate version followed by the sandboxes registered in this
     /// build, so a caller can tell whether the backend it needs is present
     /// before it tries to create a box.
+    #[expect(
+        clippy::unused_async,
+        reason = "TinyBus exposes every interface method as an async operation"
+    )]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "TinyBus exposes every interface method as an async operation"
+    )]
     async fn describe(&self) -> TinyBusResult<String> {
-        std::future::ready(Ok(describe(&registered_sandboxes()))).await
+        Ok(describe(&registered_sandboxes()))
     }
 }
 

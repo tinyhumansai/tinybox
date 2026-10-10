@@ -125,7 +125,13 @@ impl Host for LimitedLocalHost {
         let mut child = command
             .spawn()
             .map_err(|error| Error::io("spawn", &error))?;
-        let group = process::group(&child)?;
+        let group = match process::group(&child) {
+            Ok(group) => group,
+            Err(error) => {
+                let _ = child.kill().await;
+                return Err(error);
+            }
+        };
         let stdout = pipe(child.stdout.take(), "stdout")?;
         let stderr = pipe(child.stderr.take(), "stderr")?;
         let stdin = child.stdin.take();

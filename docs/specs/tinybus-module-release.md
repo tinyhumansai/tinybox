@@ -36,8 +36,9 @@ in-memory bus.
 
 `tinybox-bus` supplies the serialized vocabulary without TinyBus, Tokio, native
 backends, or optional implementation dependencies. The original Describe wire
-arity and result remain unchanged. Create, Exec, Inspect, Close, Spawn,
-IsRunning, Cancel, and AnalyzeShell are additive methods documented in the
+arity and result remain unchanged. Reserve, Capabilities, Shutdown, Create,
+Exec, Inspect, Close, Spawn, IsRunning, Cancel, and AnalyzeShell are additive
+methods documented in the
 [module interface](../../crates/tinybox-module/src/tinybus_module/README.md).
 Native providers and opaque resource ownership stay in the module. Backends
 are selected explicitly and unsupported requests never downgrade isolation.

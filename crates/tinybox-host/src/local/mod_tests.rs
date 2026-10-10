@@ -298,9 +298,13 @@ async fn dropping_the_owned_child_stops_the_local_workload() -> Result<()> {
     let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let probe = LocalHost::new()
-                .run(&ExecRequest::new(["kill", "-0", &pid]))
+                .run(&ExecRequest::new(["ps", "-o", "stat=", "-p", &pid]))
                 .await?;
-            if !probe.succeeded() {
+            let state = probe.stdout_lossy();
+            if state.trim().is_empty()
+                || state.trim_start().starts_with('Z')
+                || state.trim_start().starts_with('X')
+            {
                 return Ok::<(), Error>(());
             }
             tokio::task::yield_now().await;

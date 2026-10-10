@@ -413,6 +413,163 @@ pub fn strip_quoted_heredoc_bodies(command: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Blank out every heredoc body, regardless of whether its delimiter is
+/// quoted. Use this for structural facts such as redirects, where body text is
+/// data even when the shell expands it before passing it to the command.
+#[must_use]
+pub fn strip_heredoc_bodies(command: &str) -> Cow<'_, str> {
+    if !command.contains("<<") {
+        return Cow::Borrowed(command);
+    }
+
+    let mut output = String::with_capacity(command.len());
+    let mut pending = std::collections::VecDeque::<(String, bool)>::new();
+    let mut changed = false;
+    for line in command.split_inclusive('\n') {
+        if let Some((delimiter, strip_tabs)) = pending.front() {
+            let body = line.trim_end_matches(['\n', '\r']);
+            let terminator = if *strip_tabs {
+                body.trim_start_matches('\t')
+            } else {
+                body
+            };
+            if terminator == delimiter {
+                pending.pop_front();
+                output.push_str(line);
+            } else {
+                changed = true;
+                if line.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+            continue;
+        }
+
+        output.push_str(line);
+        pending.extend(heredoc_delimiters(line));
+    }
+    if changed {
+        Cow::Owned(output)
+    } else {
+        Cow::Borrowed(command)
+    }
+}
+
+fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
+    let mut delimiters = Vec::new();
+    let mut chars = line.char_indices().peekable();
+    let mut quote = QuoteState::None;
+    let mut escaped = false;
+    while let Some((index, character)) = chars.next() {
+        match quote {
+            QuoteState::Single => {
+                if character == '\'' {
+                    quote = QuoteState::None;
+                }
+            }
+            QuoteState::Double => {
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quote = QuoteState::None;
+                }
+            }
+            QuoteState::None => {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match character {
+                    '\\' => escaped = true,
+                    '\'' => quote = QuoteState::Single,
+                    '"' => quote = QuoteState::Double,
+                    '<' if chars.next_if(|(_, value)| *value == '<').is_some() => {
+                        if chars.next_if(|(_, value)| *value == '<').is_some() {
+                            continue;
+                        }
+                        if let Some((delimiter, strip_tabs)) = heredoc_delimiter(&line[index + 2..])
+                        {
+                            delimiters.push((delimiter, strip_tabs));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    delimiters
+}
+
+fn heredoc_delimiter(rest: &str) -> Option<(String, bool)> {
+    let mut chars = rest.chars().peekable();
+    let strip_tabs = chars.next_if_eq(&'-').is_some();
+    while chars
+        .peek()
+        .is_some_and(|character| matches!(character, ' ' | '\t'))
+    {
+        chars.next();
+    }
+    let mut delimiter = String::new();
+    let mut quote = QuoteState::None;
+    let mut escaped = false;
+    let mut started = false;
+    for character in chars {
+        match quote {
+            QuoteState::Single => {
+                if character == '\'' {
+                    quote = QuoteState::None;
+                } else {
+                    delimiter.push(character);
+                }
+            }
+            QuoteState::Double => {
+                if escaped {
+                    delimiter.push(character);
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    quote = QuoteState::None;
+                } else {
+                    delimiter.push(character);
+                }
+            }
+            QuoteState::None => {
+                if escaped {
+                    delimiter.push(character);
+                    escaped = false;
+                    started = true;
+                    continue;
+                }
+                match character {
+                    '\'' => {
+                        quote = QuoteState::Single;
+                        started = true;
+                    }
+                    '"' => {
+                        quote = QuoteState::Double;
+                        started = true;
+                    }
+                    '\\' => {
+                        escaped = true;
+                        started = true;
+                    }
+                    character if character.is_whitespace() || ";|&()<>".contains(character) => {
+                        break;
+                    }
+                    _ => {
+                        delimiter.push(character);
+                        started = true;
+                    }
+                }
+            }
+        }
+    }
+    (started && !delimiter.is_empty()).then_some((delimiter, strip_tabs))
+}
+
 /// Parse a heredoc delimiter token immediately after `<<`, returning the
 /// delimiter and how many chars of `rest` it spans — **only** when the token is
 /// quoted (`'EOF'` or `"EOF"`), optionally preceded by `-` and whitespace.

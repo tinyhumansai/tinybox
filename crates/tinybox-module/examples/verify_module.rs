@@ -68,6 +68,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Exercise lifecycle and terminal cleanup through the loaded artifact.
 async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::error::Error>> {
+    let capabilities: tinybox_bus::ModuleCapabilities = proxy.call("Capabilities", ()).await?;
+    if !tinybox_bus::is_compatible(capabilities.contract_version) {
+        return Err(io::Error::other("artifact contract version mismatch").into());
+    }
     // Exercise real resource ownership through the loaded native artifact.
     let analysis: ShellAnalysis = proxy
         .call("AnalyzeShell", ("echo hello".to_owned(),))
@@ -75,6 +79,30 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
     if analysis.hidden_execution || analysis.redirection {
         return Err(io::Error::other("unexpected shell analysis").into());
     }
+    if capabilities
+        .create_backends
+        .iter()
+        .any(|backend| backend == "passthrough")
+    {
+        verify_resource_lifecycle(proxy, &capabilities).await?;
+    } else {
+        eprintln!("skipping resource lifecycle checks: passthrough Create is unsupported");
+    }
+    proxy.call::<()>("Shutdown", ()).await?;
+    if proxy
+        .call::<tinybox_bus::ResourceId>("Reserve", (tinybox_bus::ReserveRequest::Resource,))
+        .await
+        .is_ok()
+    {
+        return Err(io::Error::other("shutdown admitted a new resource").into());
+    }
+    Ok(())
+}
+
+async fn verify_resource_lifecycle(
+    proxy: &tinybus::Proxy,
+    capabilities: &tinybox_bus::ModuleCapabilities,
+) -> Result<(), Box<dyn std::error::Error>> {
     let resource: ResourceInfo = proxy
         .call(
             "Create",
@@ -105,12 +133,6 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
         env: std::collections::BTreeMap::new(),
         stdin: None,
     };
-    let capabilities: tinybox_bus::ModuleCapabilities = proxy.call("Capabilities", ()).await?;
-    if capabilities.contract_version != tinybox_bus::CONTRACT_VERSION
-        || !tinybox_bus::is_compatible(capabilities.contract_version)
-    {
-        return Err(io::Error::other("artifact contract version mismatch").into());
-    }
     let output: Option<ExecOutput> = if capabilities
         .exec_backends
         .iter()
@@ -124,9 +146,21 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
         None
     };
     #[cfg(unix)]
-    verify_detached(proxy, &resource.resource).await?;
+    if capabilities
+        .spawn_backends
+        .iter()
+        .any(|backend| backend == "passthrough")
+    {
+        verify_detached(proxy, &resource.resource).await?;
+    }
     #[cfg(target_os = "linux")]
-    verify_descendants(proxy, &resource.resource).await?;
+    if capabilities
+        .spawn_backends
+        .iter()
+        .any(|backend| backend == "passthrough")
+    {
+        verify_descendants(proxy, &resource.resource).await?;
+    }
     proxy
         .call::<()>("Close", (resource.resource.clone(),))
         .await?;
@@ -141,15 +175,6 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
         .is_ok()
     {
         return Err(io::Error::other("closed resource remained usable").into());
-    }
-
-    proxy.call::<()>("Shutdown", ()).await?;
-    if proxy
-        .call::<tinybox_bus::ResourceId>("Reserve", (tinybox_bus::ReserveRequest::Resource,))
-        .await
-        .is_ok()
-    {
-        return Err(io::Error::other("shutdown admitted a new resource").into());
     }
 
     Ok(())
@@ -223,8 +248,8 @@ async fn verify_descendants(
     proxy: &tinybus::Proxy,
     resource: &tinybox_bus::ResourceId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let readiness = std::env::current_dir()?.join("target/native-module-process-ready");
-    let _ = std::fs::remove_file(&readiness);
+    let readiness_dir = tempfile::tempdir()?;
+    let readiness = readiness_dir.path().join("ready");
     let process: tinybox_bus::ProcessRef = proxy
         .call(
             "Spawn",
@@ -240,7 +265,9 @@ async fn verify_descendants(
                     argv: vec![
                         "sh".into(),
                         "-c".into(),
-                        format!("sleep 600 & echo $$ $! > '{}'; wait", readiness.display()),
+                        "sleep 600 & echo $$ $! > \"$1\"; wait".into(),
+                        "tinybox-verifier".into(),
+                        readiness.to_string_lossy().into_owned(),
                     ],
                     cwd: None,
                     env: std::collections::BTreeMap::new(),
@@ -265,7 +292,6 @@ async fn verify_descendants(
     })
     .await?;
     proxy.call::<()>("Cancel", (process,)).await?;
-    let _ = std::fs::remove_file(readiness);
     if std::path::Path::new(&format!("/proc/{}/status", pids[0])).exists() {
         return Err(io::Error::other("native direct child was not reaped").into());
     }

@@ -80,17 +80,34 @@ impl LimitedLocalHost {
     /// Start an owned local process group with output discarded.
     ///
     /// # Errors
-    /// Rejects unsupported platforms, empty commands and native startup failures.
+    /// Rejects unsupported platforms, empty commands, calls outside Tokio and
+    /// native startup failures.
     pub fn spawn(&self, request: &ExecRequest) -> Result<ManagedProcess> {
         let mut command = LocalHost::command(request)?;
         prepare(&mut command)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::Backend {
+            sandbox: crate::LOCAL.into(),
+            operation: "spawn supervised process",
+            message: "an active Tokio runtime is required".into(),
+        })?;
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let mut child = command
             .spawn()
             .map_err(|error| Error::io("spawn", &error))?;
-        let group = group(&child)?;
+        let group = match group(&child) {
+            Ok(group) => group,
+            Err(error) => {
+                let state = self.state.clone();
+                state.active.fetch_add(1, Ordering::SeqCst);
+                runtime.spawn(async move {
+                    let _active = Active(state);
+                    let _ = child.kill().await;
+                });
+                return Err(error);
+            }
+        };
         let stdin = child.stdin.take();
         let payload = request.stdin.clone();
         let (cancel, cancelled) = oneshot::channel::<()>();
@@ -121,7 +138,17 @@ impl LimitedLocalHost {
                 )
             };
             let result = tokio::select! {
-                result = completion => result.map(|_| ()),
+                result = completion => result.and_then(|((), status)| {
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(Error::Backend {
+                            sandbox: crate::LOCAL.into(),
+                            operation: "complete supervised process",
+                            message: format!("command exited with status {}", status.code().unwrap_or(128)),
+                        })
+                    }
+                }),
                 _ = cancelled => Ok(()),
             };
             let cleanup = super::cleanup(&supervisor_state, child, group).await;
@@ -195,14 +222,16 @@ async fn terminate_native(child: &mut Child, group: i32) -> Result<()> {
             sys::signal::{Signal, killpg},
             unistd::Pid,
         };
-        match killpg(Pid::from_raw(group), Signal::SIGKILL) {
-            Ok(()) | Err(Errno::ESRCH) => {}
-            Err(error) => {
-                return Err(Error::Backend {
-                    sandbox: crate::LOCAL.into(),
-                    operation: "kill process group",
-                    message: error.to_string(),
-                });
+        if child.id().is_some() || group_alive(group)? {
+            match killpg(Pid::from_raw(group), Signal::SIGKILL) {
+                Ok(()) | Err(Errno::ESRCH) => {}
+                Err(error) => {
+                    return Err(Error::Backend {
+                        sandbox: crate::LOCAL.into(),
+                        operation: "kill process group",
+                        message: error.to_string(),
+                    });
+                }
             }
         }
     }

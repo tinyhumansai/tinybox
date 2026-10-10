@@ -94,6 +94,40 @@ async fn detached_stop_and_drop_join_supervised_children() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_reports_a_nonzero_terminal_command_status() -> Result<()> {
+    let host = LimitedLocalHost::new(100);
+    let mut process = host.spawn(&ExecRequest::new(["sh", "-c", "exit 7"]))?;
+    host.drain().await;
+    assert!(process.stop().await.is_err());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_accepts_an_already_reaped_empty_process_group() -> Result<()> {
+    let mut command = Command::new("true");
+    prepare(&mut command)?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::io("spawn", &error))?;
+    let process_group = group(&child)?;
+    child
+        .wait()
+        .await
+        .map_err(|error| Error::io("wait", &error))?;
+    assert!(!group_alive(process_group)?);
+    terminate(&mut child, process_group).await?;
+    Ok(())
+}
+
+#[test]
+fn spawn_outside_a_tokio_runtime_returns_an_error() {
+    let host = LimitedLocalHost::new(100);
+    assert!(host.spawn(&ExecRequest::new(["sleep", "600"])).is_err());
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn stopping_a_shell_reaps_the_direct_child_and_terminates_its_descendant() -> Result<()> {
