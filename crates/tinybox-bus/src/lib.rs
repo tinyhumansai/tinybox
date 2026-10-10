@@ -46,6 +46,7 @@ pub const METHODS: &[&str] = &[
     "Cancel",
     "AnalyzeShell",
     "Reserve",
+    "Capabilities",
 ];
 
 /// Stable error name for an unknown or closed module resource.
@@ -54,6 +55,8 @@ pub const UNKNOWN_RESOURCE: &str = "ai.tinyhumans.tinybox.Error.UnknownResource"
 pub const UNKNOWN_PROCESS: &str = "ai.tinyhumans.tinybox.Error.UnknownProcess";
 /// Stable error name for a backend the module cannot construct.
 pub const UNSUPPORTED_BACKEND: &str = "ai.tinyhumans.tinybox.Error.UnsupportedBackend";
+/// Stable error name for an operation without acknowledged native ownership.
+pub const UNSUPPORTED_OPERATION: &str = "ai.tinyhumans.tinybox.Error.UnsupportedOperation";
 /// Stable error name for an identifier already reserved by this module instance.
 pub const DUPLICATE_ID: &str = "ai.tinyhumans.tinybox.Error.DuplicateId";
 /// Stable error name for an empty reservation identifier.
@@ -77,6 +80,17 @@ pub enum ReserveRequest {
     Resource,
     /// Reserve a process for Spawn, bound to the selected resource.
     Process(ResourceId),
+}
+
+/// Backend operations with acknowledged native ownership in this module build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleCapabilities {
+    /// Backends accepted by Create; no fallback is performed.
+    pub create_backends: Vec<String>,
+    /// Backends accepted by bounded collected Exec.
+    pub exec_backends: Vec<String>,
+    /// Backends accepted by supervised Spawn/Cancel.
+    pub spawn_backends: Vec<String>,
 }
 
 /// A workspace supplied to a backend; unsupported sources are refused.

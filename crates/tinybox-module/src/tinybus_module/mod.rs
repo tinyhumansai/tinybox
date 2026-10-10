@@ -23,6 +23,20 @@ struct BoxService {
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Report which operations own native cleanup on this platform.
+    async fn capabilities(&self) -> TinyBusResult<tinybox_bus::ModuleCapabilities> {
+        let supervised: Vec<String> = if cfg!(unix) {
+            vec!["passthrough".into()]
+        } else {
+            Vec::new()
+        };
+        std::future::ready(Ok(tinybox_bus::ModuleCapabilities {
+            create_backends: vec!["passthrough".into(), "docker".into(), "namespace".into()],
+            exec_backends: supervised.clone(),
+            spawn_backends: supervised,
+        }))
+        .await
+    }
     /// Mint a single-use startup reservation, without starting native work.
     async fn reserve(&self, request: tinybox_bus::ReserveRequest) -> TinyBusResult<ResourceId> {
         self.resources.reserve(request).await
@@ -187,7 +201,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities"],
     signals = [],
     requires = [],
     optional = [],

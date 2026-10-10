@@ -14,6 +14,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Method | Argument | Result |
 | --- | --- | --- |
 | Describe | none | Original version/backend summary |
+| Capabilities | none | ModuleCapabilities |
 | Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
 | Exec | ExecRequest | ExecOutput |
@@ -50,7 +51,12 @@ Callers must close explicitly before unloading the module. Output streaming,
 transfer, forwarding, SSH and microVM configuration remain subsequent slices.
 
 Operations serialize within each resource; unrelated resources have independent
-locks. A detached process can be cancelled after Spawn returns. Close fences new
+locks. Spawn uses an owned local process group, never legacy pid-file detach helpers.
+Capabilities distinguishes Create backends from supervised execution backends.
+Exec/Spawn currently support Unix passthrough only; Docker/namespace execution
+and Windows job-object supervision require subsequent owning-provider slices.
+Unsupported operations fail explicitly without fallback. Legacy library APIs
+remain available. A detached process can be cancelled after Spawn returns. Close fences new
 execution, aborts its resource's collected Exec, waits for its output supervisor
 to kill/reap the child, then stops tracked detached processes and destroys the
 sandbox. Create, Spawn, Exec, Cancel, and Close run in module-owned tasks, so a

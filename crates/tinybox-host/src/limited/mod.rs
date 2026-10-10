@@ -10,6 +10,9 @@ use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{oneshot, watch};
 
+mod process;
+pub use process::ManagedProcess;
+
 /// A local host that caps combined stdout and stderr during collection.
 ///
 /// Cancelling the caller signals an owned supervisor, which kills and reaps
@@ -72,12 +75,14 @@ impl Host for LimitedLocalHost {
 
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
         let mut command = LocalHost::command(request)?;
+        process::prepare(&mut command)?;
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = command
             .spawn()
             .map_err(|error| Error::io("spawn", &error))?;
+        let group = process::group(&child)?;
         let stdout = pipe(child.stdout.take(), "stdout")?;
         let stderr = pipe(child.stderr.take(), "stderr")?;
         let stdin = child.stdin.take();
@@ -113,9 +118,7 @@ impl Host for LimitedLocalHost {
                 result = collection => result.map(|(stdout, stderr, (), status)| ExecOutput::new(status.code().unwrap_or(128), stdout, stderr)),
                 _ = cancelled => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
             };
-            if result.is_err() {
-                let _ = child.kill().await;
-            }
+            process::terminate(&mut child, group).await?;
             result
         });
         let result = supervisor.await.map_err(|error| Error::Backend {

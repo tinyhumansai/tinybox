@@ -2,6 +2,93 @@
 use super::*;
 use tinybox_core::{ExecOutput as NativeOutput, ExecRequest as NativeRequest, Host};
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_cancel_and_close_terminate_descendants_and_reap_direct_children() -> Result<()> {
+    for mode in ["cancel", "close-detached", "close-dropped-exec"] {
+        let directory = tempfile::tempdir().map_err(Error::failed)?;
+        let ready = directory.path().join("pids");
+        let resources = Arc::new(Resources::default());
+        let resource = resources.reserve(ReserveRequest::Resource).await?;
+        resources
+            .create(CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                env: BTreeMap::new(),
+            })
+            .await?;
+        let script = format!(
+            "sleep 600 & echo $$ $! > {}; wait",
+            tinybox_core::shell::quote(&ready.to_string_lossy())
+        );
+        let command = ExecRequest {
+            resource: resource.clone(),
+            argv: vec!["sh".into(), "-c".into(), script],
+            cwd: None,
+            env: BTreeMap::new(),
+            stdin: None,
+        };
+        let mut process = None;
+        let mut waiter = None;
+        if mode == "close-dropped-exec" {
+            let runner = resources.clone();
+            let native = tokio::spawn(async move { runner.exec(command).await });
+            waiter = Some(tokio::spawn(super::super::finish_operation(native)));
+        } else {
+            process = Some(
+                resources
+                    .spawn(SpawnRequest {
+                        process: resources
+                            .reserve(ReserveRequest::Process(resource.clone()))
+                            .await?,
+                        command,
+                    })
+                    .await?,
+            );
+        }
+        let pids = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&ready)
+                    && contents.split_whitespace().count() == 2
+                {
+                    break contents;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(Error::failed)?;
+        if let Some(waiter) = waiter {
+            waiter.abort();
+            assert!(waiter.await.is_err());
+        }
+        if mode == "cancel" {
+            resources
+                .cancel(&process.ok_or_else(|| Error::failed("missing process"))?)
+                .await?;
+        } else {
+            resources.close(&resource).await?;
+        }
+        for (index, pid) in pids.split_whitespace().enumerate() {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status"));
+            if index == 0 {
+                assert!(status.is_err(), "direct workload child was not reaped");
+            } else if let Ok(status) = status {
+                assert!(
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("State:"))
+                        .is_some_and(|line| line.contains("Z (zombie)")),
+                    "descendant still executes after native cleanup"
+                );
+            }
+        }
+        resources.close(&resource).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn reservations_allow_reordered_acquisition_and_cleanup_only_the_selected_target()
 -> Result<()> {
@@ -88,19 +175,14 @@ async fn repeated_create_close_reclaims_admission_beyond_the_old_lifetime_cap() 
 #[tokio::test]
 async fn cancelled_processes_release_admission_beyond_the_old_retained_cap() -> Result<()> {
     let resources = Resources::default();
-    let host = Arc::new(DelayedHost::default());
-    host.release.notify_one();
     let resource = resources.reserve(ReserveRequest::Resource).await?;
     resources
-        .create_on(
-            CreateRequest {
-                resource: resource.clone(),
-                backend: "passthrough".into(),
-                workspace: Workspace::Directory(".".into()),
-                env: BTreeMap::new(),
-            },
-            host,
-        )
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(".".into()),
+            env: BTreeMap::new(),
+        })
         .await?;
     for _ in 0..=tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
         let process = resources
@@ -110,7 +192,7 @@ async fn cancelled_processes_release_admission_beyond_the_old_retained_cap() -> 
                     .await?,
                 command: ExecRequest {
                     resource: resource.clone(),
-                    argv: vec!["mock".into()],
+                    argv: vec!["true".into()],
                     cwd: None,
                     env: BTreeMap::new(),
                     stdin: None,
@@ -338,35 +420,37 @@ async fn a_pending_create_does_not_block_closing_another_resource() -> Result<()
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn process_admission_refuses_overflow_before_native_start() -> Result<()> {
     let resources = Resources::default();
-    let host = Arc::new(DelayedHost::default());
-    host.release.notify_one();
     let id = resources.reserve(ReserveRequest::Resource).await?;
     resources
-        .create_on(
-            CreateRequest {
-                resource: id.clone(),
-                backend: "docker".into(),
-                workspace: Workspace::Image("mock".into()),
-                env: BTreeMap::new(),
-            },
-            host,
-        )
+        .create(CreateRequest {
+            resource: id.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(".".into()),
+            env: BTreeMap::new(),
+        })
         .await?;
-    let slot = resources.slot(&id).await?;
-    {
-        let mut slot = slot.lock().await;
-        let entry = slot
-            .as_mut()
-            .ok_or_else(|| Error::failed("missing test resource"))?;
-        for index in 0..tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
-            entry.processes.insert(
-                ResourceId(format!("existing-{index}")),
-                tinybox_core::detach::mint(),
-            );
-        }
+    let mut processes = Vec::new();
+    for _ in 0..tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
+        processes.push(
+            resources
+                .spawn(SpawnRequest {
+                    process: resources
+                        .reserve(ReserveRequest::Process(id.clone()))
+                        .await?,
+                    command: ExecRequest {
+                        resource: id.clone(),
+                        argv: vec!["sleep".into(), "600".into()],
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        stdin: None,
+                    },
+                })
+                .await?,
+        );
     }
     assert!(
         resources
@@ -375,7 +459,7 @@ async fn process_admission_refuses_overflow_before_native_start() -> Result<()> 
                     .reserve(ReserveRequest::Process(id.clone()))
                     .await?,
                 command: ExecRequest {
-                    resource: id,
+                    resource: id.clone(),
                     argv: vec!["unused".into()],
                     cwd: None,
                     env: BTreeMap::new(),
@@ -385,6 +469,10 @@ async fn process_admission_refuses_overflow_before_native_start() -> Result<()> 
             .await
             .is_err()
     );
+    for process in processes {
+        resources.cancel(&process).await?;
+    }
+    resources.close(&id).await?;
     Ok(())
 }
 

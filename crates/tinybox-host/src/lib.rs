@@ -36,6 +36,6 @@ mod limited;
 mod local;
 
 /// Local reach with an enforced combined output budget and supervised cleanup.
-pub use limited::LimitedLocalHost;
+pub use limited::{LimitedLocalHost, ManagedProcess};
 
 pub use local::{LocalHost, NAME as LOCAL};

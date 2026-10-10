@@ -1,6 +1,40 @@
 //! Bounded collection, simultaneous draining, and supervisor cleanup.
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn overflow_terminates_inherited_pipe_descendants_before_drain_returns() -> Result<()> {
+    let directory = tempfile::tempdir().map_err(|error| Error::io("tempdir", &error))?;
+    let ready = directory.path().join("descendant.pid");
+    let script = format!(
+        "sleep 600 & echo $! > {}; yes",
+        tinybox_core::shell::quote(&ready.to_string_lossy())
+    );
+    let host = LimitedLocalHost::new(16);
+    assert!(matches!(
+        host.run(&ExecRequest::new(["sh", "-c", &script])).await,
+        Err(Error::OutputLimitExceeded { .. })
+    ));
+    host.drain().await;
+    let pid = std::fs::read_to_string(&ready).map_err(|error| Error::io("read pid", &error))?;
+    let status =
+        std::fs::read_to_string(format!("/proc/{}/status", pid.trim())).unwrap_or_default();
+    let alive = status
+        .lines()
+        .find(|line| line.starts_with("State:"))
+        .is_some_and(|line| !line.contains("Z (zombie)"));
+    if alive {
+        let _ = LocalHost::new()
+            .run(&ExecRequest::new(["kill", "-KILL", pid.trim()]))
+            .await;
+    }
+    assert!(
+        !alive,
+        "output supervisor returned while descendant was alive: {status}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn combined_stream_budget_is_enforced_and_child_is_reaped() -> Result<()> {
     let host = LimitedLocalHost::new(100);

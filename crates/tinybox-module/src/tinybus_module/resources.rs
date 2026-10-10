@@ -9,8 +9,7 @@ use tinybox_bus::{
 };
 use tinybox_core::clock::{Clock, SystemClock};
 use tinybox_core::{
-    BoxId, BoxSpec, HostRef, MemoryStore, Placement, ProcessId, Sandbox, SandboxRef,
-    WorkspaceSource,
+    BoxId, BoxSpec, HostRef, MemoryStore, Placement, Sandbox, SandboxRef, WorkspaceSource,
 };
 use tinybus::{Error, Result};
 use tokio::sync::Mutex;
@@ -18,7 +17,8 @@ use tokio::sync::Mutex;
 struct Resource {
     sandbox: Arc<dyn Sandbox>,
     id: BoxId,
-    processes: BTreeMap<ResourceId, ProcessId>,
+    processes: BTreeMap<ResourceId, tinybox_host::ManagedProcess>,
+    local_sandbox: Option<Arc<tinybox_core::PassthroughSandbox>>,
     collector: Option<Arc<tinybox_host::LimitedLocalHost>>,
 }
 
@@ -166,8 +166,13 @@ impl Resources {
                 return Err(failure(tinybox_bus::EXEC_CANCELLED, "resource is closing"));
             }
             let store = Arc::new(MemoryStore::new());
+            let mut local_sandbox = None;
             let sandbox: Arc<dyn Sandbox> = match request.backend.as_str() {
-                "passthrough" => Arc::new(tinybox_core::PassthroughSandbox::new(host, store)),
+                "passthrough" => {
+                    let sandbox = Arc::new(tinybox_core::PassthroughSandbox::new(host, store));
+                    local_sandbox = Some(sandbox.clone());
+                    sandbox
+                }
                 "docker" => Arc::new(tinybox_docker::DockerSandbox::new(host, store)),
                 "namespace" => Arc::new(tinybox_linux::NamespaceSandbox::new(host, store)),
                 _ => {
@@ -201,6 +206,7 @@ impl Resources {
                 id: info.id,
                 processes: BTreeMap::new(),
                 collector,
+                local_sandbox,
             });
             Ok(result)
         }
@@ -246,6 +252,12 @@ impl Resources {
             .as_ref()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
         let resource = request.resource.clone();
+        if entry.collector.is_some() && entry.local_sandbox.is_none() {
+            return Err(failure(
+                tinybox_bus::UNSUPPORTED_OPERATION,
+                "module Exec requires supervised local passthrough ownership",
+            ));
+        }
         let sandbox = entry.sandbox.clone();
         let id = entry.id.clone();
         let command = command(request);
@@ -337,10 +349,23 @@ impl Resources {
             ));
         }
         let resource = request.command.resource.clone();
-        let native = entry
-            .sandbox
-            .spawn(&entry.id, &command(request.command))
-            .await
+        let local = entry.local_sandbox.as_ref().ok_or_else(|| {
+            failure(
+                tinybox_bus::UNSUPPORTED_OPERATION,
+                "module Spawn requires supervised local passthrough ownership",
+            )
+        })?;
+        let collector = entry.collector.as_ref().ok_or_else(|| {
+            failure(
+                tinybox_bus::UNSUPPORTED_OPERATION,
+                "module Spawn requires the owned local collector",
+            )
+        })?;
+        let resolved = local
+            .resolve_command(&entry.id, &command(request.command))
+            .map_err(|error| backend_error(&error))?;
+        let native = collector
+            .spawn(&resolved)
             .map_err(|error| backend_error(&error))?;
         entry.processes.insert(request.process.clone(), native);
         Ok(ProcessRef {
@@ -355,21 +380,13 @@ impl Resources {
         let entry = slot
             .as_mut()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
-        let Some(native) = entry.processes.get(&process.process) else {
+        let Some(native) = entry.processes.get_mut(&process.process) else {
             validate_id(&process.process)?;
             return Ok(false);
         };
-        let running = entry
-            .sandbox
-            .is_running(&entry.id, native)
-            .await
-            .map_err(|error| backend_error(&error))?;
+        let running = native.is_running();
         if !running {
-            entry
-                .sandbox
-                .stop(&entry.id, native)
-                .await
-                .map_err(|error| backend_error(&error))?;
+            native.stop().await.map_err(|error| backend_error(&error))?;
             entry.processes.remove(&process.process);
         }
         Ok(running)
@@ -405,14 +422,10 @@ impl Resources {
         let Some(entry) = slot.as_mut() else {
             return Ok(());
         };
-        let Some(native) = entry.processes.get(&process.process) else {
+        let Some(native) = entry.processes.get_mut(&process.process) else {
             return Ok(());
         };
-        entry
-            .sandbox
-            .stop(&entry.id, native)
-            .await
-            .map_err(|error| backend_error(&error))?;
+        native.stop().await.map_err(|error| backend_error(&error))?;
         entry.processes.remove(&process.process);
         Ok(())
     }
@@ -449,16 +462,15 @@ impl Resources {
             }
         }
         let mut slot = slot.lock().await;
-        if let Some(entry) = slot.as_ref() {
-            if let Some(collector) = &entry.collector {
-                collector.drain().await;
-            }
-            for process in entry.processes.values() {
-                entry
-                    .sandbox
-                    .stop(&entry.id, process)
+        if let Some(entry) = slot.as_mut() {
+            for process in entry.processes.values_mut() {
+                process
+                    .stop()
                     .await
                     .map_err(|error| backend_error(&error))?;
+            }
+            if let Some(collector) = &entry.collector {
+                collector.drain().await;
             }
             entry
                 .sandbox
