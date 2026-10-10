@@ -114,7 +114,7 @@ workspace:  alpine:3
 runner:     local / docker
 isolation:  kernel
 untrusted:  safe
-supports:   filesystem snapshots, forking, resource limits
+supports:   filesystem snapshots, forking
 ```
 
 Snapshot a box and branch it — the fork inherits the parent's filesystem and
@@ -406,3 +406,6 @@ requests and results without linking the sandbox runtime. The additive
 [lifecycle interface](crates/tinybox-module/src/tinybus_module/README.md)
 provides explicit local sandbox selection, command execution, detached process
 cancellation, inspection, cleanup, and policy-neutral shell structure analysis.
+
+Per-constraint hard preflight and current backend limitations are documented in
+[constraint preflight](docs/specs/constraint-preflight.md).

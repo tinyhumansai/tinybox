@@ -125,7 +125,6 @@ impl DockerSandbox {
     pub const fn declared_capabilities() -> SandboxCapabilities {
         SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::Filesystem)
             .with_fork()
-            .with_resource_limits()
             .with_port_forward()
             .with_detach()
     }
@@ -157,6 +156,17 @@ impl Sandbox for DockerSandbox {
 
     fn capabilities(&self) -> SandboxCapabilities {
         Self::declared_capabilities()
+    }
+
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        use tinybox_core::Constraint::{Cpu, Filesystem, Memory, Network, Pids};
+        use tinybox_core::Enforcement::Enforced;
+        tinybox_core::ConstraintSupport::NONE
+            .with(Filesystem, Enforced)
+            .with(Network, Enforced)
+            .with(Cpu, Enforced)
+            .with(Memory, Enforced)
+            .with(Pids, Enforced)
     }
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {

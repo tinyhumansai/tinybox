@@ -88,6 +88,9 @@ pub fn default_backend() -> Arc<dyn JailBackend> {
 /// `NotFound` (canonicalize bubbles it up) — callers should create the
 /// workspace before encapsulating.
 ///
+/// This legacy entry point does not require fully enforced constraints. Use
+/// [`spawn_required`] for a hard preflight before spawning.
+///
 /// # Errors
 ///
 /// Returns an error if the jail root cannot be canonicalized or the backend
@@ -102,6 +105,9 @@ pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
 /// tests and for callers that want to opt into a weaker backend
 /// explicitly (e.g. forcing [`NoopBackend`] during local dev).
 ///
+/// This legacy entry point does not run [`JailBackend::require`]. Use
+/// [`spawn_required_with`] when partial or absent enforcement must be refused.
+///
 /// # Errors
 ///
 /// Returns an error if the jail root cannot be canonicalized or the backend
@@ -110,6 +116,36 @@ pub fn spawn_with(backend: &dyn JailBackend, jail: &Jail, cmd: Command) -> std::
     let mut jail = jail.clone();
     jail.canonicalize()?;
     backend.spawn(&jail, cmd)
+}
+
+/// Spawn only after all jail constraints pass a hard preflight.
+///
+/// This strict entry point rejects the explicitly trusted no-op backend and
+/// Seatbelt's partial filesystem policy. Landlock can satisfy filesystem-only
+/// requests, but offers no process isolation and is unsuitable for arbitrary
+/// untrusted code. Availability and actual policy application are also checked
+/// by the backend when spawning.
+///
+/// # Errors
+/// Returns `Unsupported` before spawning for partial or unsupported constraints,
+/// or a filesystem/backend error while canonicalizing or applying the policy.
+pub fn spawn_required_with(
+    backend: &dyn JailBackend,
+    jail: &Jail,
+    cmd: Command,
+) -> std::io::Result<Child> {
+    backend
+        .require(jail)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Unsupported, error))?;
+    spawn_with(backend, jail, cmd)
+}
+
+/// Spawn using the detected backend after a hard preflight.
+///
+/// # Errors
+/// Returns the same preflight and setup errors as [`spawn_required_with`].
+pub fn spawn_required(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
+    spawn_required_with(default_backend().as_ref(), jail, cmd)
 }
 
 #[cfg(test)]
