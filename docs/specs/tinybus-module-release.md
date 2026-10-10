@@ -43,6 +43,7 @@ methods documented in the
 Native providers and opaque resource ownership stay in the module. Backends
 are selected explicitly and unsupported requests never downgrade isolation.
 Host authorization precedes calls; shell analysis returns structural facts.
+Hosts reserve before Create/Spawn and await terminal Shutdown before ABI unload.
 
 Publishing the source contract does not publish a compatible native artifact.
 Consumers must retain their current gitlinks until a release includes this
