@@ -343,6 +343,30 @@ impl Host for LostDockerCreateReplyHost {
                     Ok(NativeOutput::new(0, Vec::new(), Vec::new()))
                 }
             }
+            Some("inspect")
+                if request
+                    .argv
+                    .get(3)
+                    .is_some_and(|format| format.contains("tinybox.attempt")) =>
+            {
+                let attempt = self
+                    .commands
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .rev()
+                    .find_map(|command| {
+                        command.windows(2).find_map(|pair| {
+                            pair[0]
+                                .eq("--label")
+                                .then_some(pair[1].as_str())
+                                .filter(|label| label.starts_with("ai.tinyhumans.tinybox.attempt="))
+                        })
+                    })
+                    .and_then(|label| label.split_once('=').map(|(_, value)| value.to_owned()))
+                    .unwrap_or_default();
+                Ok(NativeOutput::new(0, attempt.into_bytes(), Vec::new()))
+            }
             _ => Ok(NativeOutput::new(0, b"running".to_vec(), Vec::new())),
         }
     }

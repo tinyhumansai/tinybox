@@ -218,21 +218,11 @@ async fn terminate_native(child: &mut Child, group: i32) -> Result<()> {
     #[cfg(unix)]
     {
         use nix::{
-            errno::Errno,
             sys::signal::{Signal, killpg},
             unistd::Pid,
         };
         if child.id().is_some() || group_alive(group)? {
-            match killpg(Pid::from_raw(group), Signal::SIGKILL) {
-                Ok(()) | Err(Errno::ESRCH) => {}
-                Err(error) => {
-                    return Err(Error::Backend {
-                        sandbox: crate::LOCAL.into(),
-                        operation: "kill process group",
-                        message: error.to_string(),
-                    });
-                }
-            }
+            kill_group_with(group, |group| killpg(Pid::from_raw(group), Signal::SIGKILL))?;
         }
     }
     #[cfg(not(unix))]
@@ -242,6 +232,21 @@ async fn terminate_native(child: &mut Child, group: i32) -> Result<()> {
         .await
         .map_err(|error| Error::io("kill and reap", &error))?;
     wait_group(group, std::time::Duration::from_secs(5), group_alive).await
+}
+
+#[cfg(unix)]
+fn kill_group_with(
+    group: i32,
+    kill: impl FnOnce(i32) -> std::result::Result<(), nix::errno::Errno>,
+) -> Result<()> {
+    match kill(group) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(Error::Backend {
+            sandbox: crate::LOCAL.into(),
+            operation: "kill process group",
+            message: error.to_string(),
+        }),
+    }
 }
 
 async fn wait_group(
@@ -275,19 +280,23 @@ fn group_alive(group: i32) -> Result<bool> {
         let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
-        let Some((_, fields)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let fields: Vec<_> = fields.split_whitespace().take(3).collect();
-        if fields.len() == 3
-            && fields[2].parse::<i32>().ok() == Some(group)
-            && fields[0] != "Z"
-            && fields[0] != "X"
-        {
+        if stat_has_live_group(&stat, group) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn stat_has_live_group(stat: &str, group: i32) -> bool {
+    let Some((_, fields)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let fields: Vec<_> = fields.split_whitespace().take(3).collect();
+    fields.len() == 3
+        && fields[2].parse::<i32>().ok() == Some(group)
+        && fields[0] != "Z"
+        && fields[0] != "X"
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]

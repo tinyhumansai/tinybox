@@ -18,6 +18,7 @@ async-trait.workspace = true
 # `DockerCli` runs the local `docker` client; one-shot runs need process spawning
 # and a deadline.
 tokio = { workspace = true, features = ["process"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio.workspace = true

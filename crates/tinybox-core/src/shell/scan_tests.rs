@@ -178,6 +178,24 @@ fn heredoc_structural_scan_handles_tabs_quoting_and_multiple_bodies() {
 }
 
 #[test]
+fn heredoc_comment_does_not_consume_the_next_command() {
+    let command = "# << EOF\nprintf done > out\n";
+    let stripped = strip_heredoc_bodies(command);
+
+    assert!(contains_unquoted_char(&stripped, '>'));
+    assert!(stripped.contains("printf done > out"));
+}
+
+#[test]
+fn double_quoted_heredoc_delimiter_preserves_literal_backslash() {
+    let command = "cat << \"E\\OF\"\nbody > data\nE\\OF\nprintf done > out\n";
+    let stripped = strip_heredoc_bodies(command);
+
+    assert!(contains_unquoted_char(&stripped, '>'));
+    assert!(stripped.contains("printf done > out"));
+}
+
+#[test]
 fn here_string_is_not_a_heredoc() {
     let command = "cat <<< 'plain'\necho $(whoami)";
     assert!(matches!(

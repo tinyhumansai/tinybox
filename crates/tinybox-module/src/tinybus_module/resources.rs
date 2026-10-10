@@ -192,6 +192,10 @@ impl Resources {
         platform: super::Platform,
     ) -> Result<ResourceInfo> {
         let slot = Arc::new(Mutex::new(None));
+        // Own the slot before publishing it. Once it appears in `entries`, a
+        // concurrent Close or Shutdown may wait on this guard and observe the
+        // allocation created below instead of racing to remove an empty slot.
+        let mut slot_guard = Arc::clone(&slot).lock_owned().await;
         {
             let mut state = self.state.lock().await;
             self.consume(&mut state, &request.resource, &ReserveRequest::Resource)?;
@@ -204,7 +208,6 @@ impl Resources {
             }
             state.entries.insert(request.resource.clone(), slot.clone());
         }
-        let mut slot = slot.lock().await;
         let allocation = async {
             if self
                 .executions
@@ -254,7 +257,7 @@ impl Resources {
                         && let Ok(records) = tinybox_core::Store::list(store.as_ref())
                         && let Some(info) = records.into_iter().next()
                     {
-                        *slot = Some(Resource {
+                        *slot_guard = Some(Resource {
                             sandbox,
                             id: info.id,
                             execution_supported: supports_execution(platform, &request.backend),
@@ -272,7 +275,7 @@ impl Resources {
                 backend: request.backend,
                 state: info.state.to_string(),
             };
-            *slot = Some(Resource {
+            *slot_guard = Some(Resource {
                 sandbox,
                 id: info.id,
                 execution_supported,
@@ -289,7 +292,7 @@ impl Resources {
             Ok(result)
         }
         .await;
-        if allocation.is_err() && slot.is_none() {
+        if allocation.is_err() && slot_guard.is_none() {
             self.state.lock().await.entries.remove(&request.resource);
         }
         allocation

@@ -460,6 +460,7 @@ fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
     let mut chars = line.char_indices().peekable();
     let mut quote = QuoteState::None;
     let mut escaped = false;
+    let mut at_word_start = true;
     while let Some((index, character)) = chars.next() {
         match quote {
             QuoteState::Single => {
@@ -479,22 +480,35 @@ fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
             QuoteState::None => {
                 if escaped {
                     escaped = false;
+                    at_word_start = false;
                     continue;
                 }
                 match character {
                     '\\' => escaped = true,
-                    '\'' => quote = QuoteState::Single,
-                    '"' => quote = QuoteState::Double,
+                    '\'' => {
+                        quote = QuoteState::Single;
+                        at_word_start = false;
+                    }
+                    '"' => {
+                        quote = QuoteState::Double;
+                        at_word_start = false;
+                    }
+                    '#' if at_word_start => break,
                     '<' if chars.next_if(|(_, value)| *value == '<').is_some() => {
                         if chars.next_if(|(_, value)| *value == '<').is_some() {
+                            at_word_start = true;
                             continue;
                         }
                         if let Some((delimiter, strip_tabs)) = heredoc_delimiter(&line[index + 2..])
                         {
                             delimiters.push((delimiter, strip_tabs));
                         }
+                        at_word_start = true;
                     }
-                    _ => {}
+                    character if character.is_whitespace() || ";|&()<>".contains(character) => {
+                        at_word_start = true;
+                    }
+                    _ => at_word_start = false,
                 }
             }
         }
@@ -526,6 +540,9 @@ fn heredoc_delimiter(rest: &str) -> Option<(String, bool)> {
             }
             QuoteState::Double => {
                 if escaped {
+                    if !matches!(character, '$' | '`' | '"' | '\\' | '\n') {
+                        delimiter.push('\\');
+                    }
                     delimiter.push(character);
                     escaped = false;
                 } else if character == '\\' {
