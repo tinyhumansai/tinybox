@@ -1,6 +1,8 @@
 //! Tests for the `TinyBus` module adapter and its declared surface.
 
-use super::{BoxService, INTERFACE, OBJECT_PATH, describe, registered_sandboxes, setup};
+use super::{
+    BoxService, INTERFACE, OBJECT_PATH, capabilities_for, describe, registered_sandboxes, setup,
+};
 use tinybox_core::{IsolationLevel, SandboxCapabilities, SnapshotSupport};
 use tinybus::broker::Broker;
 use tinybus::transport::memory::MemoryBus;
@@ -15,6 +17,19 @@ const CONTAINER: SandboxCapabilities =
 
 /// A backend too weak to be trusted with untrusted code.
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
+
+#[test]
+fn backend_capabilities_do_not_advertise_native_docker_without_supervision() {
+    let windows = capabilities_for(false);
+    assert_eq!(windows.create_backends, ["passthrough", "namespace"]);
+    assert!(windows.exec_backends.is_empty());
+    assert!(windows.spawn_backends.is_empty());
+
+    let unix = capabilities_for(true);
+    assert_eq!(unix.create_backends, ["passthrough", "docker", "namespace"]);
+    assert_eq!(unix.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(unix.spawn_backends, ["passthrough", "docker"]);
+}
 
 #[test]
 fn terminal_shutdown_is_an_explicit_module_operation() {

@@ -30,19 +30,7 @@ impl BoxService {
     }
     /// Report which operations own native cleanup on this platform.
     async fn capabilities(&self) -> TinyBusResult<tinybox_bus::ModuleCapabilities> {
-        let mut supervised: Vec<String> = if cfg!(unix) {
-            vec!["passthrough".into()]
-        } else {
-            Vec::new()
-        };
-        supervised.push("docker".into());
-        std::future::ready(Ok(tinybox_bus::ModuleCapabilities {
-            contract_version: tinybox_bus::CONTRACT_VERSION,
-            create_backends: vec!["passthrough".into(), "docker".into(), "namespace".into()],
-            exec_backends: supervised.clone(),
-            spawn_backends: supervised,
-        }))
-        .await
+        std::future::ready(Ok(capabilities_for(cfg!(unix)))).await
     }
     /// Mint a single-use startup reservation, without starting native work.
     async fn reserve(&self, request: tinybox_bus::ReserveRequest) -> TinyBusResult<ResourceId> {
@@ -114,6 +102,25 @@ impl BoxService {
     /// before it tries to create a box.
     async fn describe(&self) -> TinyBusResult<String> {
         std::future::ready(Ok(describe(&registered_sandboxes()))).await
+    }
+}
+
+fn capabilities_for(unix_host: bool) -> tinybox_bus::ModuleCapabilities {
+    let supervised: Vec<String> = if unix_host {
+        vec!["passthrough".into(), "docker".into()]
+    } else {
+        Vec::new()
+    };
+    let mut create_backends = vec!["passthrough".into()];
+    if unix_host {
+        create_backends.push("docker".into());
+    }
+    create_backends.push("namespace".into());
+    tinybox_bus::ModuleCapabilities {
+        contract_version: tinybox_bus::CONTRACT_VERSION,
+        create_backends,
+        exec_backends: supervised.clone(),
+        spawn_backends: supervised,
     }
 }
 
