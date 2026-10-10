@@ -15,6 +15,25 @@ use tinybox_bus::{
 
 mod resources;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Platform {
+    Linux,
+    Unix,
+    Other,
+}
+
+impl Platform {
+    const fn current() -> Self {
+        if cfg!(target_os = "linux") {
+            Self::Linux
+        } else if cfg!(unix) {
+            Self::Unix
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// The bus-facing service.
 #[derive(Default)]
 struct BoxService {
@@ -30,7 +49,7 @@ impl BoxService {
     }
     /// Report which operations own native cleanup on this platform.
     async fn capabilities(&self) -> TinyBusResult<tinybox_bus::ModuleCapabilities> {
-        std::future::ready(Ok(capabilities_for(cfg!(unix)))).await
+        std::future::ready(Ok(capabilities_for(Platform::current()))).await
     }
     /// Mint a single-use startup reservation, without starting native work.
     async fn reserve(&self, request: tinybox_bus::ReserveRequest) -> TinyBusResult<ResourceId> {
@@ -105,22 +124,35 @@ impl BoxService {
     }
 }
 
-fn capabilities_for(unix_host: bool) -> tinybox_bus::ModuleCapabilities {
-    let supervised: Vec<String> = if unix_host {
+fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
+    let supervised: Vec<String> = if matches!(platform, Platform::Linux | Platform::Unix) {
         vec!["passthrough".into(), "docker".into()]
     } else {
         Vec::new()
     };
     let mut create_backends = vec!["passthrough".into()];
-    if unix_host {
+    if matches!(platform, Platform::Linux | Platform::Unix) {
         create_backends.push("docker".into());
     }
-    create_backends.push("namespace".into());
+    if platform == Platform::Linux {
+        create_backends.push("namespace".into());
+    }
     tinybox_bus::ModuleCapabilities {
         contract_version: tinybox_bus::CONTRACT_VERSION,
         create_backends,
         exec_backends: supervised.clone(),
         spawn_backends: supervised,
+    }
+}
+
+fn supports_create_backend(platform: Platform, backend: &str) -> bool {
+    match backend {
+        // Passthrough only records the caller's workspace; execution remains
+        // unadvertised on hosts where TinyBox cannot supervise native children.
+        "passthrough" => true,
+        "docker" => matches!(platform, Platform::Linux | Platform::Unix),
+        "namespace" => platform == Platform::Linux,
+        _ => false,
     }
 }
 

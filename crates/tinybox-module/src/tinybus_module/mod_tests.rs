@@ -1,7 +1,8 @@
 //! Tests for the `TinyBus` module adapter and its declared surface.
 
 use super::{
-    BoxService, INTERFACE, OBJECT_PATH, capabilities_for, describe, registered_sandboxes, setup,
+    BoxService, INTERFACE, OBJECT_PATH, Platform, capabilities_for, describe, registered_sandboxes,
+    setup,
 };
 use tinybox_core::{IsolationLevel, SandboxCapabilities, SnapshotSupport};
 use tinybus::broker::Broker;
@@ -20,15 +21,23 @@ const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
 #[test]
 fn backend_capabilities_do_not_advertise_native_docker_without_supervision() {
-    let windows = capabilities_for(false);
-    assert_eq!(windows.create_backends, ["passthrough", "namespace"]);
-    assert!(windows.exec_backends.is_empty());
-    assert!(windows.spawn_backends.is_empty());
+    let windows = capabilities_for(Platform::Other);
+    assert_eq!(windows.create_backends, ["passthrough"]);
+    assert_eq!(windows.exec_backends, Vec::<String>::new());
+    assert_eq!(windows.spawn_backends, Vec::<String>::new());
 
-    let unix = capabilities_for(true);
-    assert_eq!(unix.create_backends, ["passthrough", "docker", "namespace"]);
-    assert_eq!(unix.exec_backends, ["passthrough", "docker"]);
-    assert_eq!(unix.spawn_backends, ["passthrough", "docker"]);
+    let macos = capabilities_for(Platform::Unix);
+    assert_eq!(macos.create_backends, ["passthrough", "docker"]);
+    assert_eq!(macos.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(macos.spawn_backends, ["passthrough", "docker"]);
+
+    let linux = capabilities_for(Platform::Linux);
+    assert_eq!(
+        linux.create_backends,
+        ["passthrough", "docker", "namespace"]
+    );
+    assert_eq!(linux.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(linux.spawn_backends, ["passthrough", "docker"]);
 }
 
 #[test]
@@ -45,7 +54,7 @@ fn terminal_shutdown_is_an_explicit_module_operation() {
 async fn capabilities_and_shutdown_report_actual_supported_ownership() -> tinybus::Result<()> {
     let service = BoxService::default();
     let capabilities = service.capabilities().await?;
-    let expected = capabilities_for(cfg!(unix));
+    let expected = capabilities_for(Platform::current());
     assert_eq!(capabilities.contract_version, tinybox_bus::CONTRACT_VERSION);
     assert_eq!(capabilities.create_backends, expected.create_backends);
     assert_eq!(capabilities.exec_backends, expected.exec_backends);

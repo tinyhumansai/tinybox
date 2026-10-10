@@ -390,6 +390,61 @@ async fn uncertain_docker_create_keeps_named_container_cleanup_retryable() -> Re
 }
 
 #[tokio::test]
+async fn create_refuses_backends_missing_from_the_platform_before_owning_a_resource() -> Result<()>
+{
+    let resources = Resources::default();
+    let host = Arc::new(DelayedHost::default());
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+
+    let error = resources
+        .create_on_for_platform(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "namespace".into(),
+                workspace: Workspace::Directory(".".into()),
+                env: BTreeMap::new(),
+            },
+            host,
+            super::super::Platform::Unix,
+        )
+        .await
+        .err()
+        .ok_or_else(|| Error::failed("the Linux namespace backend was available on macOS"))?;
+
+    assert_eq!(error.wire_name(), tinybox_bus::UNSUPPORTED_BACKEND);
+    assert!(
+        resources.slot(&resource).await.is_err(),
+        "a rejected backend must not leave a resource slot behind"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn passthrough_create_on_an_unsupervised_platform_only_records_the_resource() -> Result<()> {
+    let resources = Resources::default();
+    let host = Arc::new(DelayedHost::default());
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+
+    let created = resources
+        .create_on_for_platform(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                env: BTreeMap::new(),
+            },
+            host,
+            super::super::Platform::Other,
+        )
+        .await?;
+
+    assert_eq!(created.backend, "passthrough");
+    assert_eq!(created.state, "ready");
+    resources.close(&resource).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn shutdown_waits_for_delayed_startups_and_prevents_late_publication() -> Result<()> {
     let resources = Arc::new(Resources::default());
     let host = Arc::new(DelayedHost::default());

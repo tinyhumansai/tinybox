@@ -314,7 +314,7 @@ async fn a_git_source_is_refused_before_anything_runs() -> Result<()> {
             kind: "git repository",
         })
     );
-    assert!(host.commands().is_empty(), "nothing should have been run");
+    assert_eq!(host.commands().len(), 0, "nothing should have been run");
     Ok(())
 }
 
@@ -468,7 +468,23 @@ async fn a_lost_create_reply_retains_the_record_until_named_cleanup_is_acknowled
 
     host.push_ok("");
     sandbox.destroy(&BoxId::new("box-0")?).await?;
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_releases_the_record_after_named_cleanup_succeeds() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("docker connection was interrupted");
+    host.push_ok("");
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+
+    assert_eq!(store.list()?.len(), 0);
+    let commands = host.commands();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].get(1).map(String::as_str), Some("run"));
+    assert_eq!(commands[1].get(1).map(String::as_str), Some("rm"));
     Ok(())
 }
 
@@ -480,7 +496,7 @@ async fn a_missing_named_container_completes_destroy_cleanup() -> Result<()> {
 
     sandbox.destroy(&info.id).await?;
 
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 

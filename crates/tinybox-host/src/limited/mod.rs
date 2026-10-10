@@ -251,13 +251,15 @@ async fn read(
         if count == 0 {
             return Ok(bytes);
         }
-        if budget
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
-                used.checked_add(count).filter(|total| *total <= limit)
-            })
-            .is_err()
-        {
-            return Err(Error::OutputLimitExceeded { limit });
+        let mut used = budget.load(Ordering::SeqCst);
+        loop {
+            let Some(total) = used.checked_add(count).filter(|total| *total <= limit) else {
+                return Err(Error::OutputLimitExceeded { limit });
+            };
+            match budget.compare_exchange_weak(used, total, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(actual) => used = actual,
+            }
         }
         bytes.extend_from_slice(&buffer[..count]);
     }

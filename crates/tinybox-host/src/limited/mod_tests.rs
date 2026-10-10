@@ -79,7 +79,7 @@ async fn empty_and_exact_budget_outputs_remain_successful() -> Result<()> {
     let empty = LimitedLocalHost::new(0)
         .run(&ExecRequest::new(["true"]))
         .await?;
-    assert!(empty.stdout.is_empty());
+    assert_eq!(empty.stdout.len(), 0);
     let host = LimitedLocalHost::new(3);
     let exact = host.run(&ExecRequest::new(["printf", "abc"])).await?;
     assert_eq!(exact.stdout, b"abc");

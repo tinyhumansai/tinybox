@@ -31,12 +31,14 @@ discovery-only surface. Hosts require equal majors and a module minor at least
 as new as their vocabulary, using tinybox-bus::is_compatible. This version is
 independent of package/artifact releases. Describe remains unchanged.
 
-Create requires an explicit backend. This first lifecycle interface constructs
-`passthrough`, `docker`, and `namespace` on the local host. An unsupported
-backend, including microvm without its required image configuration, fails;
-there is no passthrough fallback. Describe remains the existing summary of
-compiled providers, rather than claiming every provider is configurable through
-Create. Passthrough runs trusted code without isolation.
+Create requires an explicit backend and rejects one unavailable on the current
+platform before it creates a resource slot. `passthrough` is record-only on
+platforms where TinyBox cannot supervise native children; Docker is available
+on Unix, and the Linux namespace backend is available only on Linux. An
+unsupported backend, including microvm without its required image
+configuration, fails; there is no passthrough fallback. Describe remains the
+existing summary of compiled providers, rather than claiming every provider is
+configurable through Create. Passthrough runs trusted code without isolation.
 
 Clients call Reserve with Resource or Process(resource) before Create or Spawn.
 The module mints an opaque, single-use handle without starting native work.

@@ -12,6 +12,7 @@ use tinybox_core::{
     BoxId, BoxSpec, HostRef, MemoryStore, Placement, ProcessId, Sandbox, SandboxRef,
     WorkspaceSource,
 };
+
 use tinybus::{Error, Result};
 use tokio::sync::Mutex;
 
@@ -142,7 +143,13 @@ impl Resources {
         let host = Arc::new(tinybox_host::LimitedLocalHost::new(
             tinybox_bus::MAX_OUTPUT_BYTES,
         ));
-        self.create_with(request, host.clone(), Some(host)).await
+        self.create_with_platform(
+            request,
+            host.clone(),
+            Some(host),
+            super::Platform::current(),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -151,19 +158,33 @@ impl Resources {
         request: CreateRequest,
         host: Arc<dyn tinybox_core::Host>,
     ) -> Result<ResourceInfo> {
-        self.create_with(request, host, None).await
+        self.create_with_platform(request, host, None, super::Platform::current())
+            .await
     }
 
-    async fn create_with(
+    #[cfg(test)]
+    async fn create_on_for_platform(
+        &self,
+        request: CreateRequest,
+        host: Arc<dyn tinybox_core::Host>,
+        platform: super::Platform,
+    ) -> Result<ResourceInfo> {
+        self.create_with_platform(request, host, None, platform)
+            .await
+    }
+
+    async fn create_with_platform(
         &self,
         request: CreateRequest,
         host: Arc<dyn tinybox_core::Host>,
         collector: Option<Arc<tinybox_host::LimitedLocalHost>>,
+        platform: super::Platform,
     ) -> Result<ResourceInfo> {
         let slot = Arc::new(Mutex::new(None));
         {
             let mut state = self.state.lock().await;
             self.consume(&mut state, &request.resource, &ReserveRequest::Resource)?;
+            validate_platform_backend(platform, &request.backend)?;
             if state.entries.len() >= tinybox_bus::MAX_ACTIVE_RESOURCES {
                 return Err(failure(
                     tinybox_bus::RESOURCE_LIMIT,
@@ -659,6 +680,17 @@ fn command(request: ExecRequest) -> tinybox_core::ExecRequest {
     command.env = request.env;
     command.stdin = request.stdin;
     command
+}
+
+fn validate_platform_backend(platform: super::Platform, backend: &str) -> Result<()> {
+    if super::supports_create_backend(platform, backend) {
+        Ok(())
+    } else {
+        Err(failure(
+            tinybox_bus::UNSUPPORTED_BACKEND,
+            "sandbox backend is unavailable on this platform",
+        ))
+    }
 }
 
 async fn stop_process(
