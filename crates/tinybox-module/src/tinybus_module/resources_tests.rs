@@ -561,6 +561,67 @@ async fn pending_forward_drops_its_tunnel_when_shutdown_marks_module_closed() ->
 }
 
 #[tokio::test]
+async fn pending_forward_rechecks_closing_after_host_returns_before_publication() -> Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Arc::new(Resources::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                network: tinybox_bus::NetworkPolicy::Open,
+                ports: vec![tinybox_bus::PortMapping {
+                    guest: 8080,
+                    host: None,
+                }],
+                ..Default::default()
+            },
+            Arc::new(PendingForwardHost {
+                entered: entered.clone(),
+                release: release.clone(),
+                opens: opens.clone(),
+                closes: closes.clone(),
+            }),
+        )
+        .await?;
+    let forward = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward,
+        guest_port: 8080,
+    };
+    let runner = resources.clone();
+    let pending = tokio::spawn(async move { runner.forward(request).await });
+    entered.notified().await;
+
+    // Keep the reservation live to prove the post-host check observes the
+    // close marker itself, rather than relying on Close retiring the token.
+    resources
+        .executions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .closing
+        .insert(id.clone());
+    release.notify_one();
+    let result = pending.await.map_err(Error::failed)?;
+    assert!(
+        result.is_err(),
+        "closing rejects publication after host.forward"
+    );
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resources.close(&id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn forward_rejects_wrong_resource_and_unpublished_port_before_opening() -> Result<()> {
     let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
