@@ -15,6 +15,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Wire vocabulary version, independent of the release workflow's package version.
+///
+/// 1.0 denotes the original discovery-only surface. 1.1 adds resource
+/// reservations, owned lifecycle/operations, capabilities and terminal shutdown.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 1);
+
+/// Whether this host vocabulary can bind to a module's advertised version.
+/// The major must match and the module's minor must include every host member.
+#[must_use]
+pub fn is_compatible(module: (u32, u32)) -> bool {
+    module.0 == CONTRACT_VERSION.0 && module.1 >= CONTRACT_VERSION.1
+}
+
 /// Maximum reservation identifier length in bytes.
 pub const MAX_ID_BYTES: usize = 128;
 /// Maximum live resources in a module instance.
@@ -86,6 +99,8 @@ pub enum ReserveRequest {
 /// Backend operations with acknowledged native ownership in this module build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleCapabilities {
+    /// Wire vocabulary served by the artifact, independent of package version.
+    pub contract_version: (u32, u32),
     /// Backends accepted by Create; no fallback is performed.
     pub create_backends: Vec<String>,
     /// Backends accepted by bounded collected Exec.

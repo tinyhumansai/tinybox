@@ -106,6 +106,11 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
         stdin: None,
     };
     let capabilities: tinybox_bus::ModuleCapabilities = proxy.call("Capabilities", ()).await?;
+    if capabilities.contract_version != tinybox_bus::CONTRACT_VERSION
+        || !tinybox_bus::is_compatible(capabilities.contract_version)
+    {
+        return Err(io::Error::other("artifact contract version mismatch").into());
+    }
     let output: Option<ExecOutput> = if capabilities
         .exec_backends
         .iter()

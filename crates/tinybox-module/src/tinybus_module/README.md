@@ -26,6 +26,11 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
 
+Capabilities advertises contract version 1.1; 1.0 denotes the original
+discovery-only surface. Hosts require equal majors and a module minor at least
+as new as their vocabulary, using tinybox-bus::is_compatible. This version is
+independent of package/artifact releases. Describe remains unchanged.
+
 Create requires an explicit backend. This first lifecycle interface constructs
 `passthrough`, `docker`, and `namespace` on the local host. An unsupported
 backend, including microvm without its required image configuration, fails;

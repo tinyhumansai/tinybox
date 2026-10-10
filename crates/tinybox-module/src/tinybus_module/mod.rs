@@ -36,6 +36,7 @@ impl BoxService {
             Vec::new()
         };
         std::future::ready(Ok(tinybox_bus::ModuleCapabilities {
+            contract_version: tinybox_bus::CONTRACT_VERSION,
             create_backends: vec!["passthrough".into(), "docker".into(), "namespace".into()],
             exec_backends: supervised.clone(),
             spawn_backends: supervised,
