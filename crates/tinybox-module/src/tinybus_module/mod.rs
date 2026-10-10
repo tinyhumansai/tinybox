@@ -30,11 +30,12 @@ impl BoxService {
     }
     /// Report which operations own native cleanup on this platform.
     async fn capabilities(&self) -> TinyBusResult<tinybox_bus::ModuleCapabilities> {
-        let supervised: Vec<String> = if cfg!(unix) {
+        let mut supervised: Vec<String> = if cfg!(unix) {
             vec!["passthrough".into()]
         } else {
             Vec::new()
         };
+        supervised.push("docker".into());
         std::future::ready(Ok(tinybox_bus::ModuleCapabilities {
             contract_version: tinybox_bus::CONTRACT_VERSION,
             create_backends: vec!["passthrough".into(), "docker".into(), "namespace".into()],

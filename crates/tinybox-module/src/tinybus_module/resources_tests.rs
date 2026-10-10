@@ -66,8 +66,7 @@ async fn reservation_scope_expiry_sequence_and_pending_limits_fail_without_nativ
 }
 
 #[tokio::test]
-async fn unsupported_supervision_is_refused_without_legacy_detach_or_execution_fallback()
--> Result<()> {
+async fn docker_exec_and_detached_processes_use_the_owned_sandbox_lifecycle() -> Result<()> {
     let resources = Resources::default();
     let host = Arc::new(DelayedHost::default());
     host.release.notify_one();
@@ -91,35 +90,302 @@ async fn unsupported_supervision_is_refused_without_legacy_detach_or_execution_f
         .collector = Some(Arc::new(tinybox_host::LimitedLocalHost::new(100)));
     let command = ExecRequest {
         resource: id.clone(),
-        argv: vec!["must-not-start".into()],
+        argv: vec!["true".into()],
         cwd: None,
         env: BTreeMap::new(),
         stdin: None,
     };
-    assert_eq!(
-        resources
-            .exec(command.clone())
+    resources.exec(command.clone()).await?;
+    let process = resources
+        .spawn(SpawnRequest {
+            process: resources
+                .reserve(ReserveRequest::Process(id.clone()))
+                .await?,
+            command,
+        })
+        .await?;
+    assert_eq!(process.resource, id);
+    resources.cancel(&process).await?;
+    resources.close(&id).await?;
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct FailedDockerStopHost {
+    exec_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Host for FailedDockerStopHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        match request.argv.get(1).map(String::as_str) {
+            Some("exec") => {
+                let attempt = self
+                    .exec_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 1 {
+                    Ok(NativeOutput::new(
+                        1,
+                        Vec::new(),
+                        b"process cleanup was refused".to_vec(),
+                    ))
+                } else {
+                    Ok(NativeOutput::new(0, Vec::new(), Vec::new()))
+                }
+            }
+            Some("inspect") => Ok(NativeOutput::new(0, b"running".to_vec(), Vec::new())),
+            _ => Ok(NativeOutput::new(0, Vec::new(), Vec::new())),
+        }
+    }
+}
+
+#[tokio::test]
+async fn docker_cancel_retains_process_when_stop_command_fails() -> Result<()> {
+    let resources = Resources::default();
+    let host = Arc::new(FailedDockerStopHost::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                env: BTreeMap::new(),
+            },
+            host.clone(),
+        )
+        .await?;
+    let process = resources
+        .spawn(SpawnRequest {
+            process: resources
+                .reserve(ReserveRequest::Process(id.clone()))
+                .await?,
+            command: ExecRequest {
+                resource: id.clone(),
+                argv: vec!["sleep".into(), "30".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+            },
+        })
+        .await?;
+
+    assert!(resources.cancel(&process).await.is_err());
+    let slot = resources.slot(&id).await?;
+    assert!(
+        slot.lock()
             .await
-            .err()
-            .ok_or_else(|| Error::failed("expected unsupported operation"))?
-            .wire_name(),
-        tinybox_bus::UNSUPPORTED_OPERATION
+            .as_ref()
+            .is_some_and(|entry| entry.processes.contains_key(&process.process)),
+        "failed Docker cleanup must keep the caller-known process handle"
     );
-    assert_eq!(
-        resources
-            .spawn(SpawnRequest {
-                process: resources
-                    .reserve(ReserveRequest::Process(id.clone()))
-                    .await?,
-                command
-            })
+    resources.cancel(&process).await?;
+    assert!(
+        slot.lock()
             .await
-            .err()
-            .ok_or_else(|| Error::failed("expected unsupported spawn"))?
-            .wire_name(),
-        tinybox_bus::UNSUPPORTED_OPERATION
+            .as_ref()
+            .is_some_and(|entry| !entry.processes.contains_key(&process.process)),
+        "the process handle is released only after acknowledged cleanup"
     );
     resources.close(&id).await?;
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct LostDockerSpawnReplyHost {
+    exec_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Host for LostDockerSpawnReplyHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        match request.argv.get(1).map(String::as_str) {
+            Some("exec") => {
+                let attempt = self
+                    .exec_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt < 2 {
+                    Err(tinybox_core::Error::Backend {
+                        sandbox: "docker".into(),
+                        operation: "execute command",
+                        message: "reply lost after remote command may have started".into(),
+                    })
+                } else if request
+                    .argv
+                    .last()
+                    .is_some_and(|script| script.contains("kill -0"))
+                {
+                    Ok(NativeOutput::new(0, b"running".to_vec(), Vec::new()))
+                } else {
+                    Ok(NativeOutput::new(0, Vec::new(), Vec::new()))
+                }
+            }
+            Some("inspect") => Ok(NativeOutput::new(0, b"running".to_vec(), Vec::new())),
+            _ => Ok(NativeOutput::new(0, Vec::new(), Vec::new())),
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_docker_spawn_reply_keeps_reserved_handle_for_cleanup_retry() -> Result<()> {
+    let resources = Resources::default();
+    let host = Arc::new(LostDockerSpawnReplyHost::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                env: BTreeMap::new(),
+            },
+            host.clone(),
+        )
+        .await?;
+    let process_id = resources
+        .reserve(ReserveRequest::Process(id.clone()))
+        .await?;
+    let started = resources
+        .spawn(SpawnRequest {
+            process: process_id.clone(),
+            command: ExecRequest {
+                resource: id.clone(),
+                argv: vec!["sleep".into(), "30".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+            },
+        })
+        .await;
+    assert!(
+        started.is_err(),
+        "the lost startup reply must reach the caller"
+    );
+    assert_eq!(
+        host.exec_attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    let slot = resources.slot(&id).await?;
+    assert!(
+        slot.lock().await.as_ref().is_some_and(|entry| {
+            entry
+                .processes
+                .get(&process_id)
+                .is_some_and(OwnedProcess::is_running)
+        }),
+        "the consumed reservation remains a caller-known cleanup handle"
+    );
+    assert!(
+        resources
+            .is_running(&ProcessRef {
+                resource: id.clone(),
+                process: process_id.clone(),
+            })
+            .await?,
+        "a retained Docker process is still queryable while cleanup is retryable"
+    );
+    resources
+        .cancel(&ProcessRef {
+            resource: id.clone(),
+            process: process_id.clone(),
+        })
+        .await?;
+    assert_eq!(
+        host.exec_attempts.load(std::sync::atomic::Ordering::SeqCst),
+        4
+    );
+    resources.close(&id).await?;
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct LostDockerCreateReplyHost {
+    commands: std::sync::Mutex<Vec<Vec<String>>>,
+    rm_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Host for LostDockerCreateReplyHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        self.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.argv.clone());
+        match request.argv.get(1).map(String::as_str) {
+            Some("run") => Err(tinybox_core::Error::Backend {
+                sandbox: "docker".into(),
+                operation: "run",
+                message: "reply lost after container creation".into(),
+            }),
+            Some("rm") => {
+                let attempt = self
+                    .rm_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 0 {
+                    Ok(NativeOutput::new(
+                        1,
+                        Vec::new(),
+                        b"daemon temporarily unavailable".to_vec(),
+                    ))
+                } else {
+                    Ok(NativeOutput::new(0, Vec::new(), Vec::new()))
+                }
+            }
+            _ => Ok(NativeOutput::new(0, b"running".to_vec(), Vec::new())),
+        }
+    }
+}
+
+#[tokio::test]
+async fn uncertain_docker_create_keeps_named_container_cleanup_retryable() -> Result<()> {
+    let resources = Resources::default();
+    let host = Arc::new(LostDockerCreateReplyHost::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    let created = resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock-image".into()),
+                env: BTreeMap::new(),
+            },
+            host.clone(),
+        )
+        .await;
+
+    assert!(
+        created.is_err(),
+        "the lost create reply must reach the caller"
+    );
+    assert_eq!(
+        host.rm_attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(
+        resources.slot(&id).await.is_ok(),
+        "module must retain cleanup ownership"
+    );
+    resources.close(&id).await?;
+    assert_eq!(
+        host.rm_attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert!(
+        resources.slot(&id).await.is_err(),
+        "successful retry releases the slot"
+    );
     Ok(())
 }
 
@@ -504,7 +770,9 @@ impl Host for DelayedHost {
             self.started.notify_one();
             self.release.notified().await;
         }
-        if request.argv.get(1).is_some_and(|arg| arg == "exec") {
+        if request.argv.get(1).is_some_and(|arg| arg == "exec")
+            && request.argv.iter().any(|arg| arg == "mock-workload")
+        {
             self.exec_started.notify_one();
             self.exec_release.notified().await;
             self.exec_finished

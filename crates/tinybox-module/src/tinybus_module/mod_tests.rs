@@ -35,11 +35,12 @@ async fn capabilities_and_shutdown_report_actual_supported_ownership() -> tinybu
         capabilities.create_backends,
         ["passthrough", "docker", "namespace"]
     );
-    let supervised: Vec<String> = if cfg!(unix) {
+    let mut supervised: Vec<String> = if cfg!(unix) {
         vec!["passthrough".into()]
     } else {
         Vec::new()
     };
+    supervised.push("docker".into());
     assert_eq!(capabilities.exec_backends, supervised);
     assert_eq!(capabilities.spawn_backends, supervised);
     service.shutdown().await?;

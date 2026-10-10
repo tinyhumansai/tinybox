@@ -438,6 +438,53 @@ async fn a_stopped_container_accepts_no_commands() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_nonzero_detached_stop_is_reported_as_unfinished_cleanup() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    let process = tinybox_core::ProcessId::new("process-1")?;
+    host.push_ok("running");
+    host.push_failure("process cleanup was refused");
+
+    assert_eq!(
+        sandbox.stop(&info.id, &process).await.err(),
+        Some(Error::Backend {
+            sandbox: NAME.to_owned(),
+            operation: "stop a detached process",
+            message: "process cleanup was refused".to_owned(),
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_retains_the_record_until_named_cleanup_is_acknowledged() -> Result<()>
+{
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("docker connection was interrupted");
+    host.push_failure("daemon temporarily unavailable");
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+    assert_eq!(store.list()?.len(), 1);
+
+    host.push_ok("");
+    sandbox.destroy(&BoxId::new("box-0")?).await?;
+    assert!(store.list()?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_missing_named_container_completes_destroy_cleanup() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    host.push_failure("Error: No such container: tinybox-default-box-0");
+
+    sandbox.destroy(&info.id).await?;
+
+    assert!(store.list()?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn inspect_reports_the_containers_real_state_not_the_record() -> Result<()> {
     let (sandbox, host, _store) = sandbox();
     let info = sandbox.create(&spec()?).await?;

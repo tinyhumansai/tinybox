@@ -146,6 +146,20 @@ impl DockerSandbox {
         }
         Ok(output.stdout_lossy().trim().to_owned())
     }
+
+    /// Remove a named container, treating Docker's explicit missing-container
+    /// response as an already-completed cleanup.
+    async fn remove_container(&self, argv: Vec<String>) -> Result<()> {
+        let output = self.host.run(&ExecRequest::new(argv)).await?;
+        if output.succeeded() || output.stderr_lossy().contains("No such container") {
+            return Ok(());
+        }
+        Err(Error::Backend {
+            sandbox: NAME.to_owned(),
+            operation: "remove the container",
+            message: output.stderr_lossy().trim().to_owned(),
+        })
+    }
 }
 
 #[async_trait]
@@ -188,8 +202,17 @@ impl Sandbox for DockerSandbox {
         };
 
         if let Err(error) = self.docker("create the container", argv).await {
-            // No container, so the record would point at nothing.
-            let _ = self.store.remove(&info.id);
+            // The daemon may have created the named container before the
+            // response was lost. Reconcile by its deterministic name. Keep the
+            // record when cleanup cannot be acknowledged so callers can retry
+            // through `destroy` instead of losing the only owner.
+            if self
+                .remove_container(args::remove(&self.namespace, &info.id))
+                .await
+                .is_ok()
+            {
+                let _ = self.store.remove(&info.id);
+            }
             return Err(error);
         }
         Ok(info)
@@ -214,8 +237,16 @@ impl Sandbox for DockerSandbox {
     }
 
     async fn stop(&self, id: &BoxId, process: &ProcessId) -> Result<()> {
-        self.exec(id, &detach::stop(process, detach::DEFAULT_GRACE))
+        let output = self
+            .exec(id, &detach::stop(process, detach::DEFAULT_GRACE))
             .await?;
+        if !output.succeeded() {
+            return Err(Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "stop a detached process",
+                message: output.stderr_lossy().trim().to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -284,7 +315,7 @@ impl Sandbox for DockerSandbox {
         self.store.get(id)?;
         // Remove the container first: a record without a container is
         // recoverable, a container without a record is a leak.
-        self.docker("remove the container", args::remove(&self.namespace, id))
+        self.remove_container(args::remove(&self.namespace, id))
             .await?;
         self.store.remove(id)
     }

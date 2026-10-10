@@ -9,7 +9,8 @@ use tinybox_bus::{
 };
 use tinybox_core::clock::{Clock, SystemClock};
 use tinybox_core::{
-    BoxId, BoxSpec, HostRef, MemoryStore, Placement, Sandbox, SandboxRef, WorkspaceSource,
+    BoxId, BoxSpec, HostRef, MemoryStore, Placement, ProcessId, Sandbox, SandboxRef,
+    WorkspaceSource,
 };
 use tinybus::{Error, Result};
 use tokio::sync::Mutex;
@@ -17,9 +18,24 @@ use tokio::sync::Mutex;
 struct Resource {
     sandbox: Arc<dyn Sandbox>,
     id: BoxId,
-    processes: BTreeMap<ResourceId, tinybox_host::ManagedProcess>,
+    processes: BTreeMap<ResourceId, OwnedProcess>,
     local_sandbox: Option<Arc<tinybox_core::PassthroughSandbox>>,
     collector: Option<Arc<tinybox_host::LimitedLocalHost>>,
+}
+
+enum OwnedProcess {
+    Native(tinybox_host::ManagedProcess),
+    Sandbox { id: ProcessId, stopped: bool },
+}
+
+#[cfg(test)]
+impl OwnedProcess {
+    fn is_running(&self) -> bool {
+        match self {
+            Self::Native(process) => process.is_running(),
+            Self::Sandbox { stopped, .. } => !stopped,
+        }
+    }
 }
 
 /// Registry owned by one module instance; close and operations are serialized.
@@ -171,12 +187,13 @@ impl Resources {
             let mut local_sandbox = None;
             let sandbox: Arc<dyn Sandbox> = match request.backend.as_str() {
                 "passthrough" => {
-                    let sandbox = Arc::new(tinybox_core::PassthroughSandbox::new(host, store));
+                    let sandbox =
+                        Arc::new(tinybox_core::PassthroughSandbox::new(host, store.clone()));
                     local_sandbox = Some(sandbox.clone());
                     sandbox
                 }
-                "docker" => Arc::new(tinybox_docker::DockerSandbox::new(host, store)),
-                "namespace" => Arc::new(tinybox_linux::NamespaceSandbox::new(host, store)),
+                "docker" => Arc::new(tinybox_docker::DockerSandbox::new(host, store.clone())),
+                "namespace" => Arc::new(tinybox_linux::NamespaceSandbox::new(host, store.clone())),
                 _ => {
                     return Err(failure(
                         tinybox_bus::UNSUPPORTED_BACKEND,
@@ -194,10 +211,28 @@ impl Resources {
             );
             let mut spec = BoxSpec::new(placement, source);
             spec.env = request.env;
-            let info = sandbox
-                .create(&spec)
-                .await
-                .map_err(|error| backend_error(&error))?;
+            let info = match sandbox.create(&spec).await {
+                Ok(info) => info,
+                Err(error) => {
+                    // Docker may have created the named container even if its
+                    // reply was lost. The backend retains its store record only
+                    // when named cleanup failed; keep the sandbox and id in
+                    // this caller-known slot so Close/Shutdown can retry it.
+                    if request.backend == "docker"
+                        && let Ok(records) = tinybox_core::Store::list(store.as_ref())
+                        && let Some(info) = records.into_iter().next()
+                    {
+                        *slot = Some(Resource {
+                            sandbox,
+                            id: info.id,
+                            processes: BTreeMap::new(),
+                            collector,
+                            local_sandbox,
+                        });
+                    }
+                    return Err(backend_error(&error));
+                }
+            };
             let result = ResourceInfo {
                 resource: request.resource.clone(),
                 backend: request.backend,
@@ -260,7 +295,10 @@ impl Resources {
             .as_ref()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
         let resource = request.resource.clone();
-        if entry.collector.is_some() && entry.local_sandbox.is_none() {
+        if entry.collector.is_some()
+            && entry.local_sandbox.is_none()
+            && entry.sandbox.name() != tinybox_docker::NAME
+        {
             return Err(failure(
                 tinybox_bus::UNSUPPORTED_OPERATION,
                 "module Exec requires supervised local passthrough ownership",
@@ -358,25 +396,70 @@ impl Resources {
             ));
         }
         let resource = request.command.resource.clone();
-        let local = entry.local_sandbox.as_ref().ok_or_else(|| {
-            failure(
+        if let Some(local) = entry.local_sandbox.as_ref() {
+            let collector = entry.collector.as_ref().ok_or_else(|| {
+                failure(
+                    tinybox_bus::UNSUPPORTED_OPERATION,
+                    "module Spawn requires the owned local collector",
+                )
+            })?;
+            let resolved = local
+                .resolve_command(&entry.id, &command(request.command))
+                .map_err(|error| backend_error(&error))?;
+            let native = collector
+                .spawn(&resolved)
+                .map_err(|error| backend_error(&error))?;
+            entry
+                .processes
+                .insert(request.process.clone(), OwnedProcess::Native(native));
+        } else if entry.sandbox.name() == tinybox_docker::NAME {
+            let process_id =
+                ProcessId::new(request.process.0.clone()).map_err(|error| backend_error(&error))?;
+            let start = tinybox_core::detach::start(&process_id, &command(request.command))
+                .map_err(|error| backend_error(&error))?;
+            entry.processes.insert(
+                request.process.clone(),
+                OwnedProcess::Sandbox {
+                    id: process_id,
+                    stopped: false,
+                },
+            );
+            let started = entry.sandbox.exec(&entry.id, &start).await;
+            let startup = started
+                .map_err(|error| backend_error(&error))
+                .and_then(|output| {
+                    if output.succeeded() {
+                        Ok(())
+                    } else {
+                        Err(backend_error(&tinybox_core::Error::Backend {
+                            sandbox: tinybox_docker::NAME.into(),
+                            operation: "start a detached process",
+                            message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                        }))
+                    }
+                });
+            if cancelled.load(Ordering::SeqCst) || startup.is_err() {
+                if let Some(process) = entry.processes.get_mut(&request.process)
+                    && stop_process(&entry.sandbox, &entry.id, process)
+                        .await
+                        .is_ok()
+                {
+                    entry.processes.remove(&request.process);
+                }
+                if cancelled.load(Ordering::SeqCst) {
+                    return Err(failure(
+                        tinybox_bus::EXEC_CANCELLED,
+                        "process startup cancelled",
+                    ));
+                }
+                startup?;
+            }
+        } else {
+            return Err(failure(
                 tinybox_bus::UNSUPPORTED_OPERATION,
-                "module Spawn requires supervised local passthrough ownership",
-            )
-        })?;
-        let collector = entry.collector.as_ref().ok_or_else(|| {
-            failure(
-                tinybox_bus::UNSUPPORTED_OPERATION,
-                "module Spawn requires the owned local collector",
-            )
-        })?;
-        let resolved = local
-            .resolve_command(&entry.id, &command(request.command))
-            .map_err(|error| backend_error(&error))?;
-        let native = collector
-            .spawn(&resolved)
-            .map_err(|error| backend_error(&error))?;
-        entry.processes.insert(request.process.clone(), native);
+                "module Spawn requires a backend with owned process cleanup",
+            ));
+        }
         Ok(ProcessRef {
             resource,
             process: request.process,
@@ -393,10 +476,17 @@ impl Resources {
             validate_id(&process.process)?;
             return Ok(false);
         };
-        let running = native.is_running();
+        let running = match native {
+            OwnedProcess::Native(native) => native.is_running(),
+            OwnedProcess::Sandbox { id, .. } => entry
+                .sandbox
+                .is_running(&entry.id, id)
+                .await
+                .map_err(|error| backend_error(&error))?,
+        };
         if !running {
-            let result = native.stop().await.map_err(|error| backend_error(&error));
-            if native.is_cleaned() {
+            let result = stop_process(&entry.sandbox, &entry.id, native).await;
+            if result.is_ok() {
                 entry.processes.remove(&process.process);
             }
             result?;
@@ -437,8 +527,8 @@ impl Resources {
         let Some(native) = entry.processes.get_mut(&process.process) else {
             return Ok(());
         };
-        let result = native.stop().await.map_err(|error| backend_error(&error));
-        if native.is_cleaned() {
+        let result = stop_process(&entry.sandbox, &entry.id, native).await;
+        if result.is_ok() {
             entry.processes.remove(&process.process);
         }
         result
@@ -478,9 +568,11 @@ impl Resources {
         let mut slot = slot.lock().await;
         let mut failure = None;
         if let Some(entry) = slot.as_mut() {
+            let sandbox = entry.sandbox.clone();
+            let id = entry.id.clone();
             for process in entry.processes.values_mut() {
-                if let Err(error) = process.stop().await {
-                    failure.get_or_insert_with(|| backend_error(&error));
+                if let Err(error) = stop_process(&sandbox, &id, process).await {
+                    failure.get_or_insert(error);
                 }
             }
             if let Some(collector) = &entry.collector
@@ -488,7 +580,10 @@ impl Resources {
             {
                 failure.get_or_insert_with(|| backend_error(&error));
             }
-            entry.processes.retain(|_, process| !process.is_cleaned());
+            entry.processes.retain(|_, process| match process {
+                OwnedProcess::Native(process) => !process.is_cleaned(),
+                OwnedProcess::Sandbox { stopped, .. } => !*stopped,
+            });
             if !entry.processes.is_empty() {
                 return failure
                     .map_or_else(|| Err(Error::failed("native cleanup remains pending")), Err);
@@ -564,6 +659,24 @@ fn command(request: ExecRequest) -> tinybox_core::ExecRequest {
     command.env = request.env;
     command.stdin = request.stdin;
     command
+}
+
+async fn stop_process(
+    sandbox: &Arc<dyn Sandbox>,
+    box_id: &BoxId,
+    process: &mut OwnedProcess,
+) -> Result<()> {
+    match process {
+        OwnedProcess::Native(native) => native.stop().await.map_err(|error| backend_error(&error)),
+        OwnedProcess::Sandbox { id, stopped } => {
+            sandbox
+                .stop(box_id, id)
+                .await
+                .map_err(|error| backend_error(&error))?;
+            *stopped = true;
+            Ok(())
+        }
+    }
 }
 
 fn failure(name: &str, message: &str) -> Error {
