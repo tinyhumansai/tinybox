@@ -111,7 +111,7 @@ fn it_is_the_only_backend_that_declares_hardware_isolation() {
     assert!(caps.is_suitable_for_untrusted_code());
     // The guest is given fixed vCPUs and fixed memory by the hypervisor and
     // cannot see that any more exists, which is a stronger limit than a cgroup.
-    assert!(caps.supports(Capability::ResourceLimits));
+    assert!(!caps.supports(Capability::ResourceLimits));
     // Each command boots a fresh VM, so there is nothing persistent to capture.
     assert_eq!(caps.snapshot, SnapshotSupport::None);
     assert!(!caps.supports(Capability::Fork));
@@ -615,4 +615,45 @@ async fn the_workspace_root_itself_is_not_written_as_a_file() -> Result<()> {
 
     assert_eq!(output.exit_code, 0);
     Ok(())
+}
+
+#[test]
+fn preflight_reports_each_enforced_boundary_without_claiming_disk() {
+    use tinybox_core::{Constraint, Enforcement};
+    let backend = sandbox(ScriptedHost::booting("", 0));
+    let support = backend.constraint_support();
+    assert_eq!(
+        support.enforcement(Constraint::Filesystem),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Network),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Cpu),
+        Enforcement::BestEffort
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Memory),
+        Enforcement::BestEffort
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Pids),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Disk),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Subprocess),
+        Enforcement::Unsupported
+    );
+    assert!(
+        backend
+            .require(&[Constraint::Filesystem, Constraint::Network])
+            .is_ok()
+    );
+    assert!(backend.require(&[Constraint::Disk]).is_err());
 }

@@ -51,8 +51,8 @@ pub struct NamespaceSandbox {
 impl NamespaceSandbox {
     /// Run sandboxed commands on `host`, recording boxes in `store`.
     ///
-    /// Resource limits are **not** declared: they need a systemd user session
-    /// to delegate a cgroup, which not every machine has. Ask for them with
+    /// CPU, memory and process limits need a systemd user session to delegate
+    /// a cgroup, which not every machine has. Enable them with
     /// [`NamespaceSandbox::with_cgroup_limits`].
     #[must_use]
     pub fn new(host: Arc<dyn Host>, store: Arc<dyn Store>) -> Self {
@@ -84,20 +84,15 @@ impl NamespaceSandbox {
         self
     }
 
-    /// What this sandbox declares, given whether limits are enabled.
+    /// Lifecycle capabilities (disk quotas remain unsupported with cgroups).
     ///
     /// No snapshots, because each command is a fresh sandbox and there is no
     /// persistent filesystem to capture. No forking, for the same reason. No
     /// port forwarding: the network namespace is empty by design and there is
     /// no daemon to publish through.
     #[must_use]
-    pub const fn declared_capabilities(limits: bool) -> SandboxCapabilities {
-        let declared = SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None);
-        if limits {
-            declared.with_resource_limits()
-        } else {
-            declared
-        }
+    pub const fn declared_capabilities(_limits: bool) -> SandboxCapabilities {
+        SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None)
     }
 }
 
@@ -109,6 +104,23 @@ impl Sandbox for NamespaceSandbox {
 
     fn capabilities(&self) -> SandboxCapabilities {
         Self::declared_capabilities(self.limits)
+    }
+
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        use tinybox_core::Constraint::{Cpu, Filesystem, Memory, Network, Pids};
+        use tinybox_core::Enforcement::Enforced;
+        if self.limits {
+            tinybox_core::ConstraintSupport::NONE
+                .with(Filesystem, Enforced)
+                .with(Network, Enforced)
+                .with(Cpu, Enforced)
+                .with(Memory, Enforced)
+                .with(Pids, Enforced)
+        } else {
+            tinybox_core::ConstraintSupport::NONE
+                .with(Filesystem, Enforced)
+                .with(Network, Enforced)
+        }
     }
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {

@@ -84,3 +84,16 @@ fn errors_implement_the_standard_error_trait() {
     assert_eq!(as_std.to_string(), "no box with id build-1");
     assert!(as_std.source().is_none());
 }
+
+#[test]
+fn constraint_refusals_use_lowercase_user_facing_labels() {
+    let error = Error::ConstraintNotEnforced {
+        sandbox: "seatbelt".into(),
+        constraint: crate::Constraint::Filesystem,
+        enforcement: crate::Enforcement::BestEffort,
+    };
+    assert_eq!(
+        error.to_string(),
+        "sandbox seatbelt cannot enforce filesystem: best effort"
+    );
+}

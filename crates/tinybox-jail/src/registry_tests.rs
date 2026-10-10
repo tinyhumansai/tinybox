@@ -249,7 +249,7 @@ fn persist_writes_index_file() {
 fn base_accessor_returns_open_dir() {
     let base = tempdir("base-accessor");
     let reg = JailRegistry::open(&base).unwrap();
-    assert_eq!(reg.base(), base.path());
+    assert_eq!(reg.base(), base.path().canonicalize().unwrap());
 }
 
 #[test]
@@ -383,7 +383,10 @@ fn failed_index_write_after_delete_keeps_in_memory_removal() {
 
     let error = reg.delete(&record.id).unwrap_err();
 
-    assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+    // The OS maps writing a directory differently (Windows: PermissionDenied,
+    // Unix: IsADirectory). Compare with the same independent filesystem failure.
+    let expected = fs::write(&blocked_tmp, b"independent probe").unwrap_err();
+    assert_eq!(error.kind(), expected.kind());
     assert!(!record.dir.exists());
     assert!(reg.get(&record.id).is_none());
 }
@@ -409,4 +412,175 @@ fn spawn_rejects_a_jail_directory_removed_after_creation() {
         .err()
         .map(|error| error.kind());
     assert_eq!(error, Some(io::ErrorKind::NotFound));
+}
+
+#[cfg(unix)]
+#[test]
+fn removed_jail_under_symlinked_registry_base_can_be_deleted() -> io::Result<()> {
+    let root = tempdir("linked-base");
+    let real = root.path().join("real");
+    fs::create_dir(&real)?;
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked)?;
+    let reg = JailRegistry::open(&linked)?;
+    let record = reg.create("removed")?;
+    fs::remove_dir_all(&record.dir)?;
+    reg.delete(&record.id)?;
+    assert!(reg.get(&record.id).is_none());
+    assert!(JailRegistry::open(&linked)?.get(&record.id).is_none());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn removed_jail_under_symlinked_base_reports_missing_not_outside() -> io::Result<()> {
+    let root = tempdir("linked-missing");
+    let real = root.path().join("real");
+    fs::create_dir(&real)?;
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked)?;
+    let reg = JailRegistry::open(&linked)?;
+    let record = reg.create("removed")?;
+    fs::remove_dir_all(&record.dir)?;
+    assert_eq!(
+        reg.spawn_in_with(&record.id, &super::super::NoopBackend, Command::new("true"))
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_jail_through_outside_symlink_remains_forbidden() -> io::Result<()> {
+    let root = tempdir("outside-link");
+    let outside = tempdir("outside-target");
+    let reg = JailRegistry::open(root.path())?;
+    let record = reg.create("corrupt")?;
+    let link = root.path().join("outside");
+    std::os::unix::fs::symlink(outside.path(), &link)?;
+    reg.index
+        .lock()
+        .unwrap()
+        .records
+        .get_mut(&record.id)
+        .unwrap()
+        .dir = link.join("missing/nested");
+    assert_eq!(
+        reg.delete(&record.id).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(
+        reg.spawn_in_with(&record.id, &super::super::NoopBackend, Command::new("true"))
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert!(reg.get(&record.id).is_some());
+    assert!(record.dir.is_dir());
+    Ok(())
+}
+
+#[test]
+fn trusted_base_parent_components_are_normalized_before_creating_records() -> io::Result<()> {
+    let root = tempdir("normalized-base");
+    let base = root.path().join("base");
+    fs::create_dir(&base)?;
+    let lexical = base.join("..").join("base");
+    let reg = JailRegistry::open(&lexical)?;
+    let record = reg.create("normalized")?;
+    assert_eq!(
+        reg.jail_for(&record.id)?.root,
+        base.canonicalize()?.join(&record.id)
+    );
+    let mut command = Command::new(if cfg!(windows) { "cmd" } else { "true" });
+    if cfg!(windows) {
+        command.args(["/C", "exit"]);
+    }
+    assert!(
+        reg.spawn_in_with(&record.id, &super::super::NoopBackend, command)?
+            .wait()?
+            .success()
+    );
+    reg.delete(&record.id)?;
+    assert!(reg.get(&record.id).is_none());
+    Ok(())
+}
+
+#[test]
+fn old_records_inherit_only_normalized_trusted_base_components() -> io::Result<()> {
+    let root = tempdir("legacy-base");
+    let base = root.path().join("base");
+    fs::create_dir(&base)?;
+    let lexical = base.join("..").join("base");
+    let reg = JailRegistry::open(&base)?;
+    let record = reg.create("legacy")?;
+    {
+        let mut index = reg.index.lock().unwrap();
+        index.records.get_mut(&record.id).unwrap().dir = lexical.join(&record.id);
+        reg.persist(&index)?;
+    }
+    drop(reg);
+    let reopened = JailRegistry::open(&lexical)?;
+    assert_eq!(
+        reopened.jail_for(&record.id)?.root,
+        base.canonicalize()?.join(&record.id)
+    );
+    fs::remove_dir_all(&record.dir)?;
+    reopened.delete(&record.id)?;
+    assert!(reopened.get(&record.id).is_none());
+    Ok(())
+}
+
+#[test]
+fn normalized_trusted_base_does_not_adopt_corrupt_suffix_traversal() -> io::Result<()> {
+    let root = tempdir("corrupt-suffix");
+    let base = root.path().join("base");
+    fs::create_dir(&base)?;
+    let lexical = base.join("..").join("base");
+    let reg = JailRegistry::open(&base)?;
+    let record = reg.create("corrupt")?;
+    {
+        let mut index = reg.index.lock().unwrap();
+        index.records.get_mut(&record.id).unwrap().dir = lexical.join("child/..").join(&record.id);
+        reg.persist(&index)?;
+    }
+    let reopened = JailRegistry::open(&lexical)?;
+    assert_eq!(
+        reopened
+            .jail_for(&record.id)
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(
+        reopened.delete(&record.id).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert!(record.dir.is_dir());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn old_symlink_base_records_work_when_reopened_by_the_real_base() -> io::Result<()> {
+    let root = tempdir("legacy-alias");
+    let base = root.path().join("real");
+    fs::create_dir(&base)?;
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&base, &alias)?;
+    let reg = JailRegistry::open(&base)?;
+    let record = reg.create("legacy-alias")?;
+    {
+        let mut index = reg.index.lock().unwrap();
+        index.records.get_mut(&record.id).unwrap().dir = alias.join(&record.id);
+        reg.persist(&index)?;
+    }
+    let reopened = JailRegistry::open(&base)?;
+    assert_eq!(reopened.jail_for(&record.id)?.root, record.dir);
+    fs::remove_dir_all(&record.dir)?;
+    reopened.delete(&record.id)?;
+    assert!(reopened.get(&record.id).is_none());
+    Ok(())
 }

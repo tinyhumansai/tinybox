@@ -526,3 +526,22 @@ mod defaults {
         Ok(())
     }
 }
+
+#[test]
+fn unknown_sandbox_constraints_are_conservative_through_a_trait_object() {
+    let sandbox: &dyn Sandbox = &FakeSandbox::new(CONTAINER);
+    assert_eq!(sandbox.constraint_support(), crate::ConstraintSupport::NONE);
+    assert_eq!(
+        sandbox
+            .plan_check(&crate::Constraint::ALL)
+            .constraints
+            .len(),
+        7
+    );
+    for constraint in crate::Constraint::ALL {
+        assert!(matches!(
+            sandbox.require(&[constraint]),
+            Err(Error::ConstraintNotEnforced { .. })
+        ));
+    }
+}

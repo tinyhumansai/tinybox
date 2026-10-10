@@ -121,7 +121,7 @@ fn it_declares_kernel_isolation_and_filesystem_snapshots() {
     // The first backend that is a defensible place for untrusted code.
     assert!(caps.is_suitable_for_untrusted_code());
     assert!(caps.supports(Capability::Fork));
-    assert!(caps.supports(Capability::ResourceLimits));
+    assert!(!caps.supports(Capability::ResourceLimits));
     // `docker pause` exists, but no trait method reaches it, so it is not
     // claimed.
     assert!(!caps.supports(Capability::PauseResume));
@@ -850,4 +850,39 @@ fn detach_is_declared_because_a_container_persists_between_commands() {
     let declared = DockerSandbox::declared_capabilities();
 
     assert!(declared.supports(Capability::Detach));
+}
+
+#[test]
+fn preflight_reports_each_enforced_boundary_without_claiming_disk() {
+    use tinybox_core::{Constraint, Enforcement};
+    let (backend, _, _) = sandbox();
+    let support = backend.constraint_support();
+    assert_eq!(
+        support.enforcement(Constraint::Filesystem),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Network),
+        Enforcement::Enforced
+    );
+    assert_eq!(support.enforcement(Constraint::Cpu), Enforcement::Enforced);
+    assert_eq!(
+        support.enforcement(Constraint::Memory),
+        Enforcement::Enforced
+    );
+    assert_eq!(support.enforcement(Constraint::Pids), Enforcement::Enforced);
+    assert_eq!(
+        support.enforcement(Constraint::Disk),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Subprocess),
+        Enforcement::Unsupported
+    );
+    assert!(
+        backend
+            .require(&[Constraint::Filesystem, Constraint::Network])
+            .is_ok()
+    );
+    assert!(backend.require(&[Constraint::Disk]).is_err());
 }

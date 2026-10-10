@@ -71,18 +71,32 @@ impl Jail {
         self
     }
 
-    /// Asks the backend to block network access where it can.
+    /// Requests network denial; strict preflight refuses unsupported backends.
     #[must_use]
     pub fn deny_net(mut self) -> Self {
         self.allow_net = false;
         self
     }
 
-    /// Asks the backend to forbid spawning further subprocesses where it can.
+    /// Requests subprocess denial; strict preflight refuses unsupported backends.
     #[must_use]
     pub fn deny_subprocess(mut self) -> Self {
         self.allow_subprocess = false;
         self
+    }
+
+    /// Hard constraints implied by this jail's grants and denial flags.
+    #[must_use]
+    pub fn constraints(&self) -> Vec<tinybox_core::Constraint> {
+        use tinybox_core::Constraint;
+        let mut constraints = vec![Constraint::Filesystem];
+        if !self.allow_net {
+            constraints.push(Constraint::Network);
+        }
+        if !self.allow_subprocess {
+            constraints.push(Constraint::Subprocess);
+        }
+        constraints
     }
 
     /// Canonicalize `root`, `read_only` and `read_write` so backends never see `..` or
@@ -129,6 +143,39 @@ pub trait JailBackend: Send + Sync {
     /// on this kernel build. Auto-detection consults this before returning
     /// a backend.
     fn is_available(&self) -> bool;
+
+    /// Declares implemented constraints; unknown backends claim nothing.
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        tinybox_core::ConstraintSupport::NONE
+    }
+
+    /// Process isolation provided by this backend, independent of path checks.
+    fn isolation(&self) -> tinybox_core::IsolationLevel {
+        tinybox_core::IsolationLevel::None
+    }
+
+    /// Whether the backend confines processes sufficiently for untrusted code.
+    fn is_suitable_for_untrusted_code(&self) -> bool {
+        self.isolation() >= tinybox_core::IsolationLevel::Kernel
+            && self
+                .constraint_support()
+                .enforcement(tinybox_core::Constraint::Filesystem)
+                == tinybox_core::Enforcement::Enforced
+    }
+
+    /// Inspect all hard constraints a directory jail requests.
+    fn plan_check(&self, jail: &Jail) -> tinybox_core::PlanCheck {
+        self.constraint_support().plan_check(&jail.constraints())
+    }
+
+    /// Refuse incomplete filesystem, network or subprocess confinement.
+    ///
+    /// # Errors
+    /// Returns a typed constraint refusal before any child is spawned.
+    fn require(&self, jail: &Jail) -> tinybox_core::Result<()> {
+        self.constraint_support()
+            .require(self.name(), &jail.constraints())
+    }
 
     /// Spawn `cmd` under the jail described by `jail`. Backends own how the
     /// jail is materialized (Landlock ruleset, sandbox-exec wrapper,

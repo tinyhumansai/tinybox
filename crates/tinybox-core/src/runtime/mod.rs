@@ -102,6 +102,29 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     /// unsupported requests before they reach the implementation.
     fn capabilities(&self) -> SandboxCapabilities;
 
+    /// Per-constraint enforcement, conservatively unsupported by default.
+    fn constraint_support(&self) -> crate::ConstraintSupport {
+        crate::ConstraintSupport::NONE
+    }
+
+    /// Inspect a requested execution plan without starting a workload.
+    fn plan_check(&self, requested: &[crate::Constraint]) -> crate::PlanCheck {
+        self.constraint_support().plan_check(requested)
+    }
+
+    /// Require fully implemented constraints before allocating or executing.
+    ///
+    /// This checks declarations only; callers must still propagate backend
+    /// setup failures. Call it explicitly before [`Self::create`] when a
+    /// constraint is mandatory: lifecycle methods do not automatically treat
+    /// every resource field in a [`BoxSpec`] as a hard requirement.
+    ///
+    /// # Errors
+    /// Returns [`Error::ConstraintNotEnforced`] for partial or absent support.
+    fn require(&self, requested: &[crate::Constraint]) -> Result<()> {
+        self.constraint_support().require(self.name(), requested)
+    }
+
     /// Create a box from `spec` without starting any workload in it.
     ///
     /// # Errors

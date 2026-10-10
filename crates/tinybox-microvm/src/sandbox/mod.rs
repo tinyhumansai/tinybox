@@ -116,7 +116,7 @@ impl MicroVmSandbox {
 
     /// What this sandbox declares.
     ///
-    /// Resource limits are real and enforced by the hypervisor rather than by a
+    /// Guest sizing is implemented by the hypervisor rather than by a
     /// cgroup: the guest is given a fixed number of vCPUs and a fixed amount of
     /// memory, and it has no way to exceed either — it cannot see that any more
     /// exists.
@@ -127,7 +127,6 @@ impl MicroVmSandbox {
     #[must_use]
     pub const fn declared_capabilities() -> SandboxCapabilities {
         SandboxCapabilities::new(IsolationLevel::Hardware, SnapshotSupport::None)
-            .with_resource_limits()
     }
 
     /// The workspace directory a spec names.
@@ -156,6 +155,16 @@ impl Sandbox for MicroVmSandbox {
 
     fn capabilities(&self) -> SandboxCapabilities {
         Self::declared_capabilities()
+    }
+
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        use tinybox_core::Constraint::{Cpu, Filesystem, Memory, Network};
+        use tinybox_core::Enforcement::{BestEffort, Enforced};
+        tinybox_core::ConstraintSupport::NONE
+            .with(Filesystem, Enforced)
+            .with(Network, Enforced)
+            .with(Memory, BestEffort)
+            .with(Cpu, BestEffort)
     }
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {

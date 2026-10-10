@@ -295,6 +295,25 @@ fn assert_default_name<B: JailBackend + Default>(name: &str) {
 fn launcher_does_not_restore_inherited_environment_after_env_clear() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
+    const SENTINEL: &str = "TINYBOX_JAIL_TEST_INHERITED_SECRET";
+    if std::env::var_os(SENTINEL).is_none() {
+        // Set a parent-only sentinel in a subprocess; never mutate the shared
+        // environment of parallel test threads.
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "macos::tests::launcher_does_not_restore_inherited_environment_after_env_clear",
+                "--nocapture",
+            ])
+            .env(SENTINEL, "parent-only-secret")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "isolated test failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return Ok(());
+    }
     let root = tempfile::tempdir()?;
     let launcher = root.path().join("launcher");
     fs::write(&launcher, "#!/bin/sh\nshift 2\nexec \"$@\"\n")?;
@@ -308,13 +327,14 @@ fn launcher_does_not_restore_inherited_environment_after_env_clear() -> std::io:
     )
     .output()?;
     assert!(output.status.success());
-    // Some shells add PWD while executing a script. No inherited parent keys
-    // should survive, and the explicitly supplied value must still be there.
+    // The shell may synthesize PWD/SHLVL and other local variables. The
+    // boundary is the parent sentinel, not a whitelist of shell internals.
     let env = String::from_utf8_lossy(&output.stdout);
     assert!(env.lines().any(|line| line == "JAIL_EXPLICIT=allowed"));
     assert!(
-        env.lines()
-            .all(|line| line.starts_with("JAIL_EXPLICIT=") || line.starts_with("PWD="))
+        !env.lines()
+            .any(|line| line.starts_with(&format!("{SENTINEL}="))),
+        "the launcher restored the inherited parent sentinel"
     );
     Ok(())
 }
@@ -375,4 +395,31 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
     }
     fs::remove_dir_all(&root).ok();
     assert!(gone, "grandchild {grandchild} survived the group kill");
+}
+
+#[test]
+fn executable_presence_cannot_satisfy_hard_seatbelt_denials() {
+    use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+    assert_eq!(declared_constraint_support(false), ConstraintSupport::NONE);
+    // No process-isolation guarantee can follow from a launcher-presence check,
+    // even on macOS where the launcher exists.
+    assert_eq!(
+        SeatbeltBackend::new().isolation(),
+        tinybox_core::IsolationLevel::None
+    );
+    let present = declared_constraint_support(true);
+    for constraint in [
+        Constraint::Filesystem,
+        Constraint::Network,
+        Constraint::Subprocess,
+    ] {
+        assert_eq!(present.enforcement(constraint), Enforcement::BestEffort);
+        assert!(matches!(
+            present.require("seatbelt", &[constraint]),
+            Err(tinybox_core::Error::ConstraintNotEnforced {
+                enforcement: Enforcement::BestEffort,
+                ..
+            })
+        ));
+    }
 }
