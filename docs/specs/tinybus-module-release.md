@@ -31,3 +31,18 @@ workflow builds each native module from the tagged source and records its exact
 digest in the adjacent allowlist. After publishing, it downloads the Ubuntu
 x86_64 archive through TinyBus's GitHub release API and calls `Describe` over an
 in-memory bus.
+
+## Additive resource interface
+
+`tinybox-bus` supplies the serialized vocabulary without TinyBus, Tokio, native
+backends, or optional implementation dependencies. The original Describe wire
+arity and result remain unchanged. Create, Exec, Inspect, Close, Spawn,
+IsRunning, Cancel, and AnalyzeShell are additive methods documented in the
+[module interface](../../crates/tinybox-module/src/tinybus_module/README.md).
+Native providers and opaque resource ownership stay in the module. Backends
+are selected explicitly and unsupported requests never downgrade isolation.
+Host authorization precedes calls; shell analysis returns structural facts.
+
+Publishing the source contract does not publish a compatible native artifact.
+Consumers must retain their current gitlinks until a release includes this
+method manifest and immutable platform artifacts with matching digests.

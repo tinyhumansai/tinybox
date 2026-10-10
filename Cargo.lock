@@ -863,6 +863,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinybox-bus"
+version = "0.1.16"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tinybox-cli"
 version = "0.1.16"
 dependencies = [
@@ -954,9 +962,12 @@ dependencies = [
 name = "tinybox-module"
 version = "0.1.16"
 dependencies = [
+ "async-trait",
  "serde_json",
+ "tinybox-bus",
  "tinybox-core",
  "tinybox-docker",
+ "tinybox-host",
  "tinybox-linux",
  "tinybox-microvm",
  "tinybus",

@@ -8,14 +8,71 @@
 use tinybox_core::{IsolationLevel, SandboxCapabilities};
 use tinybus::{Connection, Result as TinyBusResult};
 
-const INTERFACE: &str = "ai.tinyhumans.tinybox.Box";
-const OBJECT_PATH: &str = "/ai/tinyhumans/tinybox/Box";
+use tinybox_bus::{
+    CreateRequest, ExecOutput, ExecRequest, INTERFACE, OBJECT_PATH, ProcessRef, ResourceId,
+    ResourceInfo, ShellAnalysis, SpawnRequest,
+};
+
+mod resources;
 
 /// The bus-facing service.
-struct BoxService;
+#[derive(Default)]
+struct BoxService {
+    resources: std::sync::Arc<resources::Resources>,
+}
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Allocate the explicitly requested sandbox, without fallback.
+    async fn create(&self, request: CreateRequest) -> TinyBusResult<ResourceInfo> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(async move { resources.create(request).await })).await
+    }
+
+    /// Run one unshelled command and collect output.
+    async fn exec(&self, request: ExecRequest) -> TinyBusResult<ExecOutput> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(async move { resources.exec(request).await })).await
+    }
+
+    /// Describe a live resource.
+    async fn inspect(&self, resource: ResourceId) -> TinyBusResult<ResourceInfo> {
+        self.resources.inspect(&resource).await
+    }
+
+    /// Stop tracked processes and destroy the resource.
+    async fn close(&self, resource: ResourceId) -> TinyBusResult<()> {
+        self.resources.close(&resource).await
+    }
+
+    /// Start a backend-owned detached process.
+    async fn spawn(&self, request: SpawnRequest) -> TinyBusResult<ProcessRef> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(async move { resources.spawn(request).await })).await
+    }
+
+    /// Ask whether a tracked process remains alive.
+    async fn is_running(&self, process: ProcessRef) -> TinyBusResult<bool> {
+        self.resources.is_running(&process).await
+    }
+
+    /// Stop a tracked process; the identifier remains queryable until close.
+    async fn cancel(&self, process: ProcessRef) -> TinyBusResult<()> {
+        self.resources.cancel(&process).await
+    }
+
+    /// Return shell structure facts without applying host security policy.
+    async fn analyze_shell(&self, command: String) -> TinyBusResult<ShellAnalysis> {
+        use tinybox_core::shell::{classify, scan};
+        let stripped = scan::strip_quoted_heredoc_bodies(&command);
+        std::future::ready(Ok(ShellAnalysis {
+            segments: scan::split_unquoted_segments(&stripped),
+            hidden_execution: classify::has_hidden_execution(&command),
+            redirection: scan::contains_unquoted_char(&stripped, '>'),
+        }))
+        .await
+    }
+
     /// Report what this build of tinybox can do.
     ///
     /// Returns the crate version followed by the sandboxes registered in this
@@ -98,9 +155,16 @@ fn registered_sandboxes() -> Vec<(&'static str, SandboxCapabilities)> {
     ]
 }
 
+async fn finish_operation<T: Send + 'static>(
+    task: tokio::task::JoinHandle<TinyBusResult<T>>,
+) -> TinyBusResult<T> {
+    task.await
+        .map_err(|error| tinybus::Error::failed(error.to_string()))?
+}
+
 async fn setup(connection: Connection) -> TinyBusResult<()> {
     connection
-        .serve_at(OBJECT_PATH.try_into()?, BoxService)
+        .serve_at(OBJECT_PATH.try_into()?, BoxService::default())
         .await?;
     connection.request_name(INTERFACE).await?;
     Ok(())
@@ -110,7 +174,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell"],
     signals = [],
     requires = [],
     optional = [],

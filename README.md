@@ -398,3 +398,11 @@ Arch Linux; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022 and
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
+
+### Serialized module contract
+
+Clients of the native module can depend on `crates/tinybox-bus` for serde-only
+requests and results without linking the sandbox runtime. The additive
+[lifecycle interface](crates/tinybox-module/src/tinybus_module/README.md)
+provides explicit local sandbox selection, command execution, detached process
+cancellation, inspection, cleanup, and policy-neutral shell structure analysis.
