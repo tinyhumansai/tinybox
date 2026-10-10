@@ -91,8 +91,12 @@ impl LimitedLocalHost {
                     }
                 )
             };
-            tokio::select! { _ = completion => {}, _ = cancelled => {} }
-            terminate(&mut child, group).await
+            let result = tokio::select! {
+                result = completion => result.map(|_| ()),
+                _ = cancelled => Ok(()),
+            };
+            terminate(&mut child, group).await?;
+            result
         });
         Ok(ManagedProcess {
             cancel: Some(cancel),
@@ -152,8 +156,16 @@ pub(super) async fn terminate(child: &mut Child, group: i32) -> Result<()> {
         .kill()
         .await
         .map_err(|error| Error::io("kill and reap", &error))?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while group_alive(group)? {
+    wait_group(group, std::time::Duration::from_secs(5), group_alive).await
+}
+
+async fn wait_group(
+    group: i32,
+    deadline: std::time::Duration,
+    mut alive: impl FnMut(i32) -> Result<bool>,
+) -> Result<()> {
+    tokio::time::timeout(deadline, async {
+        while alive(group)? {
             tokio::task::yield_now().await;
         }
         Ok(())

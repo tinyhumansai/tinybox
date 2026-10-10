@@ -167,3 +167,23 @@ fn missing_child_pipe_is_a_collection_error() {
         })
     ));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_failure_remains_observable_after_the_execution_waiter_is_gone() -> Result<()> {
+    let host = LimitedLocalHost::new(16);
+    let mut command = crate::LocalHost::command(&ExecRequest::new(["sleep", "600"]))?;
+    process::prepare(&mut command)?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::io("fixture spawn", &error))?;
+    // An invalid group deterministically forces the native signalling failure.
+    assert!(cleanup(&host.state, &mut child, -1).await.is_err());
+    child
+        .kill()
+        .await
+        .map_err(|error| Error::io("fixture reap", &error))?;
+    assert!(host.drain_checked().await.is_err());
+    assert!(host.drain_checked().await.is_err());
+    Ok(())
+}

@@ -3,7 +3,7 @@
 use crate::LocalHost;
 use async_trait::async_trait;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
@@ -27,6 +27,7 @@ pub struct LimitedLocalHost {
 #[derive(Debug)]
 struct State {
     active: AtomicUsize,
+    cleanup_failure: Mutex<Option<String>>,
     finished: watch::Sender<u64>,
 }
 
@@ -50,6 +51,7 @@ impl LimitedLocalHost {
             limit,
             state: Arc::new(State {
                 active: AtomicUsize::new(0),
+                cleanup_failure: Mutex::new(None),
                 finished,
             }),
         }
@@ -64,6 +66,27 @@ impl LimitedLocalHost {
                 return;
             }
         }
+    }
+    /// Drain native supervisors and report any retained cleanup failure.
+    ///
+    /// # Errors
+    /// A failed group kill or reap remains terminally observable after a waiter drops.
+    pub async fn drain_checked(&self) -> Result<()> {
+        self.drain().await;
+        let failure = self
+            .state
+            .cleanup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(message) = failure {
+            return Err(Error::Backend {
+                sandbox: crate::LOCAL.into(),
+                operation: "drain native cleanup",
+                message,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -93,7 +116,7 @@ impl Host for LimitedLocalHost {
         state.active.fetch_add(1, Ordering::SeqCst);
         let (cancel, cancelled) = oneshot::channel::<()>();
         let supervisor = tokio::spawn(async move {
-            let _active = Active(state);
+            let _active = Active(state.clone());
             let collection = async {
                 tokio::try_join!(
                     read(stdout, budget.clone(), limit),
@@ -118,7 +141,7 @@ impl Host for LimitedLocalHost {
                 result = collection => result.map(|(stdout, stderr, (), status)| ExecOutput::new(status.code().unwrap_or(128), stdout, stderr)),
                 _ = cancelled => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
             };
-            process::terminate(&mut child, group).await?;
+            cleanup(&state, &mut child, group).await?;
             result
         });
         let result = supervisor.await.map_err(|error| Error::Backend {
@@ -133,6 +156,17 @@ impl Host for LimitedLocalHost {
     async fn forward(&self, remote: std::net::SocketAddr) -> Result<Forward> {
         LocalHost::new().forward(remote).await
     }
+}
+
+async fn cleanup(state: &State, child: &mut tokio::process::Child, group: i32) -> Result<()> {
+    let result = process::terminate(child, group).await;
+    if let Err(error) = &result {
+        *state
+            .cleanup_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+    }
+    result
 }
 
 fn pipe<T>(value: Option<T>, stream: &str) -> Result<T> {

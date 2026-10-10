@@ -3,6 +3,61 @@ use super::*;
 
 #[cfg(unix)]
 #[tokio::test]
+async fn cleanup_failures_are_retained_and_never_acknowledged_as_success() -> Result<()> {
+    let task = tokio::spawn(async {
+        Err(Error::Backend {
+            sandbox: crate::LOCAL.into(),
+            operation: "cleanup",
+            message: "injected native failure".into(),
+        })
+    });
+    let mut process = ManagedProcess {
+        cancel: None,
+        task: Some(task),
+        terminal: Ok(()),
+    };
+    assert!(process.stop().await.is_err());
+    assert!(process.stop().await.is_err());
+    let task = tokio::spawn(std::future::pending::<Result<()>>());
+    task.abort();
+    let mut process = ManagedProcess {
+        cancel: None,
+        task: Some(task),
+        terminal: Ok(()),
+    };
+    assert!(process.stop().await.is_err());
+    let mut child = Command::new("true")
+        .spawn()
+        .map_err(|error| Error::io("spawn", &error))?;
+    assert!(terminate(&mut child, -1).await.is_err());
+    child
+        .wait()
+        .await
+        .map_err(|error| Error::io("wait", &error))?;
+    assert!(group(&child).is_err());
+    assert!(
+        wait_group(1, std::time::Duration::ZERO, |_| Ok(true))
+            .await
+            .is_err()
+    );
+    assert!(
+        wait_group(1, std::time::Duration::from_secs(5), |_| Err(
+            Error::Backend {
+                sandbox: crate::LOCAL.into(),
+                operation: "observe group",
+                message: "injected failure".into()
+            }
+        ))
+        .await
+        .is_err()
+    );
+    #[cfg(target_os = "linux")]
+    assert!(group_alive(nix::unistd::getpgrp().as_raw())?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn detached_stop_and_drop_join_supervised_children() -> Result<()> {
     let host = LimitedLocalHost::new(100);
     let mut process = host.spawn(&ExecRequest::new(["sleep", "600"]))?;
