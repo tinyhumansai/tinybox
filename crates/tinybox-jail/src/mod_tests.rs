@@ -181,13 +181,13 @@ fn strict_landlock_filesystem_only_spawn_still_works() -> std::io::Result<()> {
         )]
     );
     let mut child =
-        crate::spawn_required_with(&backend, &jail, std::process::Command::new("true"))?;
+        crate::spawn_required_with(&backend, &jail, std::process::Command::new("/usr/bin/true"))?;
     assert!(child.wait()?.success());
     Ok(())
 }
 
 #[test]
-fn seatbelt_reports_its_partial_filesystem_and_actual_denial_rules() {
+fn seatbelt_launcher_presence_never_claims_verified_enforcement() {
     use crate::JailBackend;
     use tinybox_core::{Constraint, Enforcement};
     let backend = crate::SeatbeltBackend::new();
@@ -205,7 +205,7 @@ fn seatbelt_reports_its_partial_filesystem_and_actual_denial_rules() {
         assert_eq!(
             support.enforcement(constraint),
             if backend.is_available() {
-                Enforcement::Enforced
+                Enforcement::BestEffort
             } else {
                 Enforcement::Unsupported
             }
@@ -218,7 +218,7 @@ fn strict_default_spawn_obeys_the_detected_filesystem_declaration() -> std::io::
     use tinybox_core::{Constraint, Enforcement};
     let root = tempfile::tempdir()?;
     let jail = crate::Jail::new(root.path(), "strict-default");
-    let result = crate::spawn_required(&jail, std::process::Command::new("true"));
+    let result = crate::spawn_required(&jail, std::process::Command::new("/usr/bin/true"));
     if crate::default_backend()
         .constraint_support()
         .enforcement(Constraint::Filesystem)

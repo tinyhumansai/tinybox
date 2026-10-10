@@ -40,7 +40,7 @@ pub enum Error {
     },
 
     /// A hard constraint could not be fully enforced before execution.
-    #[error("sandbox {sandbox} cannot enforce {constraint:?}: {enforcement:?}")]
+    #[error("sandbox {sandbox} cannot enforce {constraint}: {enforcement}")]
     ConstraintNotEnforced {
         /// Backend refusing the request.
         sandbox: String,

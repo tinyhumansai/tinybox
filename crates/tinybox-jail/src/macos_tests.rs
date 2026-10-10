@@ -396,3 +396,24 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
     fs::remove_dir_all(&root).ok();
     assert!(gone, "grandchild {grandchild} survived the group kill");
 }
+
+#[test]
+fn executable_presence_cannot_satisfy_hard_seatbelt_denials() {
+    use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+    assert_eq!(declared_constraint_support(false), ConstraintSupport::NONE);
+    let present = declared_constraint_support(true);
+    for constraint in [
+        Constraint::Filesystem,
+        Constraint::Network,
+        Constraint::Subprocess,
+    ] {
+        assert_eq!(present.enforcement(constraint), Enforcement::BestEffort);
+        assert!(matches!(
+            present.require("seatbelt", &[constraint]),
+            Err(tinybox_core::Error::ConstraintNotEnforced {
+                enforcement: Enforcement::BestEffort,
+                ..
+            })
+        ));
+    }
+}

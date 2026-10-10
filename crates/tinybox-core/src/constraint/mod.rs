@@ -39,6 +39,20 @@ impl Constraint {
     }
 }
 
+impl std::fmt::Display for Constraint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Filesystem => "filesystem",
+            Self::Network => "network",
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Pids => "pids",
+            Self::Disk => "disk",
+            Self::Subprocess => "subprocess",
+        })
+    }
+}
+
 /// What a backend actually implements for one constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enforcement {
@@ -48,6 +62,16 @@ pub enum Enforcement {
     BestEffort,
     /// Full implementation; failure to apply it must prevent execution.
     Enforced,
+}
+
+impl std::fmt::Display for Enforcement {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unsupported => "unsupported",
+            Self::BestEffort => "best effort",
+            Self::Enforced => "enforced",
+        })
+    }
 }
 
 /// Independent enforcement declarations for all constraints.

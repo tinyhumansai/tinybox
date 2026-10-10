@@ -12,7 +12,7 @@ coarse lifecycle capabilities do not imply resource enforcement.
 | Namespaces | Enforced | Enforced | Enforced with cgroups | Enforced with cgroups | Enforced with cgroups | Unsupported | Unsupported |
 | MicroVM | Enforced | Enforced | BestEffort | BestEffort | Unsupported | Unsupported | Unsupported |
 | Landlock | Enforced when full filesystem ABI available | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
-| Seatbelt | BestEffort | Enforced when available | Unsupported | Unsupported | Unsupported | Unsupported | Enforced when available |
+| Seatbelt | BestEffort when present | BestEffort when present | Unsupported | Unsupported | Unsupported | Unsupported | BestEffort when present |
 | Noop / unavailable platform | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Namespace resource support is opt-in; actual systemd/cgroup setup may fail and
@@ -29,7 +29,9 @@ plus any requested network/subprocess denials. `spawn_required_with` and
 `spawn_with(NoopBackend, ...)` is an explicit trusted passthrough; it is never
 selected automatically. Legacy Seatbelt spawn remains available but its
 filesystem declaration is best effort: it allows reads everywhere and writes
-in `/private/tmp`. Strict filesystem preflight refuses it.
+in `/private/tmp`. Strict preflight refuses it. Launcher presence does not prove the host enforces
+profiles, so network and subprocess rules also remain best effort until an
+enforcement probe can establish them.
 
 Landlock implements filesystem rules only (no network ABI rules or process
 isolation). A filesystem-only strict jail may spawn, but

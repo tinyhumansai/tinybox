@@ -41,19 +41,13 @@ impl JailBackend for SeatbeltBackend {
         "seatbelt"
     }
 
+    /// Checks launcher presence only; this is not an enforcement probe.
     fn is_available(&self) -> bool {
         std::path::Path::new("/usr/bin/sandbox-exec").exists()
     }
 
     fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
-        use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
-        if !self.is_available() {
-            return ConstraintSupport::NONE;
-        }
-        ConstraintSupport::NONE
-            .with(Constraint::Filesystem, Enforcement::BestEffort)
-            .with(Constraint::Network, Enforcement::Enforced)
-            .with(Constraint::Subprocess, Enforcement::Enforced)
+        declared_constraint_support(self.is_available())
     }
 
     fn isolation(&self) -> tinybox_core::IsolationLevel {
@@ -80,6 +74,18 @@ impl JailBackend for SeatbeltBackend {
         }
         wrapper.spawn()
     }
+}
+
+/// Executable presence does not prove the host enforces Seatbelt profiles.
+fn declared_constraint_support(available: bool) -> tinybox_core::ConstraintSupport {
+    use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+    if !available {
+        return ConstraintSupport::NONE;
+    }
+    ConstraintSupport::NONE
+        .with(Constraint::Filesystem, Enforcement::BestEffort)
+        .with(Constraint::Network, Enforcement::BestEffort)
+        .with(Constraint::Subprocess, Enforcement::BestEffort)
 }
 
 /// Build the launcher separately so forwarding can be checked on any host.
