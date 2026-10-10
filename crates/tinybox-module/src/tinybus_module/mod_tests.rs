@@ -45,19 +45,11 @@ fn terminal_shutdown_is_an_explicit_module_operation() {
 async fn capabilities_and_shutdown_report_actual_supported_ownership() -> tinybus::Result<()> {
     let service = BoxService::default();
     let capabilities = service.capabilities().await?;
+    let expected = capabilities_for(cfg!(unix));
     assert_eq!(capabilities.contract_version, tinybox_bus::CONTRACT_VERSION);
-    assert_eq!(
-        capabilities.create_backends,
-        ["passthrough", "docker", "namespace"]
-    );
-    let mut supervised: Vec<String> = if cfg!(unix) {
-        vec!["passthrough".into()]
-    } else {
-        Vec::new()
-    };
-    supervised.push("docker".into());
-    assert_eq!(capabilities.exec_backends, supervised);
-    assert_eq!(capabilities.spawn_backends, supervised);
+    assert_eq!(capabilities.create_backends, expected.create_backends);
+    assert_eq!(capabilities.exec_backends, expected.exec_backends);
+    assert_eq!(capabilities.spawn_backends, expected.spawn_backends);
     service.shutdown().await?;
     service.shutdown().await?;
     assert!(
