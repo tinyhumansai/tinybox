@@ -411,3 +411,20 @@ async fn stopping_succeeds_even_though_nothing_was_really_started() -> Result<()
     assert!(ran.argv[2].contains("kill -TERM"), "{ran:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn command_standard_input_reaches_the_host() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let created = sandbox.create(&spec()?).await?;
+    sandbox
+        .exec(
+            &created.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"input".to_vec()),
+        )
+        .await?;
+    let seen = host.last().ok_or(Error::EmptyCommand {
+        sandbox: NAME.to_owned(),
+    })?;
+    assert_eq!(seen.stdin, Some(b"input".to_vec()));
+    Ok(())
+}

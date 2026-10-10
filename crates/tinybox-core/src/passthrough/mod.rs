@@ -107,6 +107,7 @@ impl PassthroughSandbox {
         }
 
         let mut resolved = ExecRequest::new(request.argv.clone());
+        resolved.stdin.clone_from(&request.stdin);
         resolved.env.clone_from(&spec.env);
         for (key, value) in &request.env {
             resolved.env.insert(key.clone(), value.clone());
