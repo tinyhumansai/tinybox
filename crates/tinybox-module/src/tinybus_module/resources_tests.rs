@@ -395,6 +395,156 @@ async fn published_port_forward_is_replayed_and_closed_with_its_owner() -> Resul
 }
 
 #[tokio::test]
+async fn forward_replay_is_rejected_after_close_marks_the_resource_closing() -> Result<()> {
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Resources::default();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    create_forwarding_docker_resource(&resources, id.clone(), &opens, &closes).await?;
+    let forward = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward,
+        guest_port: 8080,
+    };
+    resources.forward(request.clone()).await?;
+
+    // This is the same lifecycle marker installed by Close and Shutdown. A
+    // replay must not disclose an address once either operation has started.
+    resources
+        .executions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .closing
+        .insert(id.clone());
+    assert!(
+        resources.forward(request).await.is_err(),
+        "a replay must be rejected after close admission is frozen"
+    );
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resources.close(&id).await?;
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PendingForwardHost {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    opens: Arc<std::sync::atomic::AtomicUsize>,
+    closes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Host for PendingForwardHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        let output = if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains("NetworkSettings.Ports"))
+        {
+            br#"{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"38080"}]}"#.to_vec()
+        } else if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains(".State.Status"))
+        {
+            b"running".to_vec()
+        } else {
+            Vec::new()
+        };
+        Ok(NativeOutput::new(0, output, Vec::new()))
+    }
+
+    async fn forward(
+        &self,
+        remote: std::net::SocketAddr,
+    ) -> tinybox_core::Result<tinybox_core::Forward> {
+        assert_eq!(remote, std::net::SocketAddr::from(([127, 0, 0, 1], 38080)));
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(tinybox_core::Forward::guarded(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 44000)),
+            Box::new(CountForwardClose(self.closes.clone())),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn pending_forward_drops_its_tunnel_when_close_marks_resource_closing() -> Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Arc::new(Resources::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                network: tinybox_bus::NetworkPolicy::Open,
+                ports: vec![tinybox_bus::PortMapping {
+                    guest: 8080,
+                    host: None,
+                }],
+                ..Default::default()
+            },
+            Arc::new(PendingForwardHost {
+                entered: entered.clone(),
+                release: release.clone(),
+                opens: opens.clone(),
+                closes: closes.clone(),
+            }),
+        )
+        .await?;
+    let forward = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward,
+        guest_port: 8080,
+    };
+    let runner = resources.clone();
+    let pending = tokio::spawn(async move { runner.forward(request).await });
+    entered.notified().await;
+
+    let close_runner = resources.clone();
+    let close_id = id.clone();
+    let close = tokio::spawn(async move { close_runner.close(&close_id).await });
+    loop {
+        if resources
+            .executions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing
+            .contains(&id)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    release.notify_one();
+    assert!(
+        pending.await.map_err(Error::failed)?.is_err(),
+        "a pending tunnel must not publish after Close marks the resource closing"
+    );
+    close.await.map_err(Error::failed)??;
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn forward_rejects_wrong_resource_and_unpublished_port_before_opening() -> Result<()> {
     let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));

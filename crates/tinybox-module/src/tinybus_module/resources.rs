@@ -343,15 +343,28 @@ impl Resources {
         let entry = slot
             .as_mut()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
-        if let Some(existing) = entry.forwards.get(&request.forward) {
-            return if existing.guest_port == request.guest_port {
-                Ok(existing.info.clone())
-            } else {
-                Err(failure(
-                    tinybox_bus::INVALID_ID,
-                    "forward handle belongs to another guest port",
-                ))
-            };
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            if let Some(existing) = entry.forwards.get(&request.forward) {
+                return if existing.guest_port == request.guest_port {
+                    Ok(existing.info.clone())
+                } else {
+                    Err(failure(
+                        tinybox_bus::INVALID_ID,
+                        "forward handle belongs to another guest port",
+                    ))
+                };
+            }
+            self.check_reservation(
+                &mut state,
+                &request.forward,
+                &ReserveRequest::Forward(request.resource.clone()),
+            )?;
         }
         if entry.forwards.len() >= tinybox_bus::MAX_FORWARDS_PER_RESOURCE {
             return Err(failure(
@@ -359,14 +372,14 @@ impl Resources {
                 "forward limit reached",
             ));
         }
-        {
-            let mut state = self.state.lock().await;
-            self.check_reservation(
-                &mut state,
-                &request.forward,
-                &ReserveRequest::Forward(request.resource.clone()),
-            )?;
-        }
+        self.open_forward(entry, &request).await
+    }
+
+    async fn open_forward(
+        &self,
+        entry: &mut Resource,
+        request: &ForwardRequest,
+    ) -> Result<ForwardInfo> {
         let published = entry
             .sandbox
             .published_ports(&entry.id)
@@ -389,6 +402,11 @@ impl Resources {
         let remote = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         {
             let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
             self.check_reservation(
                 &mut state,
                 &request.forward,
@@ -400,27 +418,35 @@ impl Resources {
             .forward(remote)
             .await
             .map_err(|error| backend_error(&error))?;
-        {
-            let mut state = self.state.lock().await;
-            self.consume(
-                &mut state,
-                &request.forward,
-                &ReserveRequest::Forward(request.resource.clone()),
-            )?;
-        }
         let info = ForwardInfo {
             resource: request.resource.clone(),
             forward: request.forward.clone(),
             local_address: forward.local_addr().to_string(),
         };
-        entry.forwards.insert(
-            request.forward,
-            OwnedForward {
-                guest_port: request.guest_port,
-                info: info.clone(),
-                _forward: forward,
-            },
-        );
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            self.consume(
+                &mut state,
+                &request.forward,
+                &ReserveRequest::Forward(request.resource.clone()),
+            )?;
+            // Publish while holding the same state -> executions admission
+            // barrier used by Close and Shutdown. If either has marked this
+            // resource, the local `forward` drops here and closes the tunnel.
+            entry.forwards.insert(
+                request.forward.clone(),
+                OwnedForward {
+                    guest_port: request.guest_port,
+                    info: info.clone(),
+                    _forward: forward,
+                },
+            );
+        }
         Ok(info)
     }
 
@@ -832,6 +858,20 @@ impl Resources {
         }
         failure.map_or(Ok(()), Err)
     }
+}
+
+fn check_resource_open(
+    state: &State,
+    executions: &Executions,
+    resource: &ResourceId,
+) -> Result<()> {
+    if state.shutdown {
+        return Err(failure(tinybox_bus::EXEC_CANCELLED, "module is shut down"));
+    }
+    if executions.closing.contains(resource) {
+        return Err(failure(tinybox_bus::EXEC_CANCELLED, "resource is closing"));
+    }
+    Ok(())
 }
 
 fn make_sandbox(
