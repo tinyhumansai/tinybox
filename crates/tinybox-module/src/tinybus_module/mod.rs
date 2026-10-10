@@ -23,6 +23,11 @@ struct BoxService {
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Terminal barrier: freeze startup and join native resource cleanup before ABI unload.
+    async fn shutdown(&self) -> TinyBusResult<()> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(async move { resources.shutdown().await })).await
+    }
     /// Report which operations own native cleanup on this platform.
     async fn capabilities(&self) -> TinyBusResult<tinybox_bus::ModuleCapabilities> {
         let supervised: Vec<String> = if cfg!(unix) {
@@ -201,7 +206,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown"],
     signals = [],
     requires = [],
     optional = [],

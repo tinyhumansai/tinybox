@@ -55,6 +55,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    verify_resources(&proxy).await?;
+
+    println!(
+        "verified {} as TinyBus module `{}`",
+        module.display(),
+        info.name
+    );
+    broker_task.abort();
+    Ok(())
+}
+
+/// Exercise lifecycle and terminal cleanup through the loaded artifact.
+async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::error::Error>> {
     // Exercise real resource ownership through the loaded native artifact.
     let analysis: ShellAnalysis = proxy
         .call("AnalyzeShell", ("echo hello".to_owned(),))
@@ -92,14 +105,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env: std::collections::BTreeMap::new(),
         stdin: None,
     };
-    let output: ExecOutput = proxy.call("Exec", (request,)).await?;
+    let capabilities: tinybox_bus::ModuleCapabilities = proxy.call("Capabilities", ()).await?;
+    let output: Option<ExecOutput> = if capabilities
+        .exec_backends
+        .iter()
+        .any(|backend| backend == "passthrough")
+    {
+        Some(proxy.call("Exec", (request,)).await?)
+    } else {
+        if proxy.call::<ExecOutput>("Exec", (request,)).await.is_ok() {
+            return Err(io::Error::other("unsupported native execution was accepted").into());
+        }
+        None
+    };
     #[cfg(unix)]
-    verify_detached(&proxy, &resource.resource).await?;
+    verify_detached(proxy, &resource.resource).await?;
+    #[cfg(target_os = "linux")]
+    verify_descendants(proxy, &resource.resource).await?;
     proxy
         .call::<()>("Close", (resource.resource.clone(),))
         .await?;
-    if output.exit_code != 0 || !String::from_utf8_lossy(&output.stdout).contains("tinybox-native")
-    {
+    if output.as_ref().is_some_and(|output| {
+        output.exit_code != 0 || !String::from_utf8_lossy(&output.stdout).contains("tinybox-native")
+    }) {
         return Err(io::Error::other("native module command failed").into());
     }
     if proxy
@@ -110,12 +138,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(io::Error::other("closed resource remained usable").into());
     }
 
-    println!(
-        "verified {} as TinyBus module `{}`",
-        module.display(),
-        info.name
-    );
-    broker_task.abort();
+    proxy.call::<()>("Shutdown", ()).await?;
+    if proxy
+        .call::<tinybox_bus::ResourceId>("Reserve", (tinybox_bus::ReserveRequest::Resource,))
+        .await
+        .is_ok()
+    {
+        return Err(io::Error::other("shutdown admitted a new resource").into());
+    }
+
     Ok(())
 }
 
@@ -178,5 +209,68 @@ async fn verify_detached(
             },),
         )
         .await?;
+    Ok(())
+}
+
+/// Native PID evidence is independent of the module's status bookkeeping.
+#[cfg(target_os = "linux")]
+async fn verify_descendants(
+    proxy: &tinybus::Proxy,
+    resource: &tinybox_bus::ResourceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let readiness = std::env::current_dir()?.join("target/native-module-process-ready");
+    let _ = std::fs::remove_file(&readiness);
+    let process: tinybox_bus::ProcessRef = proxy
+        .call(
+            "Spawn",
+            (tinybox_bus::SpawnRequest {
+                process: proxy
+                    .call(
+                        "Reserve",
+                        (tinybox_bus::ReserveRequest::Process(resource.clone()),),
+                    )
+                    .await?,
+                command: ExecRequest {
+                    resource: resource.clone(),
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        format!("sleep 600 & echo $$ $! > '{}'; wait", readiness.display()),
+                    ],
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    stdin: None,
+                },
+            },),
+        )
+        .await?;
+    let pids = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&readiness) {
+                let pids: Vec<u32> = text
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    .collect();
+                if pids.len() == 2 {
+                    return pids;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    proxy.call::<()>("Cancel", (process,)).await?;
+    let _ = std::fs::remove_file(readiness);
+    if std::path::Path::new(&format!("/proc/{}/status", pids[0])).exists() {
+        return Err(io::Error::other("native direct child was not reaped").into());
+    }
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", pids[1]))
+        && !status
+            .lines()
+            .any(|line| line.starts_with("State:") && line.contains('Z'))
+    {
+        return Err(io::Error::other("native descendant survived cancellation").into());
+    }
+    println!("native direct child reaped and descendant terminated");
     Ok(())
 }

@@ -47,6 +47,7 @@ pub const METHODS: &[&str] = &[
     "AnalyzeShell",
     "Reserve",
     "Capabilities",
+    "Shutdown",
 ];
 
 /// Stable error name for an unknown or closed module resource.

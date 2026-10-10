@@ -17,6 +17,54 @@ const CONTAINER: SandboxCapabilities =
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
 #[test]
+fn terminal_shutdown_is_an_explicit_module_operation() {
+    assert!(
+        BoxService::default()
+            .members()
+            .iter()
+            .any(|member| member.to_string() == "Shutdown")
+    );
+}
+
+#[tokio::test]
+async fn capabilities_and_shutdown_report_actual_supported_ownership() -> tinybus::Result<()> {
+    let service = BoxService::default();
+    let capabilities = service.capabilities().await?;
+    assert_eq!(
+        capabilities.create_backends,
+        ["passthrough", "docker", "namespace"]
+    );
+    let supervised: Vec<String> = if cfg!(unix) {
+        vec!["passthrough".into()]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(capabilities.exec_backends, supervised);
+    assert_eq!(capabilities.spawn_backends, supervised);
+    service.shutdown().await?;
+    service.shutdown().await?;
+    assert!(
+        service
+            .reserve(tinybox_bus::ReserveRequest::Resource)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .exec(tinybox_bus::ExecRequest {
+                resource: tinybox_bus::ResourceId("retired".into()),
+                argv: vec!["unused".into()],
+                cwd: None,
+                env: std::collections::BTreeMap::new(),
+                stdin: None
+            })
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn declared_methods_match_the_dispatch_table() {
     let mut methods = BoxService::default()
         .members()

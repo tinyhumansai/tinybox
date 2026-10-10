@@ -14,6 +14,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Method | Argument | Result |
 | --- | --- | --- |
 | Describe | none | Original version/backend summary |
+| Shutdown | none | unit |
 | Capabilities | none | ModuleCapabilities |
 | Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
@@ -47,7 +48,15 @@ reservation, and cleanup during native startup waits for its resource lock and
 cleans the eventual result. Completed/cancelled process entries are removed
 rather than consuming admission forever. IsRunning reports false for a process
 that is no longer retained. Native cleanup errors retain ownership for retry.
-Callers must close explicitly before unloading the module. Output streaming,
+Callers must call terminal Shutdown before ABI unload or runtime shutdown.
+Shutdown freezes Reserve/Create/Spawn/Exec admission, cancels native execution,
+waits pending startup locks and queued process workers, stops every owned process
+group, drains supervisors, and destroys resources. A native startup already
+underway must finish so cleanup can destroy its eventual allocation; it cannot
+publish a usable result once shutdown starts. Failed cleanup retains ownership
+and returns an error; retry Shutdown before unloading. The terminal instance
+never restarts. Host ordering is stop submissions, await Shutdown, then unload
+the ABI/module runtime. The SDK shutdown timeout alone is not this barrier. Output streaming,
 transfer, forwarding, SSH and microVM configuration remain subsequent slices.
 
 Operations serialize within each resource; unrelated resources have independent

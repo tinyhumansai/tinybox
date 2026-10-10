@@ -26,6 +26,7 @@ struct Resource {
 pub(super) struct Resources {
     instance: String,
     clock: Arc<dyn Clock>,
+    finished: tokio::sync::Notify,
     state: Mutex<State>,
     executions: std::sync::Mutex<Executions>,
 }
@@ -50,6 +51,7 @@ impl Default for Resources {
         Self {
             instance: uuid::Uuid::new_v4().to_string(),
             clock: Arc::new(SystemClock::new()),
+            finished: tokio::sync::Notify::new(),
             state: Mutex::default(),
             executions: std::sync::Mutex::default(),
         }
@@ -208,10 +210,16 @@ impl Resources {
                 collector,
                 local_sandbox,
             });
+            if self.state.lock().await.shutdown {
+                return Err(failure(
+                    tinybox_bus::EXEC_CANCELLED,
+                    "module shut down during startup",
+                ));
+            }
             Ok(result)
         }
         .await;
-        if allocation.is_err() {
+        if allocation.is_err() && slot.is_none() {
             self.state.lock().await.entries.remove(&request.resource);
         }
         allocation
@@ -323,6 +331,7 @@ impl Resources {
             .await
             .pending_processes
             .remove(&request.process);
+        self.finished.notify_waiters();
         result
     }
 
@@ -463,14 +472,19 @@ impl Resources {
         }
         let mut slot = slot.lock().await;
         if let Some(entry) = slot.as_mut() {
+            let mut failure = None;
             for process in entry.processes.values_mut() {
-                process
-                    .stop()
-                    .await
-                    .map_err(|error| backend_error(&error))?;
+                if let Err(error) = process.stop().await {
+                    failure.get_or_insert_with(|| backend_error(&error));
+                }
             }
-            if let Some(collector) = &entry.collector {
-                collector.drain().await;
+            if let Some(collector) = &entry.collector
+                && let Err(error) = collector.drain_checked().await
+            {
+                failure.get_or_insert_with(|| backend_error(&error));
+            }
+            if let Some(error) = failure {
+                return Err(error);
             }
             entry
                 .sandbox
@@ -487,6 +501,43 @@ impl Resources {
         executions.closing.remove(resource);
         executions.native.remove(resource);
         Ok(())
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<()> {
+        let resources = {
+            let mut state = self.state.lock().await;
+            state.shutdown = true;
+            state.reservations.clear();
+            for (_, cancelled) in state.pending_processes.values() {
+                cancelled.store(true, Ordering::SeqCst);
+            }
+            let resources: Vec<_> = state.entries.keys().cloned().collect();
+            let mut executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            executions.closing.extend(resources.iter().cloned());
+            for native in executions.native.values() {
+                native.abort();
+            }
+            resources
+        };
+        let mut failure = None;
+        for resource in resources {
+            if let Err(error) = self.close(&resource).await {
+                failure.get_or_insert(error);
+            }
+        }
+        loop {
+            let finished = self.finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if self.state.lock().await.pending_processes.is_empty() {
+                break;
+            }
+            finished.await;
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
