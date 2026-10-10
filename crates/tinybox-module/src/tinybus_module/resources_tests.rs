@@ -477,8 +477,7 @@ impl Host for PendingForwardHost {
     }
 }
 
-#[tokio::test]
-async fn pending_forward_drops_its_tunnel_when_close_marks_resource_closing() -> Result<()> {
+async fn pending_forward_race(shutdown: bool) -> Result<()> {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -518,17 +517,24 @@ async fn pending_forward_drops_its_tunnel_when_close_marks_resource_closing() ->
     let pending = tokio::spawn(async move { runner.forward(request).await });
     entered.notified().await;
 
-    let close_runner = resources.clone();
+    let lifecycle_runner = resources.clone();
     let close_id = id.clone();
-    let close = tokio::spawn(async move { close_runner.close(&close_id).await });
+    let lifecycle = tokio::spawn(async move {
+        if shutdown {
+            lifecycle_runner.shutdown().await
+        } else {
+            lifecycle_runner.close(&close_id).await
+        }
+    });
     loop {
-        if resources
+        let shutdown_marked = resources.state.lock().await.shutdown;
+        let resource_closing = resources
             .executions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .closing
-            .contains(&id)
-        {
+            .contains(&id);
+        if shutdown_marked || resource_closing {
             break;
         }
         tokio::task::yield_now().await;
@@ -536,12 +542,22 @@ async fn pending_forward_drops_its_tunnel_when_close_marks_resource_closing() ->
     release.notify_one();
     assert!(
         pending.await.map_err(Error::failed)?.is_err(),
-        "a pending tunnel must not publish after Close marks the resource closing"
+        "a pending tunnel must not publish after Close or Shutdown marks it closed"
     );
-    close.await.map_err(Error::failed)??;
+    lifecycle.await.map_err(Error::failed)??;
     assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
     Ok(())
+}
+
+#[tokio::test]
+async fn pending_forward_drops_its_tunnel_when_close_marks_resource_closing() -> Result<()> {
+    pending_forward_race(false).await
+}
+
+#[tokio::test]
+async fn pending_forward_drops_its_tunnel_when_shutdown_marks_module_closed() -> Result<()> {
+    pending_forward_race(true).await
 }
 
 #[tokio::test]
