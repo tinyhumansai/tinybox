@@ -95,8 +95,12 @@ async fn it_runs_in_the_requested_directory() -> Result<()> {
         .canonicalize()
         .map_err(|error| Error::io("canonicalize", &error))?;
 
+    #[cfg(windows)]
+    let cwd_command = ExecRequest::new(["cmd.exe", "/D", "/C", "cd"]);
+    #[cfg(not(windows))]
+    let cwd_command = ExecRequest::new(["pwd"]);
     let output = LocalHost::new()
-        .run(&ExecRequest::new(["pwd"]).with_cwd(dir.path()))
+        .run(&cwd_command.with_cwd(dir.path()))
         .await?;
 
     assert_eq!(
