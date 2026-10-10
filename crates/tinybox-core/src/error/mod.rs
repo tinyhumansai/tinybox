@@ -109,6 +109,13 @@ pub enum Error {
         id: String,
     },
 
+    /// Collected stdout and stderr exceeded an enforced memory budget.
+    #[error("command output exceeded {limit} bytes")]
+    OutputLimitExceeded {
+        /// Maximum combined output bytes.
+        limit: usize,
+    },
+
     /// An operating-system call failed.
     ///
     /// Carries the message rather than the [`std::io::Error`] itself so the
