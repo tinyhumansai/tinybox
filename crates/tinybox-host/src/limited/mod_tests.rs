@@ -170,20 +170,61 @@ fn missing_child_pipe_is_a_collection_error() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn cleanup_failure_remains_observable_after_the_execution_waiter_is_gone() -> Result<()> {
+async fn cleanup_failure_retains_the_native_child_and_checked_drain_retries_it() -> Result<()> {
     let host = LimitedLocalHost::new(16);
     let mut command = crate::LocalHost::command(&ExecRequest::new(["sleep", "600"]))?;
     process::prepare(&mut command)?;
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| Error::io("fixture spawn", &error))?;
-    // An invalid group deterministically forces the native signalling failure.
-    assert!(cleanup(&host.state, &mut child, -1).await.is_err());
-    child
-        .kill()
-        .await
-        .map_err(|error| Error::io("fixture reap", &error))?;
-    assert!(host.drain_checked().await.is_err());
-    assert!(host.drain_checked().await.is_err());
+    let group = process::group(&child)?;
+    let pid = child
+        .id()
+        .ok_or_else(|| Error::io("fixture pid", &std::io::Error::other("missing")))?;
+    let injected = Err(Error::Backend {
+        sandbox: crate::LOCAL.into(),
+        operation: "fixture kill",
+        message: "transient native failure".into(),
+    });
+    assert!(retain_cleanup(&host.state, child, group, injected).is_err());
+    assert!(host.has_pending_cleanup());
+    host.drain_checked().await?;
+    assert!(!host.has_pending_cleanup());
+    host.drain_checked().await?;
+    #[cfg(target_os = "linux")]
+    assert!(!std::path::Path::new(&format!("/proc/{pid}/status")).exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_a_cleanup_retry_keeps_the_native_child_owned_for_another_retry() -> Result<()> {
+    let host = LimitedLocalHost::new(16);
+    let mut command = crate::LocalHost::command(&ExecRequest::new(["sleep", "600"]))?;
+    process::prepare(&mut command)?;
+    let child = command
+        .spawn()
+        .map_err(|error| Error::io("fixture spawn", &error))?;
+    let group = process::group(&child)?;
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(child)));
+    host.state
+        .cleanup_failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(group, slot.clone());
+    let held = slot.lock().await;
+    let retry_host = host.clone();
+    let retry = tokio::spawn(async move { retry_host.drain_checked().await });
+    // The retry acquired its coordination lock and is waiting for this child slot.
+    while host.state.cleanup_lock.try_lock().is_ok() {
+        tokio::task::yield_now().await;
+    }
+    retry.abort();
+    assert!(retry.await.is_err());
+    assert!(held.is_some());
+    assert!(host.has_pending_cleanup());
+    drop(held);
+    host.drain_checked().await?;
+    assert!(!host.has_pending_cleanup());
     Ok(())
 }

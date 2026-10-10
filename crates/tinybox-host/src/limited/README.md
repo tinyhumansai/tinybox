@@ -5,7 +5,8 @@ on the owning Tokio runtime. A caller dropping its future drops a cancellation
 sender; the supervisor kills and awaits the child before decrementing its active
 count. `drain` waits for those supervisors, including cancelled callers.
 The module uses `drain_checked`, which retains and reports native cleanup errors
-even when the original execution waiter has gone away.
+even when the original execution waiter has gone away. Failed native cleanup
+retains the child and process group for a later checked drain retry.
 
 Stdout and stderr are read concurrently in fixed-size chunks. They reserve from
 one atomic byte budget before extending their buffers, so the combined output
@@ -30,3 +31,8 @@ call stop or the module Shutdown barrier before unloading the runtime. Natural
 completion also terminates residual group members. Standard input is written
 concurrently so a blocked write remains cancellable. The module never uses legacy
 pid-file detach helpers for operations claiming acknowledged cleanup.
+
+Command completion errors are independent of cleanup errors. Managed stop reports
+a command error once after successful cleanup; is_cleaned lets owners release
+the handle immediately. Native cleanup failures retain ownership and can be
+retried. A supervisor panic cannot prove cleanup and remains an explicit failure.

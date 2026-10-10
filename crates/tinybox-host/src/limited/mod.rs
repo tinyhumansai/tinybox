@@ -24,10 +24,13 @@ pub struct LimitedLocalHost {
     state: Arc<State>,
 }
 
+type RetainedChild = Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>;
+
 #[derive(Debug)]
 struct State {
     active: AtomicUsize,
-    cleanup_failure: Mutex<Option<String>>,
+    cleanup_failures: Mutex<std::collections::BTreeMap<i32, RetainedChild>>,
+    cleanup_lock: tokio::sync::Mutex<()>,
     finished: watch::Sender<u64>,
 }
 
@@ -51,7 +54,8 @@ impl LimitedLocalHost {
             limit,
             state: Arc::new(State {
                 active: AtomicUsize::new(0),
-                cleanup_failure: Mutex::new(None),
+                cleanup_failures: Mutex::new(std::collections::BTreeMap::new()),
+                cleanup_lock: tokio::sync::Mutex::new(()),
                 finished,
             }),
         }
@@ -67,24 +71,40 @@ impl LimitedLocalHost {
             }
         }
     }
+    /// Whether native children are retained after a cleanup failure.
+    #[must_use]
+    pub fn has_pending_cleanup(&self) -> bool {
+        !self
+            .state
+            .cleanup_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     /// Drain native supervisors and report any retained cleanup failure.
     ///
     /// # Errors
-    /// A failed group kill or reap remains terminally observable after a waiter drops.
+    /// A failed kill/reap retains its native child for a later public cleanup retry.
     pub async fn drain_checked(&self) -> Result<()> {
         self.drain().await;
-        let failure = self
+        let _guard = self.state.cleanup_lock.lock().await;
+        let groups: Vec<_> = self
             .state
-            .cleanup_failure
+            .cleanup_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(message) = failure {
-            return Err(Error::Backend {
-                sandbox: crate::LOCAL.into(),
-                operation: "drain native cleanup",
-                message,
-            });
+            .keys()
+            .copied()
+            .collect();
+        let mut failure = None;
+        for group in groups {
+            if let Err(error) = retry_cleanup_locked(&self.state, group).await {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         Ok(())
     }
@@ -141,7 +161,7 @@ impl Host for LimitedLocalHost {
                 result = collection => result.map(|(stdout, stderr, (), status)| ExecOutput::new(status.code().unwrap_or(128), stdout, stderr)),
                 _ = cancelled => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
             };
-            cleanup(&state, &mut child, group).await?;
+            cleanup(&state, child, group).await?;
             result
         });
         let result = supervisor.await.map_err(|error| Error::Backend {
@@ -158,15 +178,54 @@ impl Host for LimitedLocalHost {
     }
 }
 
-async fn cleanup(state: &State, child: &mut tokio::process::Child, group: i32) -> Result<()> {
-    let result = process::terminate(child, group).await;
-    if let Err(error) = &result {
-        *state
-            .cleanup_failure
+async fn cleanup(state: &State, mut child: tokio::process::Child, group: i32) -> Result<()> {
+    let result = process::terminate(&mut child, group).await;
+    retain_cleanup(state, child, group, result)
+}
+
+fn retain_cleanup(
+    state: &State,
+    child: tokio::process::Child,
+    group: i32,
+    result: Result<()>,
+) -> Result<()> {
+    if result.is_err() {
+        state
+            .cleanup_failures
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(group, Arc::new(tokio::sync::Mutex::new(Some(child))));
     }
     result
+}
+
+async fn retry_cleanup(state: &State, group: i32) -> Result<()> {
+    let _guard = state.cleanup_lock.lock().await;
+    retry_cleanup_locked(state, group).await
+}
+
+async fn retry_cleanup_locked(state: &State, group: i32) -> Result<()> {
+    let slot = state
+        .cleanup_failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&group)
+        .cloned();
+    let Some(slot) = slot else {
+        return Ok(());
+    };
+    let mut slot = slot.lock().await;
+    if let Some(child) = slot.as_mut() {
+        // Ownership stays in the slot if a cleanup caller drops its future.
+        process::terminate(child, group).await?;
+    }
+    slot.take();
+    state
+        .cleanup_failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&group);
+    Ok(())
 }
 
 fn pipe<T>(value: Option<T>, stream: &str) -> Result<T> {

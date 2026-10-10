@@ -14,33 +14,59 @@ pub struct ManagedProcess {
     cancel: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<Result<()>>>,
     terminal: std::result::Result<(), String>,
+    cleanup_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    state: std::sync::Arc<super::State>,
+    group: i32,
+    supervisor_failed: bool,
 }
 
 impl ManagedProcess {
     /// Whether the supervisor still owns running native work.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.task.as_ref().is_some_and(|task| !task.is_finished())
+        self.cleanup_failed.load(Ordering::SeqCst)
+            || self.task.as_ref().is_some_and(|task| !task.is_finished())
     }
 
     /// Kill the process group and wait for the supervisor to reap its direct child.
     ///
     /// # Errors
-    /// Reports native signalling/reaping failures rather than acknowledging cleanup.
+    /// Reports command failures once after successful cleanup, and retains native
+    /// signalling/reaping failures for cleanup retry.
     pub async fn stop(&mut self) -> Result<()> {
         self.cancel.take();
         if let Some(task) = self.task.as_mut() {
             self.terminal = match task.await {
                 Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Err(error) => {
+                    self.cleanup_failed.store(true, Ordering::SeqCst);
+                    self.supervisor_failed = true;
+                    Err(error.to_string())
+                }
             };
             self.task = None;
+        } else if self.cleanup_failed.load(Ordering::SeqCst) && !self.supervisor_failed {
+            self.terminal = super::retry_cleanup(&self.state, self.group)
+                .await
+                .map_err(|error| error.to_string());
+            self.cleanup_failed
+                .store(self.terminal.is_err(), Ordering::SeqCst);
         }
-        self.terminal.clone().map_err(|message| Error::Backend {
+        let result = self.terminal.clone().map_err(|message| Error::Backend {
             sandbox: crate::LOCAL.into(),
             operation: "stop supervised process",
             message,
-        })
+        });
+        if self.is_cleaned() {
+            self.terminal = Ok(());
+        }
+        result
+    }
+
+    /// Whether native cleanup has been acknowledged, independent of command outcome.
+    #[must_use]
+    pub fn is_cleaned(&self) -> bool {
+        self.task.is_none() && !self.cleanup_failed.load(Ordering::SeqCst)
     }
 }
 
@@ -70,8 +96,11 @@ impl LimitedLocalHost {
         let (cancel, cancelled) = oneshot::channel::<()>();
         let state = self.state.clone();
         state.active.fetch_add(1, Ordering::SeqCst);
+        let cleanup_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failed = cleanup_failed.clone();
+        let supervisor_state = state.clone();
         let task = tokio::spawn(async move {
-            let _active = Active(state);
+            let _active = Active(supervisor_state.clone());
             let completion = async {
                 tokio::try_join!(
                     async {
@@ -95,13 +124,19 @@ impl LimitedLocalHost {
                 result = completion => result.map(|_| ()),
                 _ = cancelled => Ok(()),
             };
-            terminate(&mut child, group).await?;
+            let cleanup = super::cleanup(&supervisor_state, child, group).await;
+            failed.store(cleanup.is_err(), Ordering::SeqCst);
+            cleanup?;
             result
         });
         Ok(ManagedProcess {
             cancel: Some(cancel),
             task: Some(task),
             terminal: Ok(()),
+            cleanup_failed,
+            state,
+            group,
+            supervisor_failed: false,
         })
     }
 }
@@ -132,6 +167,27 @@ pub(super) fn group(child: &Child) -> Result<i32> {
 }
 
 pub(super) async fn terminate(child: &mut Child, group: i32) -> Result<()> {
+    cleanup_deadline(
+        std::time::Duration::from_secs(5),
+        terminate_native(child, group),
+    )
+    .await
+}
+
+async fn cleanup_deadline(
+    deadline: std::time::Duration,
+    work: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    tokio::time::timeout(deadline, work)
+        .await
+        .map_err(|_| Error::Backend {
+            sandbox: crate::LOCAL.into(),
+            operation: "await native cleanup",
+            message: "cleanup deadline exceeded".into(),
+        })?
+}
+
+async fn terminate_native(child: &mut Child, group: i32) -> Result<()> {
     #[cfg(unix)]
     {
         use nix::{

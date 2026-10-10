@@ -15,6 +15,10 @@ async fn cleanup_failures_are_retained_and_never_acknowledged_as_success() -> Re
         cancel: None,
         task: Some(task),
         terminal: Ok(()),
+        cleanup_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        state: LimitedLocalHost::new(100).state,
+        group: -1,
+        supervisor_failed: true,
     };
     assert!(process.stop().await.is_err());
     assert!(process.stop().await.is_err());
@@ -24,6 +28,10 @@ async fn cleanup_failures_are_retained_and_never_acknowledged_as_success() -> Re
         cancel: None,
         task: Some(task),
         terminal: Ok(()),
+        cleanup_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        state: LimitedLocalHost::new(100).state,
+        group: -1,
+        supervisor_failed: true,
     };
     assert!(process.stop().await.is_err());
     let mut child = Command::new("true")
@@ -35,6 +43,11 @@ async fn cleanup_failures_are_retained_and_never_acknowledged_as_success() -> Re
         .await
         .map_err(|error| Error::io("wait", &error))?;
     assert!(group(&child).is_err());
+    assert!(
+        cleanup_deadline(std::time::Duration::ZERO, std::future::pending())
+            .await
+            .is_err()
+    );
     assert!(
         wait_group(1, std::time::Duration::ZERO, |_| Ok(true))
             .await
@@ -123,5 +136,46 @@ async fn stopping_a_shell_reaps_the_direct_child_and_terminates_its_descendant()
             );
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn retained_native_cleanup_failure_is_retried_by_managed_stop() -> Result<()> {
+    let host = LimitedLocalHost::new(100);
+    let mut command = crate::LocalHost::command(&ExecRequest::new(["sleep", "600"]))?;
+    prepare(&mut command)?;
+    let child = command
+        .spawn()
+        .map_err(|error| Error::io("fixture spawn", &error))?;
+    let group = group(&child)?;
+    let pid = child.id().ok_or_else(|| Error::Backend {
+        sandbox: crate::LOCAL.into(),
+        operation: "fixture pid",
+        message: "missing".into(),
+    })?;
+    host.state
+        .cleanup_failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            group,
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(child))),
+        );
+    let mut process = ManagedProcess {
+        cancel: None,
+        task: None,
+        terminal: Err("transient native error".into()),
+        cleanup_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        state: host.state.clone(),
+        group,
+        supervisor_failed: false,
+    };
+    assert!(!process.is_cleaned());
+    process.stop().await?;
+    assert!(process.is_cleaned());
+    process.stop().await?;
+    #[cfg(target_os = "linux")]
+    assert!(!std::path::Path::new(&format!("/proc/{pid}/status")).exists());
     Ok(())
 }
