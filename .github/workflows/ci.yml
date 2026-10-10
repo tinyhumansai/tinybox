@@ -80,6 +80,9 @@ jobs:
         run: cargo test -p tinybox-core -p tinybox-jail --all-features
       - name: Jail without Landlock feature
         run: cargo test -p tinybox-jail --no-default-features
+      - name: Native process supervision tests
+        if: matrix.os == 'windows-latest'
+        run: cargo test --locked --all-features -p tinybox-host -p tinybox-module
 
   docs:
     name: Docs
