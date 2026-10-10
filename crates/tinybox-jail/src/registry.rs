@@ -40,6 +40,9 @@ use tinybox_core::clock::{Clock, SystemClock};
 use super::jail::{Jail, JailBackend};
 use super::{default_backend, spawn_with};
 
+#[path = "registry_path.rs"]
+mod path;
+
 /// Metadata persisted for each jail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JailRecord {
@@ -342,14 +345,8 @@ impl JailRegistry {
             record.dir.display()
         );
 
-        let resolved = record
-            .dir
-            .canonicalize()
-            .unwrap_or_else(|_| record.dir.clone());
-        let resolved_base = self
-            .base
-            .canonicalize()
-            .unwrap_or_else(|_| self.base.clone());
+        let resolved = path::canonicalize_missing(&record.dir)?;
+        let resolved_base = self.base.canonicalize()?;
         if !resolved.starts_with(&resolved_base) {
             // Index is suspicious — don't touch anything on disk and
             // leave the in-memory record alone too. The caller can
@@ -450,14 +447,8 @@ impl JailRegistry {
             .get(id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no jail {id}")))?;
 
-        let resolved = record
-            .dir
-            .canonicalize()
-            .unwrap_or_else(|_| record.dir.clone());
-        let resolved_base = self
-            .base
-            .canonicalize()
-            .unwrap_or_else(|_| self.base.clone());
+        let resolved = path::canonicalize_missing(&record.dir)?;
+        let resolved_base = self.base.canonicalize()?;
         if !resolved.starts_with(&resolved_base) {
             log::warn!(
                 "[cwd_jail] refusing spawn: jail {id} dir {} not under base {}",

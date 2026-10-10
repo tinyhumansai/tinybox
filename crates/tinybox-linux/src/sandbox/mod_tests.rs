@@ -102,7 +102,7 @@ fn coarse_limits_are_declined_because_disk_is_not_enforced() {
     let caps = NamespaceSandbox::declared_capabilities(true);
 
     assert!(!caps.supports(Capability::ResourceLimits));
-    assert!(caps.declared().is_empty());
+    assert_eq!(caps.declared(), Vec::<Capability>::new());
 }
 
 #[tokio::test]

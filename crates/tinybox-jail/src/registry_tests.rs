@@ -383,7 +383,10 @@ fn failed_index_write_after_delete_keeps_in_memory_removal() {
 
     let error = reg.delete(&record.id).unwrap_err();
 
-    assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+    // The OS maps writing a directory differently (Windows: PermissionDenied,
+    // Unix: IsADirectory). Compare with the same independent filesystem failure.
+    let expected = fs::write(&blocked_tmp, b"independent probe").unwrap_err();
+    assert_eq!(error.kind(), expected.kind());
     assert!(!record.dir.exists());
     assert!(reg.get(&record.id).is_none());
 }
@@ -409,4 +412,72 @@ fn spawn_rejects_a_jail_directory_removed_after_creation() {
         .err()
         .map(|error| error.kind());
     assert_eq!(error, Some(io::ErrorKind::NotFound));
+}
+
+#[cfg(unix)]
+#[test]
+fn removed_jail_under_symlinked_registry_base_can_be_deleted() -> io::Result<()> {
+    let root = tempdir("linked-base");
+    let real = root.path().join("real");
+    fs::create_dir(&real)?;
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked)?;
+    let reg = JailRegistry::open(&linked)?;
+    let record = reg.create("removed")?;
+    fs::remove_dir_all(&record.dir)?;
+    reg.delete(&record.id)?;
+    assert!(reg.get(&record.id).is_none());
+    assert!(JailRegistry::open(&linked)?.get(&record.id).is_none());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn removed_jail_under_symlinked_base_reports_missing_not_outside() -> io::Result<()> {
+    let root = tempdir("linked-missing");
+    let real = root.path().join("real");
+    fs::create_dir(&real)?;
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked)?;
+    let reg = JailRegistry::open(&linked)?;
+    let record = reg.create("removed")?;
+    fs::remove_dir_all(&record.dir)?;
+    assert_eq!(
+        reg.spawn_in_with(&record.id, &super::super::NoopBackend, Command::new("true"))
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_jail_through_outside_symlink_remains_forbidden() -> io::Result<()> {
+    let root = tempdir("outside-link");
+    let outside = tempdir("outside-target");
+    let reg = JailRegistry::open(root.path())?;
+    let record = reg.create("corrupt")?;
+    let link = root.path().join("outside");
+    std::os::unix::fs::symlink(outside.path(), &link)?;
+    reg.index
+        .lock()
+        .unwrap()
+        .records
+        .get_mut(&record.id)
+        .unwrap()
+        .dir = link.join("missing/nested");
+    assert_eq!(
+        reg.delete(&record.id).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(
+        reg.spawn_in_with(&record.id, &super::super::NoopBackend, Command::new("true"))
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert!(reg.get(&record.id).is_some());
+    assert!(record.dir.is_dir());
+    Ok(())
 }
