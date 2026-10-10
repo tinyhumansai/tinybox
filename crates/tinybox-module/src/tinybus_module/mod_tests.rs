@@ -20,16 +20,21 @@ const CONTAINER: SandboxCapabilities =
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
 #[test]
-fn backend_capabilities_do_not_advertise_native_docker_without_supervision() {
-    let windows = capabilities_for(Platform::Other);
-    assert_eq!(windows.create_backends, ["passthrough"]);
-    assert_eq!(windows.exec_backends, Vec::<String>::new());
-    assert_eq!(windows.spawn_backends, Vec::<String>::new());
+fn backend_capabilities_match_supervision_and_confinement_platforms() {
+    let other = capabilities_for(Platform::Other);
+    assert_eq!(other.create_backends, ["passthrough"]);
+    assert_eq!(other.exec_backends, Vec::<String>::new());
+    assert_eq!(other.spawn_backends, Vec::<String>::new());
 
     let macos = capabilities_for(Platform::Unix);
     assert_eq!(macos.create_backends, ["passthrough", "docker"]);
     assert_eq!(macos.exec_backends, ["passthrough", "docker"]);
     assert_eq!(macos.spawn_backends, ["passthrough", "docker"]);
+
+    let windows = capabilities_for(Platform::Windows);
+    assert_eq!(windows.create_backends, ["passthrough", "docker"]);
+    assert_eq!(windows.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(windows.spawn_backends, ["passthrough", "docker"]);
 
     let linux = capabilities_for(Platform::Linux);
     assert_eq!(
@@ -38,6 +43,31 @@ fn backend_capabilities_do_not_advertise_native_docker_without_supervision() {
     );
     assert_eq!(linux.exec_backends, ["passthrough", "docker"]);
     assert_eq!(linux.spawn_backends, ["passthrough", "docker"]);
+}
+
+#[test]
+fn windows_advertises_only_backends_with_native_supervision() {
+    assert!(super::supports_create_backend(
+        Platform::Windows,
+        "passthrough"
+    ));
+    assert!(super::supports_create_backend(Platform::Windows, "docker"));
+    assert!(!super::supports_create_backend(
+        Platform::Windows,
+        "namespace"
+    ));
+    assert!(super::resources::supports_execution(
+        Platform::Windows,
+        "passthrough"
+    ));
+    assert!(super::resources::supports_execution(
+        Platform::Windows,
+        "docker"
+    ));
+    assert!(!super::resources::supports_execution(
+        Platform::Windows,
+        "namespace"
+    ));
 }
 
 #[test]

@@ -1,14 +1,23 @@
-//! Native process-group ownership and joined detached cleanup.
+//! Native process-tree ownership and joined detached cleanup.
 
 use super::{Active, LimitedLocalHost};
 use crate::LocalHost;
 use std::sync::atomic::Ordering;
 use tinybox_core::{Error, ExecRequest, Result};
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, Command};
+#[cfg(not(windows))]
+use tokio::process::Child;
+use tokio::process::Command;
 use tokio::sync::oneshot;
 
-/// An owned native process group. Drop requests cancellation; stop acknowledges cleanup.
+#[cfg(unix)]
+pub(super) type NativeChild = Child;
+#[cfg(windows)]
+pub(super) type NativeChild = command_group::AsyncGroupChild;
+#[cfg(not(any(unix, windows)))]
+pub(super) type NativeChild = Child;
+
+/// An owned native process tree. Drop requests cancellation; stop acknowledges cleanup.
 #[derive(Debug)]
 pub struct ManagedProcess {
     cancel: Option<oneshot::Sender<()>>,
@@ -28,7 +37,7 @@ impl ManagedProcess {
             || self.task.as_ref().is_some_and(|task| !task.is_finished())
     }
 
-    /// Kill the process group and wait for the supervisor to reap its direct child.
+    /// Terminate the process tree and wait for the supervisor to reap its child.
     ///
     /// # Errors
     /// Reports command failures once after successful cleanup, and retains native
@@ -93,9 +102,7 @@ impl LimitedLocalHost {
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::io("spawn", &error))?;
+        let mut child = spawn_native(&mut command).map_err(|error| Error::io("spawn", &error))?;
         let group = match group(&child) {
             Ok(group) => group,
             Err(error) => {
@@ -103,12 +110,12 @@ impl LimitedLocalHost {
                 state.active.fetch_add(1, Ordering::SeqCst);
                 runtime.spawn(async move {
                     let _active = Active(state);
-                    let _ = child.kill().await;
+                    let _ = kill_unowned(&mut child).await;
                 });
                 return Err(error);
             }
         };
-        let stdin = child.stdin.take();
+        let stdin = take_stdin(&mut child);
         let payload = request.stdin.clone();
         let (cancel, cancelled) = oneshot::channel::<()>();
         let state = self.state.clone();
@@ -169,7 +176,7 @@ impl LimitedLocalHost {
 }
 
 pub(super) fn prepare(command: &mut Command) -> Result<()> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Err(Error::Unsupported {
             sandbox: crate::LOCAL.into(),
             capability: tinybox_core::Capability::Detach,
@@ -182,18 +189,113 @@ pub(super) fn prepare(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn group(child: &Child) -> Result<i32> {
+#[cfg(windows)]
+pub(super) fn group(_: &NativeChild) -> Result<i32> {
+    static NEXT_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+    let mut group = NEXT_GROUP.load(Ordering::SeqCst);
+    loop {
+        let next = group.checked_sub(1).ok_or_else(|| Error::Backend {
+            sandbox: crate::LOCAL.into(),
+            operation: "own process tree",
+            message: "process tracking identifiers exhausted".into(),
+        })?;
+        match NEXT_GROUP.compare_exchange_weak(group, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Ok(group),
+            Err(actual) => group = actual,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(super) fn group(child: &NativeChild) -> Result<i32> {
     child
         .id()
         .and_then(|id| i32::try_from(id).ok())
         .ok_or_else(|| Error::Backend {
             sandbox: crate::LOCAL.into(),
-            operation: "own process group",
+            operation: "own process tree",
             message: "missing native process identifier".into(),
         })
 }
 
-pub(super) async fn terminate(child: &mut Child, group: i32) -> Result<()> {
+pub(super) fn spawn_native(command: &mut Command) -> std::io::Result<NativeChild> {
+    #[cfg(unix)]
+    {
+        command.spawn()
+    }
+    #[cfg(windows)]
+    {
+        use command_group::AsyncCommandGroup;
+        command.group_spawn()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        command.spawn()
+    }
+}
+
+pub(super) fn take_stdin(child: &mut NativeChild) -> Option<tokio::process::ChildStdin> {
+    #[cfg(windows)]
+    {
+        child.inner().stdin.take()
+    }
+    #[cfg(not(windows))]
+    {
+        child.stdin.take()
+    }
+}
+
+pub(super) fn take_stdout(child: &mut NativeChild) -> Option<tokio::process::ChildStdout> {
+    #[cfg(windows)]
+    {
+        child.inner().stdout.take()
+    }
+    #[cfg(not(windows))]
+    {
+        child.stdout.take()
+    }
+}
+
+pub(super) fn take_stderr(child: &mut NativeChild) -> Option<tokio::process::ChildStderr> {
+    #[cfg(windows)]
+    {
+        child.inner().stderr.take()
+    }
+    #[cfg(not(windows))]
+    {
+        child.stderr.take()
+    }
+}
+
+pub(super) async fn wait_native(
+    child: &mut NativeChild,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    {
+        // Let the collection task observe the owned process's exit without
+        // waiting for descendants. The wrapper's `wait` is reserved for the
+        // cleanup path, where it also waits for the Job Object to become empty.
+        child.inner().wait().await
+    }
+    #[cfg(not(windows))]
+    {
+        child.wait().await
+    }
+}
+
+pub(super) async fn kill_unowned(child: &mut NativeChild) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        child.start_kill()?;
+        child.wait().await.map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        child.kill().await
+    }
+}
+
+pub(super) async fn terminate(child: &mut NativeChild, group: i32) -> Result<()> {
     cleanup_deadline(
         std::time::Duration::from_secs(5),
         terminate_native(child, group),
@@ -214,7 +316,7 @@ async fn cleanup_deadline(
         })?
 }
 
-async fn terminate_native(child: &mut Child, group: i32) -> Result<()> {
+async fn terminate_native(child: &mut NativeChild, group: i32) -> Result<()> {
     #[cfg(unix)]
     {
         use nix::{
@@ -224,14 +326,33 @@ async fn terminate_native(child: &mut Child, group: i32) -> Result<()> {
         if child.id().is_some() || group_alive(group)? {
             kill_group_with(group, |group| killpg(Pid::from_raw(group), Signal::SIGKILL))?;
         }
+        child
+            .kill()
+            .await
+            .map_err(|error| Error::io("kill and reap", &error))?;
+        wait_group(group, std::time::Duration::from_secs(5), group_alive).await
     }
-    #[cfg(not(unix))]
-    let _ = group;
-    child
-        .kill()
-        .await
-        .map_err(|error| Error::io("kill and reap", &error))?;
-    wait_group(group, std::time::Duration::from_secs(5), group_alive).await
+    #[cfg(windows)]
+    {
+        let _ = group;
+        child
+            .start_kill()
+            .map_err(|error| Error::io("terminate process job", &error))?;
+        child
+            .wait()
+            .await
+            .map_err(|error| Error::io("wait for process job", &error))?;
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = group;
+        child
+            .kill()
+            .await
+            .map_err(|error| Error::io("kill and reap", &error))?;
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -249,6 +370,7 @@ fn kill_group_with(
     }
 }
 
+#[cfg(unix)]
 async fn wait_group(
     group: i32,
     deadline: std::time::Duration,
@@ -313,7 +435,7 @@ fn group_alive(group: i32) -> Result<bool> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn group_alive(_: i32) -> Result<bool> {
     Ok(false)
 }

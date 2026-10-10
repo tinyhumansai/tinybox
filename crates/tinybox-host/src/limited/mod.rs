@@ -24,7 +24,7 @@ pub struct LimitedLocalHost {
     state: Arc<State>,
 }
 
-type RetainedChild = Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>;
+type RetainedChild = Arc<tokio::sync::Mutex<Option<process::NativeChild>>>;
 
 #[derive(Debug)]
 struct State {
@@ -122,19 +122,18 @@ impl Host for LimitedLocalHost {
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::io("spawn", &error))?;
+        let mut child =
+            process::spawn_native(&mut command).map_err(|error| Error::io("spawn", &error))?;
         let group = match process::group(&child) {
             Ok(group) => group,
             Err(error) => {
-                let _ = child.kill().await;
+                let _ = process::kill_unowned(&mut child).await;
                 return Err(error);
             }
         };
-        let stdout = pipe(child.stdout.take(), "stdout")?;
-        let stderr = pipe(child.stderr.take(), "stderr")?;
-        let stdin = child.stdin.take();
+        let stdout = pipe(process::take_stdout(&mut child), "stdout")?;
+        let stderr = pipe(process::take_stderr(&mut child), "stderr")?;
+        let stdin = process::take_stdin(&mut child);
         let payload = request.stdin.clone();
         let budget = Arc::new(AtomicUsize::new(0));
         let limit = self.limit;
@@ -156,8 +155,7 @@ impl Host for LimitedLocalHost {
                         Ok(())
                     },
                     async {
-                        child
-                            .wait()
+                        process::wait_native(&mut child)
                             .await
                             .map_err(|error| Error::io("wait", &error))
                     }
@@ -184,14 +182,14 @@ impl Host for LimitedLocalHost {
     }
 }
 
-async fn cleanup(state: &State, mut child: tokio::process::Child, group: i32) -> Result<()> {
+async fn cleanup(state: &State, mut child: process::NativeChild, group: i32) -> Result<()> {
     let result = process::terminate(&mut child, group).await;
     retain_cleanup(state, child, group, result)
 }
 
 fn retain_cleanup(
     state: &State,
-    child: tokio::process::Child,
+    child: process::NativeChild,
     group: i32,
     result: Result<()>,
 ) -> Result<()> {
