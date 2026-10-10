@@ -42,7 +42,11 @@ impl BoxService {
 
     /// Stop tracked processes and destroy the resource.
     async fn close(&self, resource: ResourceId) -> TinyBusResult<()> {
-        self.resources.close(&resource).await
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.close(&resource).await },
+        ))
+        .await
     }
 
     /// Start a backend-owned detached process.
@@ -58,7 +62,11 @@ impl BoxService {
 
     /// Stop a tracked process; the identifier remains queryable until close.
     async fn cancel(&self, process: ProcessRef) -> TinyBusResult<()> {
-        self.resources.cancel(&process).await
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.cancel(&process).await },
+        ))
+        .await
     }
 
     /// Return shell structure facts without applying host security policy.

@@ -15,6 +15,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Maximum reservation identifier length in bytes.
+pub const MAX_ID_BYTES: usize = 128;
+/// Maximum live resources in a module instance.
+pub const MAX_ACTIVE_RESOURCES: usize = 64;
+/// Maximum tracked process reservations in one resource.
+pub const MAX_PROCESSES_PER_RESOURCE: usize = 64;
+/// Maximum retained reservations, including cleanup tombstones.
+pub const MAX_RESERVATIONS: usize = 4096;
+/// Maximum combined stdout and stderr bytes collected by the module host.
+pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Stable error name for module admission capacity exhaustion.
+pub const RESOURCE_LIMIT: &str = "ai.tinyhumans.tinybox.Error.ResourceLimit";
+
 /// Well-known module interface.
 pub const INTERFACE: &str = "ai.tinyhumans.tinybox.Box";
 /// Module object path.
@@ -42,10 +55,15 @@ pub const UNSUPPORTED_BACKEND: &str = "ai.tinyhumans.tinybox.Error.UnsupportedBa
 pub const DUPLICATE_ID: &str = "ai.tinyhumans.tinybox.Error.DuplicateId";
 /// Stable error name for an empty reservation identifier.
 pub const INVALID_ID: &str = "ai.tinyhumans.tinybox.Error.InvalidId";
+/// Stable error name when combined output exceeds the collection budget.
+pub const OUTPUT_LIMIT: &str = "ai.tinyhumans.tinybox.Error.OutputLimit";
+/// Stable error name when Close cancels collected execution.
+pub const EXEC_CANCELLED: &str = "ai.tinyhumans.tinybox.Error.ExecCancelled";
 /// Stable error name for a native backend operation failure.
 pub const BACKEND_ERROR: &str = "ai.tinyhumans.tinybox.Error.Backend";
 
 /// Opaque caller-known reservation identifier bound by one module instance.
+/// IDs use ASCII letters, digits, hyphens, or underscores, up to [`MAX_ID_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ResourceId(pub String);
 

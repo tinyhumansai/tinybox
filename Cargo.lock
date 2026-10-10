@@ -964,6 +964,7 @@ version = "0.1.16"
 dependencies = [
  "async-trait",
  "serde_json",
+ "tempfile",
  "tinybox-bus",
  "tinybox-core",
  "tinybox-docker",

@@ -36,6 +36,8 @@ tinybus.workspace = true
 tinybus-module.workspace = true
 
 [dev-dependencies]
+# Native cancellation verification uses isolated readiness files, not wall-clock sleeps.
+tempfile = "3"
 # Deterministic delayed-host fixtures implement the existing object-safe host trait.
 async-trait.workspace = true
 # Module integration tests exercise the real asynchronous in-memory TinyBus.

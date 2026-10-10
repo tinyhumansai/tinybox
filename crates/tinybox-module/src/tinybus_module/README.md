@@ -40,17 +40,31 @@ arriving during allocation runs immediately after allocation finishes.
 
 Cancel leaves an issued process queryable until its resource closes. Close
 stops all tracked detached processes, destroys the sandbox, and invalidates
-its resource. Reservation tombstones remain until the module instance ends. Failed cleanup retains ownership
-so Close can be retried. Callers must close explicitly before unloading the
+its resource. Reservation tombstones remain until the module instance ends.
+Failed cleanup retains ownership so Close can be retried. Callers must close explicitly before unloading the
 module. Exec collects output; detached output streaming, file transfer, forwards,
 SSH reach, and microVM image configuration need subsequent interfaces.
 
-Resource operations currently serialize within a module instance, including
-Exec. A detached process can be cancelled after Spawn returns; a collected Exec
-is not cancellable by this interface. Long-lived workloads should use Spawn. Create, Spawn, and Exec run in
-module-owned tasks: dropping or timing out the caller's wait does not abort
-native startup or discard its ownership. Close waits for collected Exec to
-finish before destroying the resource, preventing a cleanup/execution race.
+Operations serialize within each resource; unrelated resources have independent
+locks. A detached process can be cancelled after Spawn returns. Close fences new
+execution, aborts its resource's collected Exec, waits for its output supervisor
+to kill/reap the child, then stops tracked detached processes and destroys the
+sandbox. Create, Spawn, Exec, Cancel, and Close run in module-owned tasks, so a
+caller dropping or timing out its wait cannot discard startup/cleanup ownership.
+
+IDs are ASCII letters, digits, hyphens, or underscores, at most 128 bytes.
+Admission is capped at 64 live resources, 64 retained processes per resource,
+and 4096 reservation tombstones per module instance. Failed, cancelled, and
+closed reservations keep counting for that instance's whole lifetime; a
+process-cached module can exhaust new admission after repeated Create/Spawn
+cycles. Reached capacity returns ResourceLimit and never evicts replay history.
+Cancelled/completed process entries likewise count toward their resource's 64
+slots until Close. A future generation-based reservation protocol is needed
+for indefinite reuse without losing stale-retry safety. Issued resources can still
+be closed when the admission budget is exhausted. Collected commands use
+LimitedLocalHost with a combined 1 MiB stdout/stderr budget enforced during
+reading. Overflow fails explicitly and kills/reaps the host child; it is never
+silent truncation.
 
 AnalyzeShell removes quoted heredoc bodies before structural scanning. It
 returns segments and hidden-execution/redirection facts. Authorization,
