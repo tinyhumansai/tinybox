@@ -163,6 +163,20 @@ fn landlock_refuses_network_and_subprocess_denials_before_spawning() -> std::io:
     Ok(())
 }
 
+/// Locate `true` only in the documented Landlock baseline, never in raw PATH.
+fn permitted_true() -> std::io::Result<std::path::PathBuf> {
+    ["/usr/bin/true", "/bin/true"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither baseline executable /usr/bin/true nor /bin/true exists",
+            )
+        })
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn strict_landlock_filesystem_only_spawn_still_works() -> std::io::Result<()> {
@@ -172,7 +186,8 @@ fn strict_landlock_filesystem_only_spawn_still_works() -> std::io::Result<()> {
         return Ok(());
     }
     let root = tempfile::tempdir()?;
-    let jail = crate::Jail::new(root.path(), "strict-fs");
+    let executable = permitted_true()?;
+    let jail = crate::Jail::new(root.path(), "strict-fs").add_read_only(&executable);
     assert_eq!(
         backend.plan_check(&jail).constraints,
         [(
@@ -181,7 +196,7 @@ fn strict_landlock_filesystem_only_spawn_still_works() -> std::io::Result<()> {
         )]
     );
     let mut child =
-        crate::spawn_required_with(&backend, &jail, std::process::Command::new("/usr/bin/true"))?;
+        crate::spawn_required_with(&backend, &jail, std::process::Command::new(&executable))?;
     assert!(child.wait()?.success());
     Ok(())
 }
@@ -218,13 +233,20 @@ fn seatbelt_launcher_presence_never_claims_verified_enforcement() {
 fn strict_default_spawn_obeys_the_detected_filesystem_declaration() -> std::io::Result<()> {
     use tinybox_core::{Constraint, Enforcement};
     let root = tempfile::tempdir()?;
-    let jail = crate::Jail::new(root.path(), "strict-default");
-    let result = crate::spawn_required(&jail, std::process::Command::new("/usr/bin/true"));
-    if crate::default_backend()
+    let mut jail = crate::Jail::new(root.path(), "strict-default");
+    let enforced = crate::default_backend()
         .constraint_support()
         .enforcement(Constraint::Filesystem)
-        == Enforcement::Enforced
-    {
+        == Enforcement::Enforced;
+    let command = if enforced {
+        let executable = permitted_true()?;
+        jail = jail.add_read_only(&executable);
+        std::process::Command::new(executable)
+    } else {
+        std::process::Command::new("definitely-not-a-command")
+    };
+    let result = crate::spawn_required(&jail, command);
+    if enforced {
         assert!(result?.wait()?.success());
     } else {
         assert_eq!(

@@ -45,3 +45,23 @@ Preflight is a declaration check, not proof that runtime setup will succeed.
 Backend spawn/create errors must propagate. Callers select hard constraints
 explicitly before legacy lifecycle methods; those methods do not automatically
 turn every field of a `BoxSpec` into a hard request.
+
+## Registry path ownership
+
+Registry bases are trusted host-owned directories and must not be writable by
+jailed workloads. `open` canonicalizes the caller's trusted base once. Older
+records sharing that exact lexical base are normalized only when their suffix
+has normal components; traversal introduced in a record remains forbidden.
+Older symlink aliases are resolved and checked against the canonical base.
+
+Spawning requires an existing root, canonicalizes it before containment, and
+passes that checked canonical root directly to the backend. It never accepts a
+synthetic missing path or recanonicalizes an unchecked alias after the check.
+Missing-path resolution retires already-missing entries or diagnoses an outside
+missing path; a failed existing-root lookup always refuses spawning even when
+the path appears during diagnosis. These path-based APIs do not promise descriptor-atomic protection
+against a separate host process with write authority over the registry base
+replacing existing directories during an operation. That authority must stay
+with the host; untrusted processes get only their jail root and cannot replace
+its parent entry. Descriptor-based hostile-host filesystem operations would
+require a distinct backend contract rather than claiming atomicity here.
