@@ -31,7 +31,9 @@ selected automatically. Legacy Seatbelt spawn remains available but its
 filesystem declaration is best effort: it allows reads everywhere and writes
 in `/private/tmp`. Strict preflight refuses it. Launcher presence does not prove the host enforces
 profiles, so network and subprocess rules also remain best effort until an
-enforcement probe can establish them.
+enforcement probe can establish them. `isolation()` reports `None`: the
+Seatbelt launcher is the mechanism used, not proof that the host actually
+isolates the workload.
 
 Landlock implements filesystem rules only (no network ABI rules or process
 isolation). A filesystem-only strict jail may spawn, but

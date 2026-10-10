@@ -50,12 +50,9 @@ impl JailBackend for SeatbeltBackend {
         declared_constraint_support(self.is_available())
     }
 
+    /// Launcher presence proves no process-isolation guarantee.
     fn isolation(&self) -> tinybox_core::IsolationLevel {
-        if self.is_available() {
-            tinybox_core::IsolationLevel::Process
-        } else {
-            tinybox_core::IsolationLevel::None
-        }
+        tinybox_core::IsolationLevel::None
     }
 
     fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child> {

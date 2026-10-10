@@ -401,6 +401,12 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
 fn executable_presence_cannot_satisfy_hard_seatbelt_denials() {
     use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
     assert_eq!(declared_constraint_support(false), ConstraintSupport::NONE);
+    // No process-isolation guarantee can follow from a launcher-presence check,
+    // even on macOS where the launcher exists.
+    assert_eq!(
+        SeatbeltBackend::new().isolation(),
+        tinybox_core::IsolationLevel::None
+    );
     let present = declared_constraint_support(true);
     for constraint in [
         Constraint::Filesystem,

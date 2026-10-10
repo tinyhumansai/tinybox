@@ -166,7 +166,8 @@ and unsuitable for arbitrary untrusted code; denied network or subprocess
 requests fail before spawning. Seatbelt permits reads everywhere and scratch
 writes. Its launcher-presence check does not verify profile enforcement, so
 filesystem, network and subprocess rules all report best effort; strict
-preflight refuses them. Noop
+preflight refuses them. It reports isolation `None` until enforcement is
+verified; a launcher mechanism alone is no isolation guarantee. Noop
 reports no isolation or constraints. See
 [constraint preflight](../../docs/specs/constraint-preflight.md) for the backend
 matrix and the trusted legacy APIs.

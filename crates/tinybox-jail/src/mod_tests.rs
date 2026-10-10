@@ -192,6 +192,7 @@ fn seatbelt_launcher_presence_never_claims_verified_enforcement() {
     use tinybox_core::{Constraint, Enforcement};
     let backend = crate::SeatbeltBackend::new();
     let support = backend.constraint_support();
+    assert_eq!(backend.isolation(), tinybox_core::IsolationLevel::None);
     assert!(!backend.is_suitable_for_untrusted_code());
     assert_eq!(
         support.enforcement(Constraint::Filesystem),
