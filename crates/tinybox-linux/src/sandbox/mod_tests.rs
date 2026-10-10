@@ -98,11 +98,11 @@ fn it_declares_kernel_isolation_and_nothing_it_cannot_do() {
 }
 
 #[test]
-fn limits_are_declared_only_when_asked_for() {
+fn coarse_limits_are_declined_because_disk_is_not_enforced() {
     let caps = NamespaceSandbox::declared_capabilities(true);
 
-    assert!(caps.supports(Capability::ResourceLimits));
-    assert_eq!(caps.declared(), [Capability::ResourceLimits]);
+    assert!(!caps.supports(Capability::ResourceLimits));
+    assert!(caps.declared().is_empty());
 }
 
 #[tokio::test]
@@ -491,4 +491,53 @@ fn the_workspace_mount_point_is_stable() -> Result<()> {
         std::path::Path::new("/srv/work")
     );
     Ok(())
+}
+
+#[test]
+fn preflight_reports_each_enforced_boundary_without_claiming_disk() {
+    use tinybox_core::{Constraint, Enforcement};
+    let (backend, _) = sandbox();
+    let support = backend.constraint_support();
+    assert_eq!(
+        support.enforcement(Constraint::Filesystem),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Network),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Cpu),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Memory),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Pids),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Disk),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Subprocess),
+        Enforcement::Unsupported
+    );
+    assert!(
+        backend
+            .require(&[Constraint::Filesystem, Constraint::Network])
+            .is_ok()
+    );
+    assert!(backend.require(&[Constraint::Disk]).is_err());
+    let constrained = backend.with_cgroup_limits().constraint_support();
+    for constraint in [Constraint::Cpu, Constraint::Memory, Constraint::Pids] {
+        assert_eq!(constrained.enforcement(constraint), Enforcement::Enforced);
+    }
+    assert_eq!(
+        constrained.enforcement(Constraint::Disk),
+        Enforcement::Unsupported
+    );
 }

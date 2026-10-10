@@ -45,6 +45,25 @@ impl JailBackend for SeatbeltBackend {
         std::path::Path::new("/usr/bin/sandbox-exec").exists()
     }
 
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+        if !self.is_available() {
+            return ConstraintSupport::NONE;
+        }
+        ConstraintSupport::NONE
+            .with(Constraint::Filesystem, Enforcement::BestEffort)
+            .with(Constraint::Network, Enforcement::Enforced)
+            .with(Constraint::Subprocess, Enforcement::Enforced)
+    }
+
+    fn isolation(&self) -> tinybox_core::IsolationLevel {
+        if self.is_available() {
+            tinybox_core::IsolationLevel::Process
+        } else {
+            tinybox_core::IsolationLevel::None
+        }
+    }
+
     fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
         let mut wrapper =
             prepare_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec"));
@@ -54,6 +73,7 @@ impl JailBackend for SeatbeltBackend {
         // it only the launcher dies while the shell pipeline it started runs
         // on. (Linux and the no-op backend spawn `cmd` itself, so the caller's
         // setting applies there.)
+        #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             wrapper.process_group(0);

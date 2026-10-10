@@ -39,6 +39,17 @@ pub enum Error {
         capability: Capability,
     },
 
+    /// A hard constraint could not be fully enforced before execution.
+    #[error("sandbox {sandbox} cannot enforce {constraint:?}: {enforcement:?}")]
+    ConstraintNotEnforced {
+        /// Backend refusing the request.
+        sandbox: String,
+        /// Requested security boundary.
+        constraint: crate::Constraint,
+        /// Actual level of support.
+        enforcement: crate::Enforcement,
+    },
+
     /// A resource limit was zero, and every limit tinybox applies must be
     /// positive to be meaningful.
     #[error("resource limit {limit} must be greater than zero")]

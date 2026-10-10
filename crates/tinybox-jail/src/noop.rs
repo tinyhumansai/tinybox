@@ -1,8 +1,7 @@
-//! Fallback backend: no enforcement, just spawns.
+//! Explicit trusted passthrough: no enforcement, just spawns.
 //!
-//! Used when no OS-level jail is available (unsupported platform, missing
-//! kernel feature, etc.). Callers can still rely on application-layer
-//! `validate_path_within_root` checks.
+//! Never selected automatically when OS enforcement is unavailable. This
+//! backend reports no isolation or constraints; hard preflight refuses it.
 
 use std::process::{Child, Command};
 

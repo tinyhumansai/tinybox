@@ -114,7 +114,7 @@ workspace:  alpine:3
 runner:     local / docker
 isolation:  kernel
 untrusted:  safe
-supports:   filesystem snapshots, forking, resource limits
+supports:   filesystem snapshots, forking
 ```
 
 Snapshot a box and branch it — the fork inherits the parent's filesystem and
@@ -398,3 +398,6 @@ Arch Linux; macOS 15 and 26 on Intel and Apple Silicon; Windows Server 2022 and
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
+
+Per-constraint hard preflight and current backend limitations are documented in
+[constraint preflight](docs/specs/constraint-preflight.md).

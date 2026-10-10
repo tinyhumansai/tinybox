@@ -787,7 +787,7 @@ async fn inspecting_a_docker_box_reports_kernel_isolation() -> Result<()> {
     assert!(
         inspected
             .out
-            .contains("filesystem snapshots, forking, port forwarding, resource limits")
+            .contains("filesystem snapshots, forking, port forwarding")
     );
     // The workspace column shows the image, not a Debug dump.
     assert!(inspected.out.contains("workspace:  alpine:3"));
