@@ -280,3 +280,41 @@ async fn a_local_forward_is_the_address_itself() -> Result<()> {
     assert!(forwarded.is_direct());
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_owned_child_stops_the_local_workload() -> Result<()> {
+    let mut command = LocalHost::command(&ExecRequest::new(["sleep", "600"]))?;
+    let child = command
+        .spawn()
+        .map_err(|error| Error::io("spawn test child", &error))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| Error::EmptyCommand {
+            sandbox: NAME.into(),
+        })?
+        .to_string();
+    drop(child);
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let probe = LocalHost::new()
+                .run(&ExecRequest::new(["kill", "-0", &pid]))
+                .await?;
+            if !probe.succeeded() {
+                return Ok::<(), Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if stopped.is_err() {
+        LocalHost::new()
+            .run(&ExecRequest::new(["kill", "-KILL", &pid]))
+            .await?;
+    }
+    assert!(
+        stopped.is_ok(),
+        "dropping the owned child must kill the workload"
+    );
+    Ok(())
+}
