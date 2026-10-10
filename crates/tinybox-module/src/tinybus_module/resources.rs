@@ -395,8 +395,11 @@ impl Resources {
         };
         let running = native.is_running();
         if !running {
-            native.stop().await.map_err(|error| backend_error(&error))?;
-            entry.processes.remove(&process.process);
+            let result = native.stop().await.map_err(|error| backend_error(&error));
+            if native.is_cleaned() {
+                entry.processes.remove(&process.process);
+            }
+            result?;
         }
         Ok(running)
     }
@@ -434,9 +437,11 @@ impl Resources {
         let Some(native) = entry.processes.get_mut(&process.process) else {
             return Ok(());
         };
-        native.stop().await.map_err(|error| backend_error(&error))?;
-        entry.processes.remove(&process.process);
-        Ok(())
+        let result = native.stop().await.map_err(|error| backend_error(&error));
+        if native.is_cleaned() {
+            entry.processes.remove(&process.process);
+        }
+        result
     }
 
     pub(super) async fn close(&self, resource: &ResourceId) -> Result<()> {
@@ -471,8 +476,8 @@ impl Resources {
             }
         }
         let mut slot = slot.lock().await;
+        let mut failure = None;
         if let Some(entry) = slot.as_mut() {
-            let mut failure = None;
             for process in entry.processes.values_mut() {
                 if let Err(error) = process.stop().await {
                     failure.get_or_insert_with(|| backend_error(&error));
@@ -483,8 +488,20 @@ impl Resources {
             {
                 failure.get_or_insert_with(|| backend_error(&error));
             }
-            if let Some(error) = failure {
-                return Err(error);
+            entry.processes.retain(|_, process| !process.is_cleaned());
+            if !entry.processes.is_empty() {
+                return failure
+                    .map_or_else(|| Err(Error::failed("native cleanup remains pending")), Err);
+            }
+            if entry
+                .collector
+                .as_ref()
+                .is_some_and(|collector| collector.has_pending_cleanup())
+            {
+                return failure.map_or_else(
+                    || Err(Error::failed("collector cleanup remains pending")),
+                    Err,
+                );
             }
             entry
                 .sandbox
@@ -500,7 +517,7 @@ impl Resources {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         executions.closing.remove(resource);
         executions.native.remove(resource);
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     pub(super) async fn shutdown(&self) -> Result<()> {

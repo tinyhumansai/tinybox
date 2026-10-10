@@ -918,24 +918,12 @@ async fn shutdown_drains_other_processes_and_resources_after_a_process_failure()
         .iter()
         .filter(|pid| std::path::Path::new(&format!("/proc/{}/status", pid.trim())).exists())
         .collect();
-    let failed_retained = resources.state.lock().await.entries.contains_key(&ids[0]);
-    let later_released = !resources.state.lock().await.entries.contains_key(&ids[1]);
-    assert!(resources.shutdown().await.is_err());
-    // Clean the fixture even when the regression observes skipped workloads.
-    if let Ok(slot) = resources.slot(&ids[0]).await
-        && let Some(entry) = slot.lock().await.as_mut()
-    {
-        entry.processes.remove(&failed.process);
-    }
-    for id in &ids {
-        resources.close(id).await?;
-    }
+    assert!(resources.state.lock().await.entries.is_empty());
+    resources.shutdown().await?;
     assert!(
         survivors.is_empty(),
         "shutdown skipped processes after a prior failure: {survivors:?}"
     );
-    assert!(failed_retained);
-    assert!(later_released);
     Ok(())
 }
 
@@ -953,4 +941,74 @@ async fn native_ready_pid(ready: &std::path::Path) -> Result<String> {
     })
     .await
     .map_err(Error::failed)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_commands_release_native_slots_through_public_cleanup_retries() -> Result<()> {
+    let resources = Resources::default();
+    for index in 0..=tinybox_bus::MAX_ACTIVE_RESOURCES {
+        let id = resources.reserve(ReserveRequest::Resource).await?;
+        resources
+            .create(CreateRequest {
+                resource: id.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                env: BTreeMap::new(),
+            })
+            .await?;
+        let cycles = if index == 0 {
+            tinybox_bus::MAX_PROCESSES_PER_RESOURCE + 1
+        } else {
+            1
+        };
+        for _ in 0..cycles {
+            let process = resources
+                .spawn(SpawnRequest {
+                    process: resources
+                        .reserve(ReserveRequest::Process(id.clone()))
+                        .await?,
+                    command: ExecRequest {
+                        resource: id.clone(),
+                        argv: vec!["true".into()],
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        stdin: Some(vec![0; 1024 * 1024]),
+                    },
+                })
+                .await?;
+            // Drain waits for the deterministic broken pipe before cancellation.
+            {
+                let slot = resources.slot(&id).await?;
+                let slot = slot.lock().await;
+                slot.as_ref()
+                    .ok_or_else(|| Error::failed("missing fixture"))?
+                    .collector
+                    .as_ref()
+                    .ok_or_else(|| Error::failed("missing collector"))?
+                    .drain()
+                    .await;
+            }
+            match index % 3 {
+                0 => {
+                    assert!(resources.cancel(&process).await.is_err());
+                    resources.cancel(&process).await?;
+                    assert!(!resources.is_running(&process).await?);
+                }
+                1 => {
+                    assert!(resources.is_running(&process).await.is_err());
+                    assert!(!resources.is_running(&process).await?);
+                }
+                _ => {
+                    assert!(resources.close(&id).await.is_err());
+                    resources.close(&id).await?;
+                }
+            }
+        }
+        resources.close(&id).await?;
+        resources.close(&id).await?;
+    }
+    resources.shutdown().await?;
+    assert!(resources.state.lock().await.entries.is_empty());
+    Ok(())
 }
