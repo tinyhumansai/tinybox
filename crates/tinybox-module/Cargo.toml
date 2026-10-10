@@ -26,6 +26,8 @@ crate-type = ["rlib", "cdylib"]
 tinybox-bus.workspace = true
 # The module constructs local reach itself, keeping process handles module-owned.
 tinybox-host.workspace = true
+# The module composes the owned local SSH process host with remote sandbox providers.
+tinybox-ssh.workspace = true
 # Random instance identity prevents reservations from another module incarnation binding.
 uuid = { version = "1", features = ["v4"] }
 # Resource operations serialize against close and allocate opaque identifiers.

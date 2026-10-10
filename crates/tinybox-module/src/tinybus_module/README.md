@@ -18,6 +18,8 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Capabilities | none | ModuleCapabilities |
 | Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
+| Forward | ForwardRequest | ForwardInfo |
+| CloseForward | CloseForwardRequest | unit |
 | Exec | ExecRequest | ExecOutput |
 | Inspect | ResourceId | ResourceInfo |
 | Close | ResourceId | unit |
@@ -26,10 +28,13 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
 
-Capabilities advertises contract version 1.1; 1.0 denotes the original
+Capabilities advertises contract version 1.2; 1.0 denotes the original
 discovery-only surface. Hosts require equal majors and a module minor at least
-as new as their vocabulary, using tinybox-bus::is_compatible. This version is
-independent of package/artifact releases. Describe remains unchanged.
+as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
+added reserved resource/process ownership and terminal shutdown; 1.2 adds host
+selection, sandbox networking/resource/port inputs, effective published-port
+facts, and module-owned forwarding. This version is independent of
+package/artifact releases. Describe remains unchanged.
 
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on
@@ -39,6 +44,27 @@ unsupported backend, including microvm without its required image
 configuration, fails; there is no passthrough fallback. Describe remains the
 existing summary of compiled providers, rather than claiming every provider is
 configurable through Create. Passthrough runs trusted code without isolation.
+
+Create defaults to `HostConfig::Local`. `HostConfig::Ssh` reaches the selected
+host through the installed OpenSSH client and its configuration, with optional
+port, identity file, known-hosts file, and opt-in `accept-new` host-key policy.
+Host selection does not add confinement: pair a remote host with an actual
+sandbox when running untrusted code. The requested network policy, resource
+limits, and guest port mappings are copied into the sandbox specification; a
+backend remains responsible for enforcing the capabilities it advertises.
+Docker reports effective published ports in ResourceInfo, including its
+selected host port for dynamic mappings. Other backends report no effective
+ports unless they implement that fact.
+
+To forward a published guest port, reserve `Forward(resource)` and call
+`Forward` with that handle and guest port. The returned opaque `ForwardInfo`
+contains the reachable local address. The module holds the tunnel until
+`CloseForward`, resource `Close`, or `Shutdown`; repeating the same `Forward` with the
+same reservation and guest port replays the same address, while binding that
+handle to a different guest port fails. Forward reservations are bounded and
+expire like other unused reservations. `Forward` refuses ports the sandbox did
+not actually publish, and remote SSH forwards use the existing host's SSH
+subprocess lifecycle and host-key policy.
 
 Clients call Reserve with Resource or Process(resource) before Create or Spawn.
 The module mints an opaque, single-use handle without starting native work.
@@ -70,12 +96,15 @@ publish a usable result once shutdown starts. Failed cleanup retains native owne
 and returns an error; retry Shutdown before unloading. Command errors can be
 returned after complete resource release; repeating Shutdown then succeeds. The terminal instance
 never restarts. Host ordering is stop submissions, await Shutdown, then unload
-the ABI/module runtime. The SDK shutdown timeout alone is not this barrier. Output streaming,
-transfer, forwarding, SSH and microVM configuration remain subsequent slices.
+the ABI/module runtime. The SDK shutdown timeout alone is not this barrier.
+Output streaming, workspace transfer, and microVM configuration remain
+subsequent slices.
 
 Operations serialize within each resource; unrelated resources have independent
 locks. Spawn uses an owned local process group on Unix and a Job Object on
-Windows, never legacy pid-file detach helpers. Capabilities distinguishes Create
+Windows for local commands, never legacy pid-file detach helpers. Remote SSH
+process identifiers remain attached to the resource and use the sandbox's stop
+operation for cancellation and close. Capabilities distinguishes Create
 backends from supervised execution backends. Exec/Spawn support passthrough and
 Docker on Unix and Windows; namespace execution remains Linux-only.
 Unsupported operations fail explicitly without fallback. Legacy library APIs

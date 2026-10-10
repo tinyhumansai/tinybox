@@ -115,6 +115,7 @@ async fn verify_resource_lifecycle(
                     std::env::current_dir()?.to_string_lossy().into_owned(),
                 ),
                 env: std::collections::BTreeMap::new(),
+                ..Default::default()
             },),
         )
         .await?;

@@ -20,6 +20,30 @@ use tinybox_core::{
 
 use super::{DockerSandbox, NAME, args, state};
 
+#[test]
+fn effective_published_ports_parse_dynamic_and_fixed_bindings() -> Result<()> {
+    let ports = args::parse_published_ports(
+        r#"{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"32768"}],"8443/tcp":[{"HostIp":"127.0.0.1","HostPort":"8443"}],"53/udp":null}"#,
+    )?;
+
+    assert_eq!(
+        ports,
+        [
+            PortMapping {
+                guest: 8080,
+                host: Some(32768)
+            },
+            PortMapping {
+                guest: 8443,
+                host: Some(8443)
+            }
+        ]
+    );
+    assert!(args::parse_published_ports(r#"{"bad/tcp":[]}"#).is_err());
+    assert!(args::parse_published_ports(r#"{"8080/tcp":[{"HostPort":"not-a-port"}]}"#).is_err());
+    Ok(())
+}
+
 /// A digest `docker commit` might print.
 const COMMIT_OUTPUT: &str =
     "sha256:9f2c0e1b7a4d5e6f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f";
