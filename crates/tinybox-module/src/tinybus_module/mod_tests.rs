@@ -188,7 +188,9 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
         assert!(
             service
                 .create(CreateRequest {
-                    resource: reservation(),
+                    resource: service
+                        .reserve(tinybox_bus::ReserveRequest::Resource)
+                        .await?,
                     backend: backend.into(),
                     workspace: Workspace::Directory(".".into()),
                     env: std::collections::BTreeMap::new()
@@ -200,7 +202,9 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
     assert!(
         service
             .create(CreateRequest {
-                resource: reservation(),
+                resource: service
+                    .reserve(tinybox_bus::ReserveRequest::Resource)
+                    .await?,
                 backend: "passthrough".into(),
                 workspace: Workspace::Image("alpine".into()),
                 env: std::collections::BTreeMap::new()
@@ -215,7 +219,7 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
 #[tokio::test]
 async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus::Result<()> {
     use tinybox_bus::{
-        CreateRequest, ExecOutput, ExecRequest, ProcessRef, ResourceId, ResourceInfo, Workspace,
+        CreateRequest, ExecOutput, ExecRequest, ProcessRef, ResourceInfo, Workspace,
     };
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
@@ -227,7 +231,9 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
         .call(
             "Create",
             (CreateRequest {
-                resource: reservation(),
+                resource: proxy
+                    .call("Reserve", (tinybox_bus::ReserveRequest::Resource,))
+                    .await?,
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: std::collections::BTreeMap::new(),
@@ -261,24 +267,20 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
     let bytes: ExecOutput = proxy.call("Exec", (input,)).await?;
     assert_eq!(bytes.stdout, [0, 255, 42]);
 
-    let bad = ProcessRef {
-        resource: created.resource.clone(),
-        process: ResourceId("unknown-process".into()),
-    };
-    assert!(
-        proxy
-            .call::<bool>("IsRunning", (bad.clone(),))
-            .await
-            .is_err()
-    );
-    proxy.call::<()>("Cancel", (bad,)).await?;
     let mut background = command;
     background.argv = vec!["sleep".into(), "600".into()];
     let process: ProcessRef = proxy
         .call(
             "Spawn",
             (tinybox_bus::SpawnRequest {
-                process: ResourceId("process-1".into()),
+                process: proxy
+                    .call(
+                        "Reserve",
+                        (tinybox_bus::ReserveRequest::Process(
+                            created.resource.clone(),
+                        ),),
+                    )
+                    .await?,
                 command: background.clone(),
             },),
         )
@@ -291,7 +293,14 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
         .call(
             "Spawn",
             (tinybox_bus::SpawnRequest {
-                process: ResourceId("process-2".into()),
+                process: proxy
+                    .call(
+                        "Reserve",
+                        (tinybox_bus::ReserveRequest::Process(
+                            created.resource.clone(),
+                        ),),
+                    )
+                    .await?,
                 command: background,
             },),
         )
@@ -310,14 +319,6 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
     Ok(())
 }
 
-fn reservation() -> tinybox_bus::ResourceId {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    tinybox_bus::ResourceId(format!(
-        "test-{}",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ))
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Result<()> {
@@ -325,7 +326,9 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
         CreateRequest, ExecRequest, ProcessRef, ResourceId, SpawnRequest, Workspace,
     };
     let service = BoxService::default();
-    let resource = ResourceId("known-before-create".into());
+    let resource = service
+        .reserve(tinybox_bus::ReserveRequest::Resource)
+        .await?;
     let request = CreateRequest {
         resource: resource.clone(),
         backend: "passthrough".into(),
@@ -335,12 +338,18 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
     service.close(resource.clone()).await?;
     assert!(service.create(request.clone()).await.is_err());
     let mut request = request;
-    request.resource = ResourceId("reply-can-be-lost".into());
+    request.resource = service
+        .reserve(tinybox_bus::ReserveRequest::Resource)
+        .await?;
     service.create(request.clone()).await?;
     assert!(service.create(request.clone()).await.is_err());
     let process = ProcessRef {
         resource: request.resource.clone(),
-        process: ResourceId("known-before-spawn".into()),
+        process: service
+            .reserve(tinybox_bus::ReserveRequest::Process(
+                request.resource.clone(),
+            ))
+            .await?,
     };
     service.cancel(process.clone()).await?;
     let command = ExecRequest {
@@ -359,7 +368,11 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
             .await
             .is_err()
     );
-    let process = ResourceId("spawn-reply-can-be-lost".into());
+    let process = service
+        .reserve(tinybox_bus::ReserveRequest::Process(
+            request.resource.clone(),
+        ))
+        .await?;
     service
         .spawn(SpawnRequest {
             process: process.clone(),

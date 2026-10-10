@@ -66,7 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .call(
             "Create",
             (CreateRequest {
-                resource: tinybox_bus::ResourceId("native-create".into()),
+                resource: proxy
+                    .call("Reserve", (tinybox_bus::ReserveRequest::Resource,))
+                    .await?,
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(
                     std::env::current_dir()?.to_string_lossy().into_owned(),
@@ -145,7 +147,12 @@ async fn verify_detached(
         .call(
             "Spawn",
             (tinybox_bus::SpawnRequest {
-                process: tinybox_bus::ResourceId("native-process-1".into()),
+                process: proxy
+                    .call(
+                        "Reserve",
+                        (tinybox_bus::ReserveRequest::Process(resource.clone()),),
+                    )
+                    .await?,
                 command: request.clone(),
             },),
         )
@@ -161,7 +168,12 @@ async fn verify_detached(
         .call(
             "Spawn",
             (tinybox_bus::SpawnRequest {
-                process: tinybox_bus::ResourceId("native-process-2".into()),
+                process: proxy
+                    .call(
+                        "Reserve",
+                        (tinybox_bus::ReserveRequest::Process(resource.clone()),),
+                    )
+                    .await?,
                 command: request,
             },),
         )

@@ -23,6 +23,11 @@ struct BoxService {
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Mint a single-use startup reservation, without starting native work.
+    async fn reserve(&self, request: tinybox_bus::ReserveRequest) -> TinyBusResult<ResourceId> {
+        self.resources.reserve(request).await
+    }
+
     /// Allocate the explicitly requested sandbox, without fallback.
     async fn create(&self, request: CreateRequest) -> TinyBusResult<ResourceInfo> {
         let resources = self.resources.clone();
@@ -182,7 +187,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve"],
     signals = [],
     requires = [],
     optional = [],

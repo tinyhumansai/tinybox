@@ -14,6 +14,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Method | Argument | Result |
 | --- | --- | --- |
 | Describe | none | Original version/backend summary |
+| Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
 | Exec | ExecRequest | ExecOutput |
 | Inspect | ResourceId | ResourceInfo |
@@ -30,20 +31,23 @@ there is no passthrough fallback. Describe remains the existing summary of
 compiled providers, rather than claiming every provider is configurable through
 Create. Passthrough runs trusted code without isolation.
 
-Clients supply unique, opaque reservation IDs before Create or Spawn. Native
-handles remain module-owned. Reservations cannot be reused, even after close or
-a failed allocation. If a startup reply is lost, the client still knows which
-reservation to close or cancel. Cancel and Close are idempotent and retire even
-an unknown reservation: cleanup arriving before delayed startup prevents that
-startup from allocating anything. Startup and cleanup share a lock, so cleanup
-arriving during allocation runs immediately after allocation finishes.
+Clients call Reserve with Resource or Process(resource) before Create or Spawn.
+The module mints an opaque, single-use handle without starting native work.
+Unused reservations expire after 60 seconds and are bounded at 4096; Reserve
+reclaims expired entries. Consuming, closing, or cancelling a reservation removes
+it. Create and Spawn accept only still-live reservations, so forgotten or old
+handles can never resurrect side effects. Reservations are independent: startup
+can arrive out of order and cleanup removes only its selected target. Process
+reservations are bound to their resource. Random per-instance identity and a
+monotonic sequence prevent IDs from being reused across module incarnations.
 
-Cancel leaves an issued process queryable until its resource closes. Close
-stops all tracked detached processes, destroys the sandbox, and invalidates
-its resource. Reservation tombstones remain until the module instance ends.
-Failed cleanup retains ownership so Close can be retried. Callers must close explicitly before unloading the
-module. Exec collects output; detached output streaming, file transfer, forwards,
-SSH reach, and microVM image configuration need subsequent interfaces.
+Native handles remain module-owned. Close/Cancel before startup removes the
+reservation, and cleanup during native startup waits for its resource lock and
+cleans the eventual result. Completed/cancelled process entries are removed
+rather than consuming admission forever. IsRunning reports false for a process
+that is no longer retained. Native cleanup errors retain ownership for retry.
+Callers must close explicitly before unloading the module. Output streaming,
+transfer, forwarding, SSH and microVM configuration remain subsequent slices.
 
 Operations serialize within each resource; unrelated resources have independent
 locks. A detached process can be cancelled after Spawn returns. Close fences new
@@ -52,19 +56,12 @@ to kill/reap the child, then stops tracked detached processes and destroys the
 sandbox. Create, Spawn, Exec, Cancel, and Close run in module-owned tasks, so a
 caller dropping or timing out its wait cannot discard startup/cleanup ownership.
 
-IDs are ASCII letters, digits, hyphens, or underscores, at most 128 bytes.
-Admission is capped at 64 live resources, 64 retained processes per resource,
-and 4096 reservation tombstones per module instance. Failed, cancelled, and
-closed reservations keep counting for that instance's whole lifetime; a
-process-cached module can exhaust new admission after repeated Create/Spawn
-cycles. Reached capacity returns ResourceLimit and never evicts replay history.
-Cancelled/completed process entries likewise count toward their resource's 64
-slots until Close. A future generation-based reservation protocol is needed
-for indefinite reuse without losing stale-retry safety. Issued resources can still
-be closed when the admission budget is exhausted. Collected commands use
-LimitedLocalHost with a combined 1 MiB stdout/stderr budget enforced during
-reading. Overflow fails explicitly and kills/reaps the host child; it is never
-silent truncation.
+Admission bounds live resources at 64, live processes at 64 per resource, and
+queued process startups at 64 per resource. Unused reservation capacity is
+reclaimed on consumption, cleanup or expiry. Sequential Create/Close and
+Spawn/Cancel cycles impose no lifetime admission limit and keep no history sets.
+Collected commands use LimitedLocalHost with a combined 1 MiB stdout/stderr
+budget enforced during reading; overflow fails rather than truncating output.
 
 AnalyzeShell removes quoted heredoc bodies before structural scanning. It
 returns segments and hidden-execution/redirection facts. Authorization,

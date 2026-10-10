@@ -19,10 +19,12 @@ use std::collections::BTreeMap;
 pub const MAX_ID_BYTES: usize = 128;
 /// Maximum live resources in a module instance.
 pub const MAX_ACTIVE_RESOURCES: usize = 64;
-/// Maximum tracked process reservations in one resource.
+/// Maximum live processes or queued startups in one resource.
 pub const MAX_PROCESSES_PER_RESOURCE: usize = 64;
-/// Maximum retained reservations, including cleanup tombstones.
+/// Maximum unused reservations, reclaimed when consumed, closed, or expired.
 pub const MAX_RESERVATIONS: usize = 4096;
+/// Idle lifetime of an unused reservation, in seconds.
+pub const RESERVATION_TTL_SECS: u64 = 60;
 /// Maximum combined stdout and stderr bytes collected by the module host.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Stable error name for module admission capacity exhaustion.
@@ -43,6 +45,7 @@ pub const METHODS: &[&str] = &[
     "IsRunning",
     "Cancel",
     "AnalyzeShell",
+    "Reserve",
 ];
 
 /// Stable error name for an unknown or closed module resource.
@@ -62,10 +65,19 @@ pub const EXEC_CANCELLED: &str = "ai.tinyhumans.tinybox.Error.ExecCancelled";
 /// Stable error name for a native backend operation failure.
 pub const BACKEND_ERROR: &str = "ai.tinyhumans.tinybox.Error.Backend";
 
-/// Opaque caller-known reservation identifier bound by one module instance.
+/// Opaque module-minted reservation identifier bound by one module instance.
 /// IDs use ASCII letters, digits, hyphens, or underscores, up to [`MAX_ID_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ResourceId(pub String);
+
+/// Allocate a single-use startup reservation without starting native work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReserveRequest {
+    /// Reserve a resource for Create.
+    Resource,
+    /// Reserve a process for Spawn, bound to the selected resource.
+    Process(ResourceId),
+}
 
 /// A workspace supplied to a backend; unsupported sources are refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +91,7 @@ pub enum Workspace {
 /// Allocate a local-host sandbox; the backend is always explicit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateRequest {
-    /// Caller-known identifier, reserved once so a lost reply can be closed.
+    /// Module-minted Resource reservation, known before native startup.
     pub resource: ResourceId,
     /// Requested backend, such as `docker`, `namespace`, or `passthrough`.
     pub backend: String,
@@ -133,7 +145,7 @@ pub struct ResourceInfo {
 /// Start a detached process under a caller-known reservation identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnRequest {
-    /// Never-reused identifier, known before the startup reply arrives.
+    /// Module-minted Process(resource) reservation, known before native startup.
     pub process: ResourceId,
     /// Command inside the selected resource.
     pub command: ExecRequest,

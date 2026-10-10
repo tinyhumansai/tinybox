@@ -2,6 +2,127 @@
 use super::*;
 use tinybox_core::{ExecOutput as NativeOutput, ExecRequest as NativeRequest, Host};
 
+#[tokio::test]
+async fn reservations_allow_reordered_acquisition_and_cleanup_only_the_selected_target()
+-> Result<()> {
+    let resources = Resources::default();
+    let first = resources.reserve(ReserveRequest::Resource).await?;
+    let retired = resources.reserve(ReserveRequest::Resource).await?;
+    let last = resources.reserve(ReserveRequest::Resource).await?;
+    resources.close(&retired).await?;
+    let request = |resource| CreateRequest {
+        resource,
+        backend: "passthrough".into(),
+        workspace: Workspace::Directory(".".into()),
+        env: BTreeMap::new(),
+    };
+    resources.create(request(last.clone())).await?;
+    resources.create(request(first.clone())).await?;
+    assert!(resources.create(request(retired)).await.is_err());
+    let process = resources
+        .reserve(ReserveRequest::Process(first.clone()))
+        .await?;
+    assert!(
+        resources
+            .cancel(&ProcessRef {
+                resource: last.clone(),
+                process: process.clone()
+            })
+            .await
+            .is_err()
+    );
+    resources
+        .cancel(&ProcessRef {
+            resource: first.clone(),
+            process: process.clone(),
+        })
+        .await?;
+    assert!(
+        resources
+            .spawn(SpawnRequest {
+                process,
+                command: ExecRequest {
+                    resource: first.clone(),
+                    argv: vec!["unused".into()],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    stdin: None
+                }
+            })
+            .await
+            .is_err()
+    );
+    resources.close(&first).await?;
+    assert!(resources.create(request(first)).await.is_err());
+    resources.close(&last).await?;
+    assert!(resources.state.lock().await.reservations.is_empty());
+    assert!(
+        resources
+            .executions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_create_close_reclaims_admission_beyond_the_old_lifetime_cap() -> Result<()> {
+    let resources = Resources::default();
+    for _ in 0..=tinybox_bus::MAX_RESERVATIONS {
+        let resource = resources.reserve(ReserveRequest::Resource).await?;
+        resources
+            .create(CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                env: BTreeMap::new(),
+            })
+            .await?;
+        resources.close(&resource).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_processes_release_admission_beyond_the_old_retained_cap() -> Result<()> {
+    let resources = Resources::default();
+    let host = Arc::new(DelayedHost::default());
+    host.release.notify_one();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                env: BTreeMap::new(),
+            },
+            host,
+        )
+        .await?;
+    for _ in 0..=tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
+        let process = resources
+            .spawn(SpawnRequest {
+                process: resources
+                    .reserve(ReserveRequest::Process(resource.clone()))
+                    .await?,
+                command: ExecRequest {
+                    resource: resource.clone(),
+                    argv: vec!["mock".into()],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    stdin: None,
+                },
+            })
+            .await?;
+        resources.cancel(&process).await?;
+    }
+    resources.close(&resource).await?;
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct DelayedHost {
     started: tokio::sync::Notify,
@@ -45,7 +166,7 @@ impl Host for DelayedHost {
 async fn close_during_native_creation_destroys_the_eventual_resource() -> Result<()> {
     let resources = Arc::new(Resources::default());
     let host = Arc::new(DelayedHost::default());
-    let id = ResourceId("delayed-create".into());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
     let create_resources = resources.clone();
     let create_host = host.clone();
     let create_id = id.clone();
@@ -86,7 +207,7 @@ async fn close_during_native_creation_destroys_the_eventual_resource() -> Result
 async fn close_cancels_owned_native_execution_after_its_waiter_drops() -> Result<()> {
     let resources = Arc::new(Resources::default());
     let host = Arc::new(DelayedHost::default());
-    let id = ResourceId("dropped-exec".into());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
     host.release.notify_one();
     resources
         .create_on(
@@ -130,48 +251,52 @@ async fn close_cancels_owned_native_execution_after_its_waiter_drops() -> Result
 }
 
 #[tokio::test]
-async fn admission_limits_bound_live_resources_and_tombstones() -> Result<()> {
-    let mut issued = BTreeSet::new();
+async fn idle_and_active_admission_are_bounded_and_expiry_never_reopens_ids() -> Result<()> {
+    let clock = Arc::new(tinybox_core::clock::FixedClock::at_epoch());
+    let resources = Resources {
+        clock: clock.clone(),
+        ..Resources::default()
+    };
+    let first = resources.reserve(ReserveRequest::Resource).await?;
+    for _ in 1..tinybox_bus::MAX_RESERVATIONS {
+        resources.reserve(ReserveRequest::Resource).await?;
+    }
+    assert!(resources.reserve(ReserveRequest::Resource).await.is_err());
+    clock.advance(std::time::Duration::from_secs(
+        tinybox_bus::RESERVATION_TTL_SECS,
+    ));
+    let next = resources.reserve(ReserveRequest::Resource).await?;
+    assert_ne!(first, next);
+    let request = |resource| CreateRequest {
+        resource,
+        backend: "passthrough".into(),
+        workspace: Workspace::Directory(".".into()),
+        env: BTreeMap::new(),
+    };
+    assert!(resources.create(request(first)).await.is_err());
+    for _ in 0..tinybox_bus::MAX_ACTIVE_RESOURCES {
+        let id = resources.reserve(ReserveRequest::Resource).await?;
+        resources.create(request(id)).await?;
+    }
+    assert!(resources.create(request(next)).await.is_err());
+    let ids: Vec<_> = resources
+        .state
+        .lock()
+        .await
+        .entries
+        .keys()
+        .cloned()
+        .collect();
+    for id in ids {
+        resources.close(&id).await?;
+    }
     for invalid in [
         String::new(),
         "has space".into(),
         "../path".into(),
         "a".repeat(tinybox_bus::MAX_ID_BYTES + 1),
     ] {
-        assert!(reserve(&mut issued, &ResourceId(invalid)).is_err());
-    }
-    for index in 0..tinybox_bus::MAX_RESERVATIONS {
-        reserve(&mut issued, &ResourceId(format!("reservation-{index}")))?;
-    }
-    assert!(reserve(&mut issued, &ResourceId("overflow".into())).is_err());
-    retire(&mut issued, &ResourceId("reservation-0".into()))?;
-    assert!(retire(&mut issued, &ResourceId("new-overflow".into())).is_err());
-    let resources = Resources::default();
-    for index in 0..tinybox_bus::MAX_ACTIVE_RESOURCES {
-        resources
-            .create(CreateRequest {
-                resource: ResourceId(format!("live-{index}")),
-                backend: "passthrough".into(),
-                workspace: Workspace::Directory(".".into()),
-                env: BTreeMap::new(),
-            })
-            .await?;
-    }
-    assert!(
-        resources
-            .create(CreateRequest {
-                resource: ResourceId("live-overflow".into()),
-                backend: "passthrough".into(),
-                workspace: Workspace::Directory(".".into()),
-                env: BTreeMap::new()
-            })
-            .await
-            .is_err()
-    );
-    for index in 0..tinybox_bus::MAX_ACTIVE_RESOURCES {
-        resources
-            .close(&ResourceId(format!("live-{index}")))
-            .await?;
+        assert!(resources.close(&ResourceId(invalid)).await.is_err());
     }
     Ok(())
 }
@@ -179,7 +304,7 @@ async fn admission_limits_bound_live_resources_and_tombstones() -> Result<()> {
 #[tokio::test]
 async fn a_pending_create_does_not_block_closing_another_resource() -> Result<()> {
     let resources = Arc::new(Resources::default());
-    let ready = ResourceId("independent-ready".into());
+    let ready = resources.reserve(ReserveRequest::Resource).await?;
     resources
         .create(CreateRequest {
             resource: ready.clone(),
@@ -195,7 +320,7 @@ async fn a_pending_create_does_not_block_closing_another_resource() -> Result<()
         pending_resources
             .create_on(
                 CreateRequest {
-                    resource: ResourceId("pending-independent".into()),
+                    resource: pending_resources.reserve(ReserveRequest::Resource).await?,
                     backend: "docker".into(),
                     workspace: Workspace::Image("mock".into()),
                     env: BTreeMap::new(),
@@ -218,7 +343,7 @@ async fn process_admission_refuses_overflow_before_native_start() -> Result<()> 
     let resources = Resources::default();
     let host = Arc::new(DelayedHost::default());
     host.release.notify_one();
-    let id = ResourceId("full-processes".into());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
     resources
         .create_on(
             CreateRequest {
@@ -246,7 +371,9 @@ async fn process_admission_refuses_overflow_before_native_start() -> Result<()> 
     assert!(
         resources
             .spawn(SpawnRequest {
-                process: ResourceId("overflow-process".into()),
+                process: resources
+                    .reserve(ReserveRequest::Process(id.clone()))
+                    .await?,
                 command: ExecRequest {
                     resource: id,
                     argv: vec!["unused".into()],
@@ -267,7 +394,7 @@ async fn close_reaps_a_running_native_exec_before_returning() -> Result<()> {
     let directory = tempfile::tempdir().map_err(Error::failed)?;
     let ready = directory.path().join("ready.pid");
     let resources = Arc::new(Resources::default());
-    let id = ResourceId("native-close".into());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
     resources
         .create(CreateRequest {
             resource: id.clone(),
@@ -315,7 +442,7 @@ async fn close_reaps_a_running_native_exec_before_returning() -> Result<()> {
 #[tokio::test]
 async fn module_collection_enforces_output_cap_before_a_reply_is_allocated() -> Result<()> {
     let resources = Resources::default();
-    let id = ResourceId("output-overflow".into());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
     resources
         .create(CreateRequest {
             resource: id.clone(),

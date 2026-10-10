@@ -2,10 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tinybox_bus::{
-    CreateRequest, ExecOutput, ExecRequest, ProcessRef, ResourceId, ResourceInfo, SpawnRequest,
-    Workspace,
+    CreateRequest, ExecOutput, ExecRequest, ProcessRef, ReserveRequest, ResourceId, ResourceInfo,
+    SpawnRequest, Workspace,
 };
+use tinybox_core::clock::{Clock, SystemClock};
 use tinybox_core::{
     BoxId, BoxSpec, HostRef, MemoryStore, Placement, ProcessId, Sandbox, SandboxRef,
     WorkspaceSource,
@@ -21,8 +23,9 @@ struct Resource {
 }
 
 /// Registry owned by one module instance; close and operations are serialized.
-#[derive(Default)]
 pub(super) struct Resources {
+    instance: String,
+    clock: Arc<dyn Clock>,
     state: Mutex<State>,
     executions: std::sync::Mutex<Executions>,
 }
@@ -30,8 +33,10 @@ pub(super) struct Resources {
 #[derive(Default)]
 struct State {
     entries: BTreeMap<ResourceId, Arc<Mutex<Option<Resource>>>>,
-    issued: BTreeSet<ResourceId>,
-    cancelled_processes: BTreeSet<ResourceId>,
+    reservations: BTreeMap<ResourceId, (ReserveRequest, std::time::SystemTime)>,
+    pending_processes: BTreeMap<ResourceId, (ResourceId, Arc<AtomicBool>)>,
+    next: u64,
+    shutdown: bool,
 }
 
 #[derive(Default)]
@@ -40,7 +45,81 @@ struct Executions {
     native: BTreeMap<ResourceId, tokio::task::AbortHandle>,
 }
 
+impl Default for Resources {
+    fn default() -> Self {
+        Self {
+            instance: uuid::Uuid::new_v4().to_string(),
+            clock: Arc::new(SystemClock::new()),
+            state: Mutex::default(),
+            executions: std::sync::Mutex::default(),
+        }
+    }
+}
+
 impl Resources {
+    pub(super) async fn reserve(&self, request: ReserveRequest) -> Result<ResourceId> {
+        let mut state = self.state.lock().await;
+        if state.shutdown {
+            return Err(failure(tinybox_bus::EXEC_CANCELLED, "module is shut down"));
+        }
+        let now = self.clock.now();
+        state.reservations.retain(|_, (_, issued)| {
+            now.duration_since(*issued).unwrap_or_default().as_secs()
+                < tinybox_bus::RESERVATION_TTL_SECS
+        });
+        if state.reservations.len() >= tinybox_bus::MAX_RESERVATIONS {
+            return Err(failure(
+                tinybox_bus::RESOURCE_LIMIT,
+                "idle reservation limit reached",
+            ));
+        }
+        if let ReserveRequest::Process(resource) = &request
+            && !state.entries.contains_key(resource)
+        {
+            return Err(failure(tinybox_bus::UNKNOWN_RESOURCE, "unknown resource"));
+        }
+        state.next = state.next.checked_add(1).ok_or_else(|| {
+            failure(
+                tinybox_bus::RESOURCE_LIMIT,
+                "reservation sequence exhausted",
+            )
+        })?;
+        let id = ResourceId(format!("{}-{}", self.instance, state.next));
+        state.reservations.insert(id.clone(), (request, now));
+        Ok(id)
+    }
+
+    fn consume(&self, state: &mut State, id: &ResourceId, expected: &ReserveRequest) -> Result<()> {
+        validate_id(id)?;
+        if state.shutdown {
+            return Err(failure(tinybox_bus::EXEC_CANCELLED, "module is shut down"));
+        }
+        let Some((kind, issued)) = state.reservations.get(id) else {
+            return Err(failure(
+                tinybox_bus::DUPLICATE_ID,
+                "reservation is consumed, expired, or unknown",
+            ));
+        };
+        if kind != expected {
+            return Err(failure(
+                tinybox_bus::INVALID_ID,
+                "reservation belongs to another target",
+            ));
+        }
+        let expired = self
+            .clock
+            .now()
+            .duration_since(*issued)
+            .unwrap_or_default()
+            .as_secs()
+            >= tinybox_bus::RESERVATION_TTL_SECS;
+        state.reservations.remove(id);
+        if expired {
+            return Err(failure(tinybox_bus::DUPLICATE_ID, "reservation expired"));
+        }
+        Ok(())
+    }
+
     pub(super) async fn create(&self, request: CreateRequest) -> Result<ResourceInfo> {
         let host = Arc::new(tinybox_host::LimitedLocalHost::new(
             tinybox_bus::MAX_OUTPUT_BYTES,
@@ -66,7 +145,7 @@ impl Resources {
         let slot = Arc::new(Mutex::new(None));
         {
             let mut state = self.state.lock().await;
-            reserve(&mut state.issued, &request.resource)?;
+            self.consume(&mut state, &request.resource, &ReserveRequest::Resource)?;
             if state.entries.len() >= tinybox_bus::MAX_ACTIVE_RESOURCES {
                 return Err(failure(
                     tinybox_bus::RESOURCE_LIMIT,
@@ -201,7 +280,45 @@ impl Resources {
     }
 
     pub(super) async fn spawn(&self, request: SpawnRequest) -> Result<ProcessRef> {
-        reserve(&mut self.state.lock().await.issued, &request.process)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        {
+            let mut state = self.state.lock().await;
+            self.consume(
+                &mut state,
+                &request.process,
+                &ReserveRequest::Process(request.command.resource.clone()),
+            )?;
+            if state
+                .pending_processes
+                .values()
+                .filter(|(resource, _)| resource == &request.command.resource)
+                .count()
+                >= tinybox_bus::MAX_PROCESSES_PER_RESOURCE
+            {
+                return Err(failure(
+                    tinybox_bus::RESOURCE_LIMIT,
+                    "pending process limit reached",
+                ));
+            }
+            state.pending_processes.insert(
+                request.process.clone(),
+                (request.command.resource.clone(), cancelled.clone()),
+            );
+        }
+        let result = self.spawn_pending(request.clone(), cancelled).await;
+        self.state
+            .lock()
+            .await
+            .pending_processes
+            .remove(&request.process);
+        result
+    }
+
+    async fn spawn_pending(
+        &self,
+        request: SpawnRequest,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<ProcessRef> {
         let slot = self.slot(&request.command.resource).await?;
         let mut slot = slot.lock().await;
         let entry = slot
@@ -213,13 +330,7 @@ impl Resources {
                 "process reservation limit reached",
             ));
         }
-        if self
-            .state
-            .lock()
-            .await
-            .cancelled_processes
-            .contains(&request.process)
-        {
+        if cancelled.load(Ordering::SeqCst) {
             return Err(failure(
                 tinybox_bus::EXEC_CANCELLED,
                 "process startup cancelled",
@@ -240,32 +351,58 @@ impl Resources {
 
     pub(super) async fn is_running(&self, process: &ProcessRef) -> Result<bool> {
         let slot = self.slot(&process.resource).await?;
-        let slot = slot.lock().await;
+        let mut slot = slot.lock().await;
         let entry = slot
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
-        let native = entry
-            .processes
-            .get(&process.process)
-            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_PROCESS, "unknown process"))?;
-        entry
+        let Some(native) = entry.processes.get(&process.process) else {
+            validate_id(&process.process)?;
+            return Ok(false);
+        };
+        let running = entry
             .sandbox
             .is_running(&entry.id, native)
             .await
-            .map_err(|error| backend_error(&error))
+            .map_err(|error| backend_error(&error))?;
+        if !running {
+            entry
+                .sandbox
+                .stop(&entry.id, native)
+                .await
+                .map_err(|error| backend_error(&error))?;
+            entry.processes.remove(&process.process);
+        }
+        Ok(running)
     }
 
     pub(super) async fn cancel(&self, process: &ProcessRef) -> Result<()> {
         {
             let mut state = self.state.lock().await;
-            retire(&mut state.issued, &process.process)?;
-            state.cancelled_processes.insert(process.process.clone());
+            validate_id(&process.process)?;
+            if let Some((kind, _)) = state.reservations.get(&process.process) {
+                if kind != &ReserveRequest::Process(process.resource.clone()) {
+                    return Err(failure(
+                        tinybox_bus::INVALID_ID,
+                        "reservation belongs to another target",
+                    ));
+                }
+                state.reservations.remove(&process.process);
+            }
+            if let Some((resource, cancelled)) = state.pending_processes.get(&process.process) {
+                if resource != &process.resource {
+                    return Err(failure(
+                        tinybox_bus::INVALID_ID,
+                        "pending process belongs to another target",
+                    ));
+                }
+                cancelled.store(true, Ordering::SeqCst);
+            }
         }
         let Ok(slot) = self.slot(&process.resource).await else {
             return Ok(());
         };
-        let slot = slot.lock().await;
-        let Some(entry) = slot.as_ref() else {
+        let mut slot = slot.lock().await;
+        let Some(entry) = slot.as_mut() else {
             return Ok(());
         };
         let Some(native) = entry.processes.get(&process.process) else {
@@ -275,11 +412,32 @@ impl Resources {
             .sandbox
             .stop(&entry.id, native)
             .await
-            .map_err(|error| backend_error(&error))
+            .map_err(|error| backend_error(&error))?;
+        entry.processes.remove(&process.process);
+        Ok(())
     }
 
     pub(super) async fn close(&self, resource: &ResourceId) -> Result<()> {
-        retire(&mut self.state.lock().await.issued, resource)?;
+        validate_id(resource)?;
+        let slot = {
+            let mut state = self.state.lock().await;
+            if let Some((kind, _)) = state.reservations.get(resource) {
+                if kind != &ReserveRequest::Resource {
+                    return Err(failure(
+                        tinybox_bus::INVALID_ID,
+                        "not a resource reservation",
+                    ));
+                }
+                state.reservations.remove(resource);
+            }
+            let Some(slot) = state.entries.get(resource).cloned() else {
+                return Ok(());
+            };
+            state
+                .reservations
+                .retain(|_, (kind, _)| kind != &ReserveRequest::Process(resource.clone()));
+            slot
+        };
         {
             let mut executions = self
                 .executions
@@ -290,9 +448,6 @@ impl Resources {
                 native.abort();
             }
         }
-        let Ok(slot) = self.slot(resource).await else {
-            return Ok(());
-        };
         let mut slot = slot.lock().await;
         if let Some(entry) = slot.as_ref() {
             if let Some(collector) = &entry.collector {
@@ -313,6 +468,12 @@ impl Resources {
         }
         *slot = None;
         self.state.lock().await.entries.remove(resource);
+        let mut executions = self
+            .executions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        executions.closing.remove(resource);
+        executions.native.remove(resource);
         Ok(())
     }
 }
@@ -341,24 +502,6 @@ fn backend_error(error: &tinybox_core::Error) -> Error {
     failure(name, &error.to_string())
 }
 
-fn reserve(issued: &mut BTreeSet<ResourceId>, id: &ResourceId) -> Result<()> {
-    validate_id(id)?;
-    if issued.contains(id) {
-        return Err(failure(
-            tinybox_bus::DUPLICATE_ID,
-            "reservation identifier already used",
-        ));
-    }
-    if issued.len() >= tinybox_bus::MAX_RESERVATIONS {
-        return Err(failure(
-            tinybox_bus::RESOURCE_LIMIT,
-            "reservation limit reached",
-        ));
-    }
-    issued.insert(id.clone());
-    Ok(())
-}
-
 fn validate_id(id: &ResourceId) -> Result<()> {
     if id.0.is_empty()
         || id.0.len() > tinybox_bus::MAX_ID_BYTES
@@ -379,11 +522,3 @@ fn validate_id(id: &ResourceId) -> Result<()> {
 #[cfg(test)]
 #[path = "resources_tests.rs"]
 mod tests;
-
-fn retire(issued: &mut BTreeSet<ResourceId>, id: &ResourceId) -> Result<()> {
-    validate_id(id)?;
-    if !issued.contains(id) {
-        reserve(issued, id)?;
-    }
-    Ok(())
-}
