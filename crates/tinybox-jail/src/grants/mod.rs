@@ -184,10 +184,10 @@ impl<'a> Builder<'a> {
                 self.fixed_read_only.push(canonical);
             }
         }
-        if let Some(p) = self.admit(path, source) {
-            if self.seen.insert(p.clone()) {
-                self.grants.read_only.push(p);
-            }
+        if let Some(p) = self.admit(path, source)
+            && self.seen.insert(p.clone())
+        {
+            self.grants.read_only.push(p);
         }
     }
 
