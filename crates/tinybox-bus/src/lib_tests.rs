@@ -82,9 +82,10 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (1, 3));
+    assert_eq!(CONTRACT_VERSION, (1, 4));
     assert!(is_compatible(CONTRACT_VERSION));
-    assert!(is_compatible((1, 3)));
+    assert!(is_compatible((1, 4)));
+    assert!(!is_compatible((1, 3)));
     assert!(!is_compatible((1, 2)));
     assert!(!is_compatible((1, 0)));
     assert!(!is_compatible((0, 99)));
@@ -95,11 +96,48 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[1,3],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[1,4],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
         capabilities
     );
+    Ok(())
+}
+
+#[test]
+fn command_classes_keep_wire_labels_and_security_order() -> Result<(), serde_json::Error> {
+    let classes = [
+        CommandClass::Read,
+        CommandClass::Write,
+        CommandClass::Network,
+        CommandClass::Install,
+        CommandClass::Destructive,
+    ];
+    assert_eq!(
+        serde_json::to_value(classes)?,
+        serde_json::json!(["read", "write", "network", "install", "destructive"])
+    );
+    for pair in classes.windows(2) {
+        assert!(pair[0] < pair[1]);
+    }
+    assert_eq!(
+        serde_json::from_value::<Vec<CommandClass>>(serde_json::to_value(classes)?)?,
+        classes
+    );
+    Ok(())
+}
+
+#[test]
+fn command_analysis_wire_facts_round_trip_without_host_policy() -> Result<(), serde_json::Error> {
+    let snapshot = serde_json::json!({
+        "segments": [{"source": "echo hello", "command": "echo hello", "basename": "echo",
+            "normalized_name": "echo", "arguments": ["hello"], "class": "read",
+            "leading_env_assignment": false, "dangerous_env_prefix": false, "executor": false}],
+        "hidden_execution": false, "redirection": false, "expansion": false,
+        "tee": false, "background": false, "literal_words": ["echo", "hello"]
+    });
+    let facts: CommandAnalysis = serde_json::from_value(snapshot.clone())?;
+    assert_eq!(serde_json::to_value(facts)?, snapshot);
     Ok(())
 }

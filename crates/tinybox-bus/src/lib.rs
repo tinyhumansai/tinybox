@@ -15,13 +15,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod shell;
+pub use shell::{CommandAnalysis, CommandClass, CommandSegment};
+
 /// Wire vocabulary version, independent of the release workflow's package version.
 ///
 /// 1.0 denotes the original discovery-only surface. 1.1 adds resource
 /// reservations, owned lifecycle/operations, capabilities and terminal shutdown.
 /// 1.2 adds host selection, container networking/ports, and owned forwards.
 /// 1.3 adds native jail discovery.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 3);
+/// 1.4 adds detailed shell facts for host execution policy.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 4);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -68,6 +72,7 @@ pub const METHODS: &[&str] = &[
     "Forward",
     "CloseForward",
     "JailStatus",
+    "AnalyzeCommand",
 ];
 
 /// Facts about the detected native directory-jail backend.

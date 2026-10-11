@@ -19,6 +19,8 @@ async-trait.workspace = true
 # inside snapshot manifests, so the model types are serializable. TinyBus
 # already links serde, so this costs the module nothing.
 serde.workspace = true
+# Shared serialized shell vocabulary; classification stays in this crate.
+tinybox-bus.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

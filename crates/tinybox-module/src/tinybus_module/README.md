@@ -28,8 +28,9 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | IsRunning | ProcessRef | bool |
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
+| AnalyzeCommand | String | CommandAnalysis |
 
-Capabilities advertises contract version 1.3; 1.0 denotes the original
+Capabilities advertises contract version 1.4; 1.0 denotes the original
 discovery-only surface. Hosts require equal majors and a module minor at least
 as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
 added reserved resource/process ownership and terminal shutdown; 1.2 adds host
@@ -38,7 +39,11 @@ facts, and module-owned forwarding. Version 1.3 adds `JailStatus`, which reports
 the detected native directory-jail backend's availability, process isolation,
 and filesystem, network, and subprocess enforcement. The module probes the
 backend; the host applies its own policy to the returned facts. This version is independent of
-package/artifact releases. Describe remains unchanged.
+package/artifact releases. Version 1.4 adds `AnalyzeCommand`, returning generic
+classification, executor/environment signals, expansion, background execution,
+and literal tokens. Hosts continue to own path resolution, allowlists, approval
+gates, and policy-disabled behavior. `AnalyzeShell` retains its arity and result.
+Describe remains unchanged.
 
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on

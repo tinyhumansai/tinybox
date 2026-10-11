@@ -45,6 +45,18 @@ struct BoxService {
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Return detailed generic shell facts for caller-owned execution policy.
+    #[expect(clippy::unused_async, reason = "TinyBus methods are asynchronous")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "TinyBus methods are asynchronous"
+    )]
+    async fn analyze_command(
+        &self,
+        command: String,
+    ) -> TinyBusResult<tinybox_bus::CommandAnalysis> {
+        Ok(tinybox_core::shell::analysis::analyze_command(&command))
+    }
     /// Report native jail enforcement facts without starting a workload.
     #[expect(clippy::unused_async, reason = "TinyBus methods are asynchronous")]
     #[expect(
