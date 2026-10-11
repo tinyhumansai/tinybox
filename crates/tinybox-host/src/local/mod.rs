@@ -117,10 +117,6 @@ impl Host for LocalHost {
         Ok(Self::collect(&output))
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "workspace file operations share the async Host provider interface"
-    )]
     async fn open_workspace_file(
         &self,
         root: &Path,
@@ -129,10 +125,6 @@ impl Host for LocalHost {
         crate::files::open_reader(root, relative)
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "workspace file operations share the async Host provider interface"
-    )]
     async fn begin_workspace_file_write(
         &self,
         root: &Path,

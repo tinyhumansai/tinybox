@@ -306,6 +306,10 @@ async fn module_describes_itself_over_a_real_bus() -> tinybus::Result<()> {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one broker fixture verifies the complete serialized file-transfer path"
+)]
 async fn workspace_file_transfers_roundtrip_through_the_bus_codec() -> tinybus::Result<()> {
     use tinybox_bus::{
         BeginFileReadRequest, BeginFileWriteRequest, CreateRequest, FileChunk,

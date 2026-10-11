@@ -31,7 +31,7 @@ pub struct FileReadInfo {
 pub struct ReadFileChunkRequest {
     /// Resource that owns the read handle.
     pub resource: ResourceId,
-    /// Opaque handle returned by BeginFileRead.
+    /// Opaque handle returned by `BeginFileRead`.
     pub transfer: ResourceId,
     /// Byte offset from the start of the file.
     pub offset: u64,
@@ -55,7 +55,7 @@ pub struct FileChunk {
 pub struct FinishFileReadRequest {
     /// Resource that owns the read handle.
     pub resource: ResourceId,
-    /// Opaque handle returned by BeginFileRead.
+    /// Opaque handle returned by `BeginFileRead`.
     pub transfer: ResourceId,
 }
 
@@ -86,7 +86,7 @@ pub struct FileWriteInfo {
 pub struct WriteFileChunkRequest {
     /// Resource that owns the writer.
     pub resource: ResourceId,
-    /// Opaque handle returned by BeginFileWrite.
+    /// Opaque handle returned by `BeginFileWrite`.
     pub transfer: ResourceId,
     /// Byte offset; chunks are sequential and exact retries are idempotent.
     pub offset: u64,
@@ -106,7 +106,7 @@ pub struct FileWriteProgress {
 pub struct FinishFileWriteRequest {
     /// Resource that owns the writer.
     pub resource: ResourceId,
-    /// Opaque handle returned by BeginFileWrite.
+    /// Opaque handle returned by `BeginFileWrite`.
     pub transfer: ResourceId,
 }
 
@@ -115,6 +115,6 @@ pub struct FinishFileWriteRequest {
 pub struct AbortFileWriteRequest {
     /// Resource that owns the writer.
     pub resource: ResourceId,
-    /// Opaque handle returned by BeginFileWrite.
+    /// Opaque handle returned by `BeginFileWrite`.
     pub transfer: ResourceId,
 }

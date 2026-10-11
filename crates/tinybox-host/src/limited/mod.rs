@@ -184,10 +184,6 @@ impl Host for LimitedLocalHost {
         LocalHost::new().forward(remote).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "workspace file operations share the async Host provider interface"
-    )]
     async fn open_workspace_file(
         &self,
         root: &Path,
@@ -196,10 +192,6 @@ impl Host for LimitedLocalHost {
         LocalHost::new().open_workspace_file(root, relative).await
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "workspace file operations share the async Host provider interface"
-    )]
     async fn begin_workspace_file_write(
         &self,
         root: &Path,

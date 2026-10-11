@@ -87,6 +87,10 @@ async fn local_create_uses_the_production_host_selection_path() -> Result<()> {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one mounted-workspace fixture pins write, read, retry, finalize, and abort semantics together"
+)]
 async fn mounted_workspace_files_transfer_in_bounded_atomic_chunks() -> Result<()> {
     let workspace = tempfile::tempdir()
         .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;
@@ -242,6 +246,10 @@ async fn mounted_workspace_files_transfer_in_bounded_atomic_chunks() -> Result<(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one resource fixture checks stable rejection behavior across every file-transfer stage"
+)]
 async fn file_transfer_retries_and_invalid_requests_have_stable_results() -> Result<()> {
     let workspace = tempfile::tempdir()
         .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;

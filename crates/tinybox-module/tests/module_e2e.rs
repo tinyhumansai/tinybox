@@ -1,4 +1,4 @@
-//! End-to-end proof for the compiled TinyBox module's workspace file contract.
+//! End-to-end proof for the compiled `TinyBox` module's workspace file contract.
 
 use std::time::Duration;
 
@@ -17,6 +17,10 @@ const OBJECT_PATH: &str = "/ai/tinyhumans/tinybox/Box";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBOX_TEST_MODULE to point at the built cdylib"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the compiled artifact proof keeps manifest, broker, transfer, and cleanup assertions in one fixture"
+)]
 async fn compiled_module_transfers_workspace_files_over_a_broker()
 -> Result<(), Box<dyn std::error::Error>> {
     let artifact = std::env::var_os("TINYBOX_TEST_MODULE")
@@ -101,7 +105,7 @@ async fn compiled_module_transfers_workspace_files_over_a_broker()
             )
             .await?;
         assert_eq!(chunk.offset, offset);
-        assert!(!chunk.bytes.is_empty());
+        assert_ne!(chunk.bytes, Vec::<u8>::new());
         let progress: tinybox_bus::FileWriteProgress = proxy
             .call(
                 "WriteFileChunk",

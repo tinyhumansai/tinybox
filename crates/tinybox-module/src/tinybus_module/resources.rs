@@ -424,7 +424,7 @@ impl Resources {
             .host
             .open_workspace_file(root, Path::new(&request.path))
             .await
-            .map_err(file_error)?;
+            .map_err(|error| file_error(&error))?;
         let size = reader.size();
         {
             let mut state = self.state.lock().await;
@@ -432,9 +432,7 @@ impl Resources {
                 .executions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Err(error) = check_resource_open(&state, &executions, &request.resource) {
-                return Err(error);
-            }
+            check_resource_open(&state, &executions, &request.resource)?;
             self.consume(
                 &mut state,
                 &request.transfer,
@@ -485,7 +483,7 @@ impl Resources {
             .reader
             .read_chunk(request.offset, request.max_bytes)
             .await
-            .map_err(file_error)?;
+            .map_err(|error| file_error(&error))?;
         if bytes.len() > request.max_bytes {
             return Err(failure(
                 tinybox_bus::BACKEND_ERROR,
@@ -574,7 +572,7 @@ impl Resources {
             .host
             .begin_workspace_file_write(root, Path::new(&request.path), &request.transfer.0)
             .await
-            .map_err(file_error)?;
+            .map_err(|error| file_error(&error))?;
         let admission = {
             let mut state = self.state.lock().await;
             let executions = self
@@ -659,7 +657,7 @@ impl Resources {
             .writer
             .write_chunk(request.offset, &request.bytes)
             .await
-            .map_err(file_error)?;
+            .map_err(|error| file_error(&error))?;
         if acknowledged != next {
             return Err(failure(
                 tinybox_bus::BACKEND_ERROR,
@@ -692,7 +690,11 @@ impl Resources {
             .writers
             .get_mut(&request.transfer)
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file writer"))?;
-        let next_offset = writer.writer.finish().await.map_err(file_error)?;
+        let next_offset = writer
+            .writer
+            .finish()
+            .await
+            .map_err(|error| file_error(&error))?;
         let completed = CompletedWrite {
             path: writer.path.clone(),
             next_offset,
@@ -723,7 +725,11 @@ impl Resources {
             .writers
             .get_mut(&request.transfer)
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file writer"))?;
-        writer.writer.abort().await.map_err(file_error)?;
+        writer
+            .writer
+            .abort()
+            .await
+            .map_err(|error| file_error(&error))?;
         entry.writers.remove(&request.transfer);
         Ok(())
     }
@@ -1183,27 +1189,7 @@ impl Resources {
             // process or container cleanup must be retried, the closed
             // resource no longer accepts new forwarded connections.
             entry.forwards.clear();
-            let writer_ids: Vec<_> = entry.writers.keys().cloned().collect();
-            for transfer in writer_ids {
-                let result = match entry.writers.get_mut(&transfer) {
-                    Some(writer) => writer.writer.abort().await.map_err(file_error),
-                    None => Ok(()),
-                };
-                match result {
-                    Ok(()) => {
-                        entry.writers.remove(&transfer);
-                    }
-                    Err(error) => {
-                        failure.get_or_insert(error);
-                    }
-                }
-            }
-            if !entry.writers.is_empty() {
-                return failure.map_or_else(
-                    || Err(Error::failed("staged file cleanup remains pending")),
-                    Err,
-                );
-            }
+            abort_writers(entry, &mut failure).await?;
             let sandbox = entry.sandbox.clone();
             let id = entry.id.clone();
             for process in entry.processes.values_mut() {
@@ -1289,6 +1275,36 @@ impl Resources {
     }
 }
 
+async fn abort_writers(entry: &mut Resource, failure: &mut Option<Error>) -> Result<()> {
+    let writer_ids: Vec<_> = entry.writers.keys().cloned().collect();
+    for transfer in writer_ids {
+        let result = match entry.writers.get_mut(&transfer) {
+            Some(writer) => writer
+                .writer
+                .abort()
+                .await
+                .map_err(|error| file_error(&error)),
+            None => Ok(()),
+        };
+        match result {
+            Ok(()) => {
+                entry.writers.remove(&transfer);
+            }
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    if entry.writers.is_empty() {
+        Ok(())
+    } else {
+        failure.take().map_or_else(
+            || Err(Error::failed("staged file cleanup remains pending")),
+            Err,
+        )
+    }
+}
+
 fn directory_workspace(workspace: &Workspace) -> Option<PathBuf> {
     match workspace {
         Workspace::Directory(path) => Some(PathBuf::from(path)),
@@ -1342,7 +1358,7 @@ async fn check_entry_open(resources: &Resources, resource: &ResourceId) -> Resul
     check_resource_open(&state, &executions, resource)
 }
 
-fn file_error(error: tinybox_core::Error) -> Error {
+fn file_error(error: &tinybox_core::Error) -> Error {
     let name = match error {
         tinybox_core::Error::Unsupported { .. }
         | tinybox_core::Error::UnsupportedHostFileTransfer { .. }

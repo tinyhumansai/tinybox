@@ -15,8 +15,8 @@ async fn reads_bounded_binary_ranges_from_the_workspace() -> Result<()> {
     assert_eq!(reader.size(), 4);
     assert_eq!(reader.read_chunk(1, 2).await?, [1, 2]);
     assert_eq!(reader.read_chunk(3, 8).await?, [255]);
-    assert!(reader.read_chunk(4, 8).await?.is_empty());
-    assert!(reader.read_chunk(0, 0).await?.is_empty());
+    assert_eq!(reader.read_chunk(4, 8).await?, Vec::<u8>::new());
+    assert_eq!(reader.read_chunk(0, 0).await?, Vec::<u8>::new());
     Ok(())
 }
 

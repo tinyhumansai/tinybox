@@ -115,7 +115,6 @@ impl WorkspaceFileReader for LocalFileReader {
         self.size
     }
 
-    #[expect(clippy::unused_async, reason = "workspace file reader trait is async")]
     async fn read_chunk(&mut self, offset: u64, max_bytes: usize) -> Result<Vec<u8>> {
         if offset >= self.size || max_bytes == 0 {
             return Ok(Vec::new());
@@ -123,7 +122,8 @@ impl WorkspaceFileReader for LocalFileReader {
         self.file
             .seek(SeekFrom::Start(offset))
             .map_err(|error| Error::io("seek workspace file", &error))?;
-        let wanted = max_bytes.min((self.size - offset).min(usize::MAX as u64) as usize);
+        let available = usize::try_from(self.size - offset).unwrap_or(usize::MAX);
+        let wanted = max_bytes.min(available);
         let mut bytes = vec![0; wanted];
         let count = self
             .file
@@ -146,7 +146,6 @@ struct LocalFileWriter {
 
 #[async_trait::async_trait]
 impl WorkspaceFileWriter for LocalFileWriter {
-    #[expect(clippy::unused_async, reason = "workspace file writer trait is async")]
     async fn write_chunk(&mut self, offset: u64, bytes: &[u8]) -> Result<u64> {
         if self.finished || offset != self.next_offset || bytes.is_empty() {
             return Err(Error::InvalidFileTransfer {
@@ -171,7 +170,6 @@ impl WorkspaceFileWriter for LocalFileWriter {
         Ok(next_offset)
     }
 
-    #[expect(clippy::unused_async, reason = "workspace file writer trait is async")]
     async fn finish(&mut self) -> Result<u64> {
         if self.finished {
             return Ok(self.next_offset);
@@ -190,7 +188,6 @@ impl WorkspaceFileWriter for LocalFileWriter {
         Ok(self.next_offset)
     }
 
-    #[expect(clippy::unused_async, reason = "workspace file writer trait is async")]
     async fn abort(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
