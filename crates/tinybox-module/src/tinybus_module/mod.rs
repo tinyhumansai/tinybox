@@ -19,6 +19,7 @@ mod resources;
 enum Platform {
     Linux,
     Unix,
+    Windows,
     Other,
 }
 
@@ -28,6 +29,8 @@ impl Platform {
             Self::Linux
         } else if cfg!(unix) {
             Self::Unix
+        } else if cfg!(windows) {
+            Self::Windows
         } else {
             Self::Other
         }
@@ -149,13 +152,19 @@ impl BoxService {
 }
 
 fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
-    let supervised: Vec<String> = if matches!(platform, Platform::Linux | Platform::Unix) {
+    let supervised: Vec<String> = if matches!(
+        platform,
+        Platform::Linux | Platform::Unix | Platform::Windows
+    ) {
         vec!["passthrough".into(), "docker".into()]
     } else {
         Vec::new()
     };
     let mut create_backends = vec!["passthrough".into()];
-    if matches!(platform, Platform::Linux | Platform::Unix) {
+    if matches!(
+        platform,
+        Platform::Linux | Platform::Unix | Platform::Windows
+    ) {
         create_backends.push("docker".into());
     }
     if platform == Platform::Linux {
@@ -174,7 +183,10 @@ fn supports_create_backend(platform: Platform, backend: &str) -> bool {
         // Passthrough only records the caller's workspace; execution remains
         // unadvertised on hosts where TinyBox cannot supervise native children.
         "passthrough" => true,
-        "docker" => matches!(platform, Platform::Linux | Platform::Unix),
+        "docker" => matches!(
+            platform,
+            Platform::Linux | Platform::Unix | Platform::Windows
+        ),
         "namespace" => platform == Platform::Linux,
         _ => false,
     }

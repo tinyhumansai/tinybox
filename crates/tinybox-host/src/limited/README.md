@@ -14,16 +14,17 @@ cannot grow beyond the configured cap. Overflow is an explicit
 OutputLimitExceeded error, and kills/awaits the child. Standard input writing
 runs concurrently with both readers to avoid pipe-buffer deadlocks.
 
-LocalHost keeps its existing unbounded API. LimitedLocalHost starts a separate
-Unix process group for every collected or managed command. Cleanup sends SIGKILL
-to that group, waits for the direct child to be reaped, and then waits up to five
-seconds for the group to stop executing. Linux checks live group members through
-/proc, excluding exited zombies; their parent or operating-system init reaps them.
-Other Unix systems wait until the kernel no longer reports the group. Cleanup
-failure is explicit and never acknowledged as success. A process deliberately
-escaping its group is outside this trusted passthrough ownership mechanism;
-process groups provide lifecycle tracking, not a sandbox or isolation boundary.
-Windows supervision needs a job-object owner and is explicitly unsupported here.
+LocalHost keeps its existing unbounded API. On Unix, LimitedLocalHost starts a
+separate process group for every collected or managed command. Cleanup sends
+SIGKILL to that group, waits for the direct child to be reaped, and then waits up
+to five seconds for the group to stop executing. Linux checks live group members
+through /proc, excluding exited zombies; their parent or operating-system init
+reaps them. Other Unix systems wait until the kernel no longer reports the group.
+On Windows, every command starts in a Job Object and cleanup terminates and waits
+for the whole job. Cleanup failure is explicit and never acknowledged as success.
+An escaped Unix process group is outside this trusted passthrough ownership
+mechanism; groups and Job Objects provide lifecycle tracking, not a sandbox or
+isolation boundary.
 
 ManagedProcess owns detached native work with discarded stdout/stderr. Its stop
 method cooperatively cancels and joins its supervisor. Drop only requests cleanup;
