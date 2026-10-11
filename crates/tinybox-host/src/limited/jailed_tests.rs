@@ -464,3 +464,33 @@ async fn provider_startup_fault_releases_native_supervisor_admission()
     assert_eq!(host.state.active.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn observed_jail_cancellation_joins_native_supervisor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let host = JailLocalHost::with_backend(
+        Jail::new(root.path(), "fixture"),
+        Arc::new(FixtureBackend),
+        64,
+    )?;
+    let (observer, received) = super::super::observed_tests::Observer::with_first();
+    let runner = host.clone();
+    let events = observer.clone();
+    let task = tokio::spawn(async move {
+        runner
+            .run_observed(
+                &ExecRequest::new(["/bin/sh", "-c", "printf ready; exec sleep 600"]),
+                events,
+            )
+            .await
+    });
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), received).await;
+    observer.cancel();
+    let outcome = task.await?;
+    assert!(first.is_ok_and(|first| first.is_ok()));
+    assert!(outcome.is_err());
+    assert_eq!(host.state.active.load(Ordering::SeqCst), 0);
+    assert!(!host.has_pending_cleanup());
+    Ok(())
+}

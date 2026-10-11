@@ -16,6 +16,9 @@ publish = false
 tinybox-core.workspace = true
 tinybox-jail.workspace = true
 async-trait.workspace = true
+# `Dir` keeps workspace file handles beneath the approved root without
+# resolving untrusted paths through ambient filesystem APIs.
+cap-std = "4"
 # `LocalHost` spawns a child and reads both its output streams concurrently,
 # which is what `tokio::process` is for; doing it by hand risks deadlocking on a
 # full pipe buffer.

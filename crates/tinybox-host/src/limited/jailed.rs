@@ -1,12 +1,12 @@
 //! Bounded collection of standard-library children created by native jail backends.
-use super::{pipe, read};
+use super::{observer_cancelled, pipe, read_with_observer};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
+use tinybox_core::{Error, ExecOutput, ExecRequest, ExecutionObserver, Host, OutputStream, Result};
 use tinybox_jail::{Jail, JailBackend};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, watch};
@@ -158,12 +158,12 @@ impl JailLocalHost {
         }
     }
 }
-#[async_trait]
-impl Host for JailLocalHost {
-    fn name(&self) -> &'static str {
-        crate::LOCAL
-    }
-    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+impl JailLocalHost {
+    async fn collect(
+        &self,
+        request: &ExecRequest,
+        observer: Option<Arc<dyn ExecutionObserver>>,
+    ) -> Result<ExecOutput> {
         let mut command = crate::LocalHost::command(request)?.into_std();
         // The host explicitly supplies the approved environment for jailed code.
         command.env_clear().envs(&request.env);
@@ -225,8 +225,8 @@ impl Host for JailLocalHost {
                     let budget = Arc::new(AtomicUsize::new(0));
                     let collection = async {
                         tokio::try_join!(
-                            read(stdout, budget.clone(), limit),
-                            read(stderr, budget, limit),
+                            read_with_observer(stdout, budget.clone(), limit, OutputStream::Stdout, observer.clone()),
+                            read_with_observer(stderr, budget, limit, OutputStream::Stderr, observer.clone()),
                             async {
                                 if let (Some(mut stdin), Some(payload)) = (stdin, payload) {
                                     stdin
@@ -241,6 +241,7 @@ impl Host for JailLocalHost {
                     };
                     tokio::select! {
                         result = collection => result.map(|(stdout, stderr, (), status)| ExecOutput::new(status.code().unwrap_or(128), stdout, stderr)),
+                        () = observer_cancelled(observer.as_deref()) => Err(failure("collect native jail", "execution cancelled".into())),
                         _ = cancelled => Err(failure("collect native jail", "execution cancelled".into())),
                     }
                 },
@@ -258,6 +259,24 @@ impl Host for JailLocalHost {
             .map_err(|error| failure("collect native jail", error.to_string()));
         drop(cancel);
         result?
+    }
+}
+
+#[async_trait]
+impl Host for JailLocalHost {
+    fn name(&self) -> &'static str {
+        crate::LOCAL
+    }
+    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+        self.collect(request, None).await
+    }
+
+    async fn run_observed(
+        &self,
+        request: &ExecRequest,
+        observer: Arc<dyn ExecutionObserver>,
+    ) -> Result<ExecOutput> {
+        self.collect(request, Some(observer)).await
     }
 }
 fn retain_cleanup(

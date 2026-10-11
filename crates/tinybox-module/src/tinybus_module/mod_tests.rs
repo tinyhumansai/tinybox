@@ -306,6 +306,125 @@ async fn module_describes_itself_over_a_real_bus() -> tinybus::Result<()> {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one broker fixture verifies the complete serialized file-transfer path"
+)]
+async fn workspace_file_transfers_roundtrip_through_the_bus_codec() -> tinybus::Result<()> {
+    use tinybox_bus::{
+        BeginFileReadRequest, BeginFileWriteRequest, CreateRequest, FileChunk,
+        FinishFileReadRequest, FinishFileWriteRequest, ReadFileChunkRequest, ReserveRequest,
+        ResourceInfo, Workspace, WriteFileChunkRequest,
+    };
+
+    let workspace = tempfile::tempdir()
+        .map_err(|error| tinybus::Error::failed(format!("create workspace fixture: {error}")))?;
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await?).await?;
+    setup(service.clone()).await?;
+    let client = Connection::connect(bus.connect().await?).await?;
+    let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
+    let resource: tinybox_bus::ResourceId =
+        proxy.call("Reserve", (ReserveRequest::Resource,)).await?;
+    let created: ResourceInfo = proxy
+        .call(
+            "Create",
+            (CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            },),
+        )
+        .await?;
+    let write: tinybox_bus::ResourceId = proxy
+        .call("Reserve", (ReserveRequest::FileWrite(resource.clone()),))
+        .await?;
+    proxy
+        .call::<tinybox_bus::FileWriteInfo>(
+            "BeginFileWrite",
+            (BeginFileWriteRequest {
+                resource: resource.clone(),
+                transfer: write.clone(),
+                path: "report.bin".into(),
+            },),
+        )
+        .await?;
+    proxy
+        .call::<tinybox_bus::FileWriteProgress>(
+            "WriteFileChunk",
+            (WriteFileChunkRequest {
+                resource: resource.clone(),
+                transfer: write.clone(),
+                offset: 0,
+                bytes: vec![0, 1, 0xff, 0x80],
+            },),
+        )
+        .await?;
+    proxy
+        .call::<tinybox_bus::FileWriteProgress>(
+            "FinishFileWrite",
+            (FinishFileWriteRequest {
+                resource: resource.clone(),
+                transfer: write,
+            },),
+        )
+        .await?;
+
+    let read: tinybox_bus::ResourceId = proxy
+        .call("Reserve", (ReserveRequest::FileRead(resource.clone()),))
+        .await?;
+    let traversal = proxy
+        .call::<tinybox_bus::FileReadInfo>(
+            "BeginFileRead",
+            (BeginFileReadRequest {
+                resource: resource.clone(),
+                transfer: read.clone(),
+                path: "../source.bin".into(),
+            },),
+        )
+        .await;
+    assert!(matches!(
+        traversal,
+        Err(tinybus::Error::MethodFailed { name, .. }) if name == tinybox_bus::INVALID_FILE_PATH
+    ));
+    proxy
+        .call::<tinybox_bus::FileReadInfo>(
+            "BeginFileRead",
+            (BeginFileReadRequest {
+                resource: resource.clone(),
+                transfer: read.clone(),
+                path: "report.bin".into(),
+            },),
+        )
+        .await?;
+    let chunk: FileChunk = proxy
+        .call(
+            "ReadFileChunk",
+            (ReadFileChunkRequest {
+                resource: resource.clone(),
+                transfer: read.clone(),
+                offset: 0,
+                max_bytes: 4,
+            },),
+        )
+        .await?;
+    assert_eq!(chunk.bytes, [0, 1, 0xff, 0x80]);
+    proxy
+        .call::<()>(
+            "FinishFileRead",
+            (FinishFileReadRequest {
+                resource: resource.clone(),
+                transfer: read,
+            },),
+        )
+        .await?;
+    proxy.call::<()>("Close", (created.resource,)).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_module_claims_its_well_known_name() -> tinybus::Result<()> {
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
@@ -622,5 +741,82 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bounded_live_output_roundtrips_through_the_bus_codec() -> tinybus::Result<()> {
+    use tinybox_bus::{
+        CreateRequest, ExecRequest, ExecutionState, OutputBatch, ProcessRef, ReserveRequest,
+        ResourceId, SpawnRequest, Workspace,
+    };
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await?).await?;
+    setup(service.clone()).await?;
+    let client = Connection::connect(bus.connect().await?).await?;
+    let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
+    let resource: ResourceId = proxy.call("Reserve", (ReserveRequest::Resource,)).await?;
+    proxy
+        .call::<tinybox_bus::ResourceInfo>(
+            "Create",
+            (CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },),
+        )
+        .await?;
+    let process: ResourceId = proxy
+        .call("Reserve", (ReserveRequest::Process(resource.clone()),))
+        .await?;
+    #[cfg(windows)]
+    let argv = vec!["cmd".into(), "/C".into(), "echo live & exit 7".into()];
+    #[cfg(not(windows))]
+    let argv = vec!["/bin/sh".into(), "-c".into(), "printf live; exit 7".into()];
+    let process: ProcessRef = proxy
+        .call(
+            "StartExec",
+            (SpawnRequest {
+                process,
+                command: ExecRequest {
+                    resource: resource.clone(),
+                    argv,
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    stdin: None,
+                },
+            },),
+        )
+        .await?;
+    let output: OutputBatch = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let output: OutputBatch = proxy.call("ReadOutput", (process.clone(), 0_u64)).await?;
+            if output.state != ExecutionState::Running {
+                return Ok::<_, tinybus::Error>(output);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| tinybus::Error::failed("live output fixture timed out"))??;
+    assert_eq!(output.state, ExecutionState::Exited { exit_code: 7 });
+    let bytes: Vec<u8> = output
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.bytes.iter().copied())
+        .collect();
+    assert_eq!(String::from_utf8_lossy(&bytes).trim(), "live");
+    proxy
+        .call::<()>("ReleaseOutput", (process.clone(),))
+        .await?;
+    assert!(
+        proxy
+            .call::<OutputBatch>("ReadOutput", (process, 0_u64))
+            .await
+            .is_err()
+    );
+    proxy.call::<()>("Close", (resource,)).await?;
     Ok(())
 }
