@@ -118,6 +118,20 @@ pub fn spawn_with(backend: &dyn JailBackend, jail: &Jail, cmd: Command) -> std::
     backend.spawn(&jail, cmd)
 }
 
+/// Spawn captured native work using an explicitly chosen provider.
+/// The caller retains the returned child and owns its pipes and cleanup.
+/// # Errors
+/// Returns a canonicalization, confinement, or native startup error.
+pub fn spawn_captured_with(
+    backend: &dyn JailBackend,
+    jail: &Jail,
+    cmd: Command,
+) -> std::io::Result<Child> {
+    let mut jail = jail.clone();
+    jail.canonicalize()?;
+    backend.spawn_captured(&jail, cmd)
+}
+
 /// Spawn only after all jail constraints pass a hard preflight.
 ///
 /// This strict entry point rejects the explicitly trusted no-op backend and

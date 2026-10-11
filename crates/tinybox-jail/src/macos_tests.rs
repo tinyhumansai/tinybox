@@ -423,3 +423,31 @@ fn executable_presence_cannot_satisfy_hard_seatbelt_denials() {
         ));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn captured_launcher_preserves_all_three_owned_pipes() -> std::io::Result<()> {
+    use std::io::Write;
+    let root = tempfile::tempdir()?;
+    // A stable fixture avoids ETXTBSY when parallel fork/exec temporarily
+    // inherits a just-created executable's writable descriptor.
+    let launcher = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/captured-launcher.sh");
+    let jail = Jail::new(root.path(), "captured-fixture");
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "cat; printf diagnostic >&2"])
+        .env_clear();
+    let mut child = prepare_captured_command(&jail, &command, launcher.as_os_str()).spawn()?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("missing stdin"))?;
+    input.write_all(b"owned-input")?;
+    drop(input);
+    let output = child.wait_with_output()?;
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"owned-input");
+    assert_eq!(output.stderr, b"diagnostic");
+    Ok(())
+}

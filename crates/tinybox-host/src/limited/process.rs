@@ -392,7 +392,7 @@ async fn wait_group(
 }
 
 #[cfg(target_os = "linux")]
-fn group_alive(group: i32) -> Result<bool> {
+pub(super) fn group_alive(group: i32) -> Result<bool> {
     for entry in
         std::fs::read_dir("/proc").map_err(|error| Error::io("read process table", &error))?
     {
@@ -423,7 +423,7 @@ fn stat_has_live_group(stat: &str, group: i32) -> bool {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn group_alive(group: i32) -> Result<bool> {
+pub(super) fn group_alive(group: i32) -> Result<bool> {
     use nix::{errno::Errno, sys::signal::killpg, unistd::Pid};
     match killpg(Pid::from_raw(group), None) {
         Ok(()) => Ok(true),
@@ -437,7 +437,7 @@ fn group_alive(group: i32) -> Result<bool> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn group_alive(_: i32) -> Result<bool> {
+pub(super) fn group_alive(_: i32) -> Result<bool> {
     Ok(false)
 }
 

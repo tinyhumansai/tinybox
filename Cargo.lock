@@ -1011,6 +1011,7 @@ dependencies = [
  "nix 0.30.1",
  "tempfile",
  "tinybox-core",
+ "tinybox-jail",
  "tokio",
 ]
 
