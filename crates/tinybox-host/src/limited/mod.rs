@@ -10,7 +10,9 @@ use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{oneshot, watch};
 
+mod jailed;
 mod process;
+pub use jailed::JailLocalHost;
 pub use process::ManagedProcess;
 
 /// A local host that caps combined stdout and stderr during collection.

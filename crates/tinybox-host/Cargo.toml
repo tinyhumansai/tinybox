@@ -14,6 +14,7 @@ publish = false
 
 [dependencies]
 tinybox-core.workspace = true
+tinybox-jail.workspace = true
 async-trait.workspace = true
 # `LocalHost` spawns a child and reads both its output streams concurrently,
 # which is what `tokio::process` is for; doing it by hand risks deadlocking on a
