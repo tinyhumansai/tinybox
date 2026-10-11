@@ -1086,6 +1086,7 @@ fn empty_xdg_config_home_does_not_grant_relative_git_configuration()
     assert_eq!(
         builder.fixed_read_only,
         [
+            home.path().join(".config/git/ignore"),
             home.path().join(".gitconfig"),
             home.path().join(".config/git/config")
         ]
