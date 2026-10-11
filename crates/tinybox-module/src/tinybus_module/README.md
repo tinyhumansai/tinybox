@@ -29,8 +29,15 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
 | AnalyzeCommand | String | CommandAnalysis |
+| BeginFileRead | BeginFileReadRequest | FileReadInfo |
+| ReadFileChunk | ReadFileChunkRequest | FileChunk |
+| FinishFileRead | FinishFileReadRequest | unit |
+| BeginFileWrite | BeginFileWriteRequest | FileWriteInfo |
+| WriteFileChunk | WriteFileChunkRequest | FileWriteProgress |
+| FinishFileWrite | FinishFileWriteRequest | FileWriteProgress |
+| AbortFileWrite | AbortFileWriteRequest | unit |
 
-Capabilities advertises contract version 1.4; 1.0 denotes the original
+Capabilities advertises contract version 1.5; 1.0 denotes the original
 discovery-only surface. Hosts require equal majors and a module minor at least
 as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
 added reserved resource/process ownership and terminal shutdown; 1.2 adds host
@@ -44,6 +51,20 @@ classification, executor/environment signals, expansion, background execution,
 and literal tokens. Hosts continue to own path resolution, allowlists, approval
 gates, and policy-disabled behavior. `AnalyzeShell` retains its arity and result.
 Describe remains unchanged.
+
+Version 1.5 adds bounded file transfer for mounted directory workspaces.
+Reserve `FileRead(resource)` or `FileWrite(resource)` before opening a transfer.
+Paths are relative to the workspace and reject traversal; each resource holds
+at most eight active handles, each chunk is at most 64 KiB, and writes are
+limited to 256 MiB. Writes remain in a sibling staging file until Finish
+atomically publishes them; Abort and resource Close discard unfinished writes.
+Exact retries of the most recently acknowledged write chunk and completed
+Finish calls replay their acknowledgement. The module implements path
+confinement with capability-based local directory handles. Docker workspaces
+use their caller-mounted local directory. Image-backed workspaces and SSH
+hosts return a stable unsupported error; file transfer does not shell out or
+copy data through an execution command. The caller remains responsible for
+approving the workspace and requested relative path.
 
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on
