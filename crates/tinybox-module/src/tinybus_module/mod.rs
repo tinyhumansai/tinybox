@@ -45,6 +45,31 @@ struct BoxService {
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Report native jail enforcement facts without starting a workload.
+    #[expect(clippy::unused_async, reason = "TinyBus methods are asynchronous")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "TinyBus methods are asynchronous"
+    )]
+    async fn jail_status(&self) -> TinyBusResult<tinybox_bus::JailStatus> {
+        let backend = tinybox_jail::default_backend();
+        let support = backend.constraint_support();
+        Ok(tinybox_bus::JailStatus {
+            backend: backend.name().into(),
+            available: backend.is_available(),
+            isolation: backend.isolation().to_string(),
+            suitable_for_untrusted_code: backend.is_suitable_for_untrusted_code(),
+            filesystem: support
+                .enforcement(tinybox_core::Constraint::Filesystem)
+                .to_string(),
+            network: support
+                .enforcement(tinybox_core::Constraint::Network)
+                .to_string(),
+            subprocess: support
+                .enforcement(tinybox_core::Constraint::Subprocess)
+                .to_string(),
+        })
+    }
     /// Terminal barrier: freeze startup and join native resource cleanup before ABI unload.
     async fn shutdown(&self) -> TinyBusResult<()> {
         let resources = self.resources.clone();

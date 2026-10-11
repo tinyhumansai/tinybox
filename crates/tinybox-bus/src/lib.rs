@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 /// 1.0 denotes the original discovery-only surface. 1.1 adds resource
 /// reservations, owned lifecycle/operations, capabilities and terminal shutdown.
 /// 1.2 adds host selection, container networking/ports, and owned forwards.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 2);
+/// 1.3 adds native jail discovery.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 3);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -66,7 +67,28 @@ pub const METHODS: &[&str] = &[
     "Shutdown",
     "Forward",
     "CloseForward",
+    "JailStatus",
 ];
+
+/// Facts about the detected native directory-jail backend.
+/// Hosts apply their own execution policy to these facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JailStatus {
+    /// Stable backend identifier.
+    pub backend: String,
+    /// Whether this build can apply the detected backend.
+    pub available: bool,
+    /// Declared process isolation: none, process, kernel, or hardware.
+    pub isolation: String,
+    /// Whether process isolation and filesystem enforcement meet the security floor.
+    pub suitable_for_untrusted_code: bool,
+    /// Filesystem constraint: unsupported, best effort, or enforced.
+    pub filesystem: String,
+    /// Network constraint: unsupported, best effort, or enforced.
+    pub network: String,
+    /// Subprocess constraint: unsupported, best effort, or enforced.
+    pub subprocess: String,
+}
 
 /// Stable error name for an unknown or closed module resource.
 pub const UNKNOWN_RESOURCE: &str = "ai.tinyhumans.tinybox.Error.UnknownResource";

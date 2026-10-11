@@ -1061,6 +1061,7 @@ dependencies = [
  "tinybox-core",
  "tinybox-docker",
  "tinybox-host",
+ "tinybox-jail",
  "tinybox-linux",
  "tinybox-microvm",
  "tinybox-ssh",

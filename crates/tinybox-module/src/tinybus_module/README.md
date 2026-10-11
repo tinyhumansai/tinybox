@@ -16,6 +16,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Describe | none | Original version/backend summary |
 | Shutdown | none | unit |
 | Capabilities | none | ModuleCapabilities |
+| JailStatus | none | JailStatus |
 | Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
 | Forward | ForwardRequest | ForwardInfo |
@@ -28,12 +29,15 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
 
-Capabilities advertises contract version 1.2; 1.0 denotes the original
+Capabilities advertises contract version 1.3; 1.0 denotes the original
 discovery-only surface. Hosts require equal majors and a module minor at least
 as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
 added reserved resource/process ownership and terminal shutdown; 1.2 adds host
 selection, sandbox networking/resource/port inputs, effective published-port
-facts, and module-owned forwarding. This version is independent of
+facts, and module-owned forwarding. Version 1.3 adds `JailStatus`, which reports
+the detected native directory-jail backend's availability, process isolation,
+and filesystem, network, and subprocess enforcement. The module probes the
+backend; the host applies its own policy to the returned facts. This version is independent of
 package/artifact releases. Describe remains unchanged.
 
 Create requires an explicit backend and rejects one unavailable on the current

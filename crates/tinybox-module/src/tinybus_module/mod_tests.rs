@@ -19,6 +19,42 @@ const CONTAINER: SandboxCapabilities =
 /// A backend too weak to be trusted with untrusted code.
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
+#[tokio::test]
+async fn jail_status_reports_the_detected_backend_without_starting_a_process() -> tinybus::Result<()>
+{
+    let status = BoxService::default().jail_status().await?;
+    let backend = tinybox_jail::default_backend();
+    assert_eq!(status.backend, backend.name());
+    assert_eq!(status.available, backend.is_available());
+    assert_eq!(status.isolation, backend.isolation().to_string());
+    assert_eq!(
+        status.suitable_for_untrusted_code,
+        backend.is_suitable_for_untrusted_code()
+    );
+    assert_eq!(
+        status.filesystem,
+        backend
+            .constraint_support()
+            .enforcement(tinybox_core::Constraint::Filesystem)
+            .to_string()
+    );
+    assert_eq!(
+        status.network,
+        backend
+            .constraint_support()
+            .enforcement(tinybox_core::Constraint::Network)
+            .to_string()
+    );
+    assert_eq!(
+        status.subprocess,
+        backend
+            .constraint_support()
+            .enforcement(tinybox_core::Constraint::Subprocess)
+            .to_string()
+    );
+    Ok(())
+}
+
 #[test]
 fn backend_capabilities_match_supervision_and_confinement_platforms() {
     let other = capabilities_for(Platform::Other);
@@ -214,6 +250,11 @@ async fn module_describes_itself_over_a_real_bus() -> tinybus::Result<()> {
     let client = Connection::connect(bus.connect().await?).await?;
     let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
     let description: String = proxy.call("Describe", ()).await?;
+    let status: tinybox_bus::JailStatus = proxy.call("JailStatus", ()).await?;
+    assert_ne!(status.backend, "");
+    if !status.available || status.isolation == "none" {
+        assert!(!status.suitable_for_untrusted_code);
+    }
 
     assert_eq!(description, describe(&registered_sandboxes()));
     Ok(())
