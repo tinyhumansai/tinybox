@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use tinybox_core::{
     BoxId, BoxInfo, BoxSpec, BoxState, Capability, Clock, Error, ExecOutput, ExecRequest, Host,
-    IsolationLevel, ProcessId, Result, Sandbox, SandboxCapabilities, SnapshotId, SnapshotSupport,
-    Store, SystemClock, detach,
+    IsolationLevel, PortMapping, ProcessId, Result, Sandbox, SandboxCapabilities, SnapshotId,
+    SnapshotSupport, Store, SystemClock, detach,
 };
 
 mod args;
@@ -361,6 +361,16 @@ impl Sandbox for DockerSandbox {
             Err(other) => return Err(other),
         };
         Ok(info)
+    }
+
+    async fn published_ports(&self, id: &BoxId) -> Result<Vec<PortMapping>> {
+        let output = self
+            .docker(
+                "inspect published container ports",
+                args::published_ports(&self.namespace, id),
+            )
+            .await?;
+        args::parse_published_ports(&output)
     }
 
     async fn destroy(&self, id: &BoxId) -> Result<()> {

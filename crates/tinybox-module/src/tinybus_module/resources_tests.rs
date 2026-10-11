@@ -2,6 +2,712 @@
 use super::*;
 use tinybox_core::{ExecOutput as NativeOutput, ExecRequest as NativeRequest, Host};
 
+#[test]
+fn sandbox_selection_and_spec_mapping_preserve_host_policy() -> Result<()> {
+    let host: Arc<dyn Host> = Arc::new(SshArgumentHost::default());
+    let store = Arc::new(MemoryStore::new());
+    assert!(
+        make_sandbox("passthrough", host.clone(), store.clone())?
+            .local_sandbox
+            .is_some()
+    );
+    assert!(
+        make_sandbox("docker", host.clone(), store.clone())?
+            .local_sandbox
+            .is_none()
+    );
+    assert!(
+        make_sandbox("namespace", host.clone(), store.clone())?
+            .local_sandbox
+            .is_none()
+    );
+    assert!(make_sandbox("unknown", host, store).is_err());
+
+    for (policy, expected) in [
+        (
+            tinybox_bus::NetworkPolicy::Denied,
+            tinybox_core::NetworkPolicy::Denied,
+        ),
+        (
+            tinybox_bus::NetworkPolicy::Egress,
+            tinybox_core::NetworkPolicy::Egress,
+        ),
+        (
+            tinybox_bus::NetworkPolicy::Open,
+            tinybox_core::NetworkPolicy::Open,
+        ),
+    ] {
+        let request = CreateRequest {
+            resource: ResourceId("spec-test".into()),
+            backend: "docker".into(),
+            host: HostConfig::Local,
+            workspace: Workspace::Directory("/work".into()),
+            network: policy,
+            resources: tinybox_bus::ResourceLimits {
+                cpu_millis: 1500,
+                memory_bytes: 1_000_000,
+                pids_max: 12,
+                disk_bytes: 2_000_000,
+            },
+            ports: vec![tinybox_bus::PortMapping {
+                guest: 8080,
+                host: Some(18080),
+            }],
+            env: BTreeMap::from([("MODE".into(), "test".into())]),
+        };
+        let spec = make_spec(&request, "ssh")?;
+        assert_eq!(spec.workspace.host.as_str(), "ssh");
+        assert_eq!(spec.network, expected);
+        assert_eq!(spec.resources.cpu_millis, 1500);
+        assert_eq!(spec.resources.memory_bytes, 1_000_000);
+        assert_eq!(spec.resources.pids_max, 12);
+        assert_eq!(spec.resources.disk_bytes, 2_000_000);
+        assert_eq!(spec.ports.len(), 1);
+        assert_eq!(spec.env.get("MODE").map(String::as_str), Some("test"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_create_uses_the_production_host_selection_path() -> Result<()> {
+    let resources = Resources::default();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    let info = resources
+        .create(CreateRequest {
+            resource: id.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(".".into()),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(info.resource, id);
+    assert_eq!(info.backend, "passthrough");
+    resources.close(&info.resource).await?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ForwardingDockerHost {
+    opens: Arc<std::sync::atomic::AtomicUsize>,
+    closes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct CountForwardClose(Arc<std::sync::atomic::AtomicUsize>);
+
+impl tinybox_core::ForwardGuard for CountForwardClose {
+    fn close(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl Host for ForwardingDockerHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        let output = if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains("NetworkSettings.Ports"))
+        {
+            br#"{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"38080"}]}"#.to_vec()
+        } else if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains(".State.Status"))
+        {
+            b"running".to_vec()
+        } else {
+            Vec::new()
+        };
+        Ok(NativeOutput::new(0, output, Vec::new()))
+    }
+
+    async fn forward(
+        &self,
+        remote: std::net::SocketAddr,
+    ) -> tinybox_core::Result<tinybox_core::Forward> {
+        assert_eq!(remote, std::net::SocketAddr::from(([127, 0, 0, 1], 38080)));
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(tinybox_core::Forward::guarded(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 44000)),
+            Box::new(CountForwardClose(self.closes.clone())),
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+struct SshArgumentHost(std::sync::Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl Host for SshArgumentHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = request.argv.clone();
+        Ok(NativeOutput::new(0, Vec::new(), Vec::new()))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RemoteProcessHost {
+    commands: std::sync::Mutex<Vec<Vec<String>>>,
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Host for RemoteProcessHost {
+    fn name(&self) -> &'static str {
+        tinybox_ssh::NAME
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        let script = request.argv.last().map(String::as_str).unwrap_or_default();
+        self.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.argv.clone());
+        if script.contains("kill -TERM") {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let stdout = if script.contains("kill -0")
+            && !self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            b"running".to_vec()
+        } else if script.contains("kill -0") {
+            b"gone".to_vec()
+        } else {
+            Vec::new()
+        };
+        Ok(NativeOutput::new(0, stdout, Vec::new()))
+    }
+}
+
+#[tokio::test]
+async fn remote_process_handle_stays_owned_until_the_module_stops_it() -> Result<()> {
+    let host = Arc::new(RemoteProcessHost::default());
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },
+            host.clone(),
+        )
+        .await?;
+
+    let process = resources
+        .reserve(ReserveRequest::Process(resource.clone()))
+        .await?;
+    let started = resources
+        .spawn(SpawnRequest {
+            process: process.clone(),
+            command: ExecRequest {
+                resource: resource.clone(),
+                argv: vec!["sleep".into(), "30".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+            },
+        })
+        .await?;
+    assert_eq!(started.process, process);
+    assert!(resources.is_running(&started).await?);
+    resources.cancel(&started).await?;
+    assert!(!resources.is_running(&started).await?);
+
+    let calls = host
+        .commands
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        calls.len() >= 3,
+        "start, probe, and stop use the selected host"
+    );
+    assert!(calls[0].iter().any(|arg| arg == "-c"));
+    assert!(
+        calls
+            .last()
+            .is_some_and(|argv| { argv.iter().any(|arg| arg.contains("kill -TERM")) })
+    );
+    resources.close(&resource).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ssh_host_config_uses_the_existing_cli_and_explicit_trust_policy() -> Result<()> {
+    let inner = Arc::new(SshArgumentHost::default());
+    let host = configured_host(
+        &HostConfig::Ssh(tinybox_bus::SshHostConfig {
+            destination: "operator@example.test".into(),
+            port: Some(2222),
+            identity: Some("/tmp/test-identity".into()),
+            known_hosts: Some("/tmp/test-known-hosts".into()),
+            accept_new_host_key: true,
+        }),
+        inner.clone(),
+    )?;
+    host.run(&NativeRequest::new(["uname", "-s"]))
+        .await
+        .map_err(|error| backend_error(&error))?;
+
+    let argv = inner
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(argv[0], "ssh");
+    assert!(argv.windows(2).any(|args| args == ["-p", "2222"]));
+    assert!(
+        argv.windows(2)
+            .any(|args| args == ["-i", "/tmp/test-identity"])
+    );
+    assert!(
+        argv.iter()
+            .any(|arg| arg == "UserKnownHostsFile=/tmp/test-known-hosts")
+    );
+    assert!(
+        argv.iter()
+            .any(|arg| arg == "StrictHostKeyChecking=accept-new")
+    );
+    assert!(argv.iter().any(|arg| arg == "operator@example.test"));
+
+    let default_host = configured_host(
+        &HostConfig::Ssh(tinybox_bus::SshHostConfig {
+            destination: "review-host".into(),
+            port: None,
+            identity: None,
+            known_hosts: None,
+            accept_new_host_key: false,
+        }),
+        inner.clone(),
+    )?;
+    default_host
+        .run(&NativeRequest::new(["true"]))
+        .await
+        .map_err(|error| backend_error(&error))?;
+    let argv = inner
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        !argv
+            .iter()
+            .any(|arg| arg == "StrictHostKeyChecking=accept-new")
+    );
+    assert!(
+        configured_host(
+            &HostConfig::Ssh(tinybox_bus::SshHostConfig {
+                destination: "-bad-option".into(),
+                port: None,
+                identity: None,
+                known_hosts: None,
+                accept_new_host_key: false,
+            }),
+            inner,
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn published_port_forward_is_replayed_and_closed_with_its_owner() -> Result<()> {
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Resources::default();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    let created =
+        create_forwarding_docker_resource(&resources, id.clone(), &opens, &closes).await?;
+    assert_eq!(
+        created.published_ports,
+        [tinybox_bus::PublishedPort {
+            guest: 8080,
+            host: 38080
+        }]
+    );
+
+    let first = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward: first.clone(),
+        guest_port: 8080,
+    };
+    let opened = resources.forward(request.clone()).await?;
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(opened.local_address, "127.0.0.1:44000");
+    assert_eq!(resources.forward(request).await?, opened);
+    assert!(
+        resources
+            .forward(ForwardRequest {
+                resource: id.clone(),
+                forward: first.clone(),
+                guest_port: 8081,
+            })
+            .await
+            .is_err(),
+        "an opened handle cannot be rebound to a different guest port"
+    );
+    resources
+        .close_forward(CloseForwardRequest {
+            resource: id.clone(),
+            forward: first.clone(),
+        })
+        .await?;
+    resources
+        .close_forward(CloseForwardRequest {
+            resource: id.clone(),
+            forward: first,
+        })
+        .await?;
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let second = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    resources
+        .forward(ForwardRequest {
+            resource: id.clone(),
+            forward: second,
+            guest_port: 8080,
+        })
+        .await?;
+    resources.close(&id).await?;
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn forward_replay_is_rejected_after_close_marks_the_resource_closing() -> Result<()> {
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Resources::default();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    create_forwarding_docker_resource(&resources, id.clone(), &opens, &closes).await?;
+    let forward = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward,
+        guest_port: 8080,
+    };
+    resources.forward(request.clone()).await?;
+
+    // This is the same lifecycle marker installed by Close and Shutdown. A
+    // replay must not disclose an address once either operation has started.
+    resources
+        .executions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .closing
+        .insert(id.clone());
+    assert!(
+        resources.forward(request).await.is_err(),
+        "a replay must be rejected after close admission is frozen"
+    );
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resources.close(&id).await?;
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PendingForwardHost {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    opens: Arc<std::sync::atomic::AtomicUsize>,
+    closes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Host for PendingForwardHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        let output = if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains("NetworkSettings.Ports"))
+        {
+            br#"{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"38080"}]}"#.to_vec()
+        } else if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains(".State.Status"))
+        {
+            b"running".to_vec()
+        } else {
+            Vec::new()
+        };
+        Ok(NativeOutput::new(0, output, Vec::new()))
+    }
+
+    async fn forward(
+        &self,
+        remote: std::net::SocketAddr,
+    ) -> tinybox_core::Result<tinybox_core::Forward> {
+        assert_eq!(remote, std::net::SocketAddr::from(([127, 0, 0, 1], 38080)));
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(tinybox_core::Forward::guarded(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 44000)),
+            Box::new(CountForwardClose(self.closes.clone())),
+        ))
+    }
+}
+
+async fn pending_forward_race(shutdown: bool) -> Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Arc::new(Resources::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                network: tinybox_bus::NetworkPolicy::Open,
+                ports: vec![tinybox_bus::PortMapping {
+                    guest: 8080,
+                    host: None,
+                }],
+                ..Default::default()
+            },
+            Arc::new(PendingForwardHost {
+                entered: entered.clone(),
+                release: release.clone(),
+                opens: opens.clone(),
+                closes: closes.clone(),
+            }),
+        )
+        .await?;
+    let forward = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward,
+        guest_port: 8080,
+    };
+    let runner = resources.clone();
+    let pending = tokio::spawn(async move { runner.forward(request).await });
+    entered.notified().await;
+
+    let lifecycle_runner = resources.clone();
+    let close_id = id.clone();
+    let lifecycle = tokio::spawn(async move {
+        if shutdown {
+            lifecycle_runner.shutdown().await
+        } else {
+            lifecycle_runner.close(&close_id).await
+        }
+    });
+    loop {
+        let shutdown_marked = resources.state.lock().await.shutdown;
+        let resource_closing = resources
+            .executions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing
+            .contains(&id);
+        if shutdown_marked || resource_closing {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    release.notify_one();
+    assert!(
+        pending.await.map_err(Error::failed)?.is_err(),
+        "a pending tunnel must not publish after Close or Shutdown marks it closed"
+    );
+    lifecycle.await.map_err(Error::failed)??;
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_forward_drops_its_tunnel_when_close_marks_resource_closing() -> Result<()> {
+    pending_forward_race(false).await
+}
+
+#[tokio::test]
+async fn pending_forward_drops_its_tunnel_when_shutdown_marks_module_closed() -> Result<()> {
+    pending_forward_race(true).await
+}
+
+#[tokio::test]
+async fn pending_forward_rechecks_closing_after_host_returns_before_publication() -> Result<()> {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Arc::new(Resources::default());
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: id.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                network: tinybox_bus::NetworkPolicy::Open,
+                ports: vec![tinybox_bus::PortMapping {
+                    guest: 8080,
+                    host: None,
+                }],
+                ..Default::default()
+            },
+            Arc::new(PendingForwardHost {
+                entered: entered.clone(),
+                release: release.clone(),
+                opens: opens.clone(),
+                closes: closes.clone(),
+            }),
+        )
+        .await?;
+    let forward = resources
+        .reserve(ReserveRequest::Forward(id.clone()))
+        .await?;
+    let request = ForwardRequest {
+        resource: id.clone(),
+        forward,
+        guest_port: 8080,
+    };
+    let runner = resources.clone();
+    let pending = tokio::spawn(async move { runner.forward(request).await });
+    entered.notified().await;
+
+    // Keep the reservation live to prove the post-host check observes the
+    // close marker itself, rather than relying on Close retiring the token.
+    resources
+        .executions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .closing
+        .insert(id.clone());
+    release.notify_one();
+    let result = pending.await.map_err(Error::failed)?;
+    assert!(
+        result.is_err(),
+        "closing rejects publication after host.forward"
+    );
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resources.close(&id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn forward_rejects_wrong_resource_and_unpublished_port_before_opening() -> Result<()> {
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resources = Resources::default();
+    let first = resources.reserve(ReserveRequest::Resource).await?;
+    let second = resources.reserve(ReserveRequest::Resource).await?;
+    create_forwarding_docker_resource(&resources, first.clone(), &opens, &closes).await?;
+    create_forwarding_docker_resource(&resources, second.clone(), &opens, &closes).await?;
+    let reservation = resources
+        .reserve(ReserveRequest::Forward(first.clone()))
+        .await?;
+
+    assert!(
+        resources
+            .forward(ForwardRequest {
+                resource: second.clone(),
+                forward: reservation.clone(),
+                guest_port: 8080,
+            })
+            .await
+            .is_err(),
+        "a reservation cannot start a forward for another resource"
+    );
+    assert!(
+        resources
+            .forward(ForwardRequest {
+                resource: first.clone(),
+                forward: reservation.clone(),
+                guest_port: 9999,
+            })
+            .await
+            .is_err(),
+        "unpublished ports are refused without consuming the reservation"
+    );
+    assert!(
+        resources
+            .close_forward(CloseForwardRequest {
+                resource: second.clone(),
+                forward: reservation.clone(),
+            })
+            .await
+            .is_err(),
+        "a reservation cannot be closed through a different resource"
+    );
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    resources
+        .forward(ForwardRequest {
+            resource: first.clone(),
+            forward: reservation,
+            guest_port: 8080,
+        })
+        .await?;
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    resources.close(&first).await?;
+    resources.close(&second).await?;
+    Ok(())
+}
+
+async fn create_forwarding_docker_resource(
+    resources: &Resources,
+    resource: ResourceId,
+    opens: &Arc<std::sync::atomic::AtomicUsize>,
+    closes: &Arc<std::sync::atomic::AtomicUsize>,
+) -> Result<ResourceInfo> {
+    let host = Arc::new(ForwardingDockerHost {
+        opens: opens.clone(),
+        closes: closes.clone(),
+    });
+    resources
+        .create_on(
+            CreateRequest {
+                resource,
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                network: tinybox_bus::NetworkPolicy::Open,
+                ports: vec![tinybox_bus::PortMapping {
+                    guest: 8080,
+                    host: None,
+                }],
+                ..Default::default()
+            },
+            host,
+        )
+        .await
+}
+
 #[tokio::test]
 async fn reservation_scope_expiry_sequence_and_pending_limits_fail_without_native_work()
 -> Result<()> {
@@ -25,6 +731,7 @@ async fn reservation_scope_expiry_sequence_and_pending_limits_fail_without_nativ
         backend: "passthrough".into(),
         workspace: Workspace::Directory(".".into()),
         env: BTreeMap::new(),
+        ..Default::default()
     };
     assert!(resources.create(request(id)).await.is_err());
     let id = resources.reserve(ReserveRequest::Resource).await?;
@@ -78,6 +785,7 @@ async fn docker_exec_and_detached_processes_use_the_owned_sandbox_lifecycle() ->
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host,
         )
@@ -130,6 +838,10 @@ async fn queued_spawn_stays_fenced_after_close_cleanup_fails() -> Result<()> {
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock".into()),
                 env: BTreeMap::new(),
+                host: HostConfig::default(),
+                network: tinybox_bus::NetworkPolicy::default(),
+                resources: tinybox_bus::ResourceLimits::default(),
+                ports: Vec::new(),
             },
             host.clone(),
         )
@@ -245,6 +957,7 @@ async fn docker_cancel_retains_process_when_stop_command_fails() -> Result<()> {
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host.clone(),
         )
@@ -336,6 +1049,7 @@ async fn lost_docker_spawn_reply_keeps_reserved_handle_for_cleanup_retry() -> Re
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host.clone(),
         )
@@ -474,6 +1188,7 @@ async fn uncertain_docker_create_keeps_named_container_cleanup_retryable() -> Re
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock-image".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host.clone(),
         )
@@ -517,6 +1232,7 @@ async fn create_refuses_backends_missing_from_the_platform_before_owning_a_resou
                 backend: "namespace".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host,
             super::super::Platform::Unix,
@@ -546,6 +1262,7 @@ async fn passthrough_create_on_an_unsupervised_platform_only_records_the_resourc
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host,
             super::super::Platform::Other,
@@ -601,6 +1318,7 @@ async fn close_fences_process_reservations_before_waiting_for_resource_cleanup()
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     let slot = resources.slot(&resource).await?;
@@ -650,6 +1368,7 @@ async fn shutdown_waits_for_delayed_startups_and_prevents_late_publication() -> 
         backend: "docker".into(),
         workspace: Workspace::Image("mock".into()),
         env: BTreeMap::new(),
+        ..Default::default()
     };
     let creating = tokio::spawn(async move { runner.create_on(request, native_host).await });
     host.started.notified().await;
@@ -687,7 +1406,8 @@ async fn shutdown_waits_for_delayed_startups_and_prevents_late_publication() -> 
                 resource: idle,
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
-                env: BTreeMap::new()
+                env: BTreeMap::new(),
+                ..Default::default()
             })
             .await
             .is_err()
@@ -718,6 +1438,7 @@ async fn cancelling_a_queued_spawn_prevents_native_start_and_completed_slots_are
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     let process = ProcessRef {
@@ -807,6 +1528,7 @@ async fn native_cancel_and_close_terminate_descendants_and_reap_direct_children(
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             })
             .await?;
         let script = format!(
@@ -897,6 +1619,7 @@ async fn reservations_allow_reordered_acquisition_and_cleanup_only_the_selected_
         backend: "passthrough".into(),
         workspace: Workspace::Directory(".".into()),
         env: BTreeMap::new(),
+        ..Default::default()
     };
     resources.create(request(last.clone())).await?;
     resources.create(request(first.clone())).await?;
@@ -960,6 +1683,7 @@ async fn repeated_create_close_reclaims_admission_beyond_the_old_lifetime_cap() 
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             })
             .await?;
         resources.close(&resource).await?;
@@ -977,6 +1701,7 @@ async fn cancelled_processes_release_admission_beyond_the_old_retained_cap() -> 
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     for _ in 0..=tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
@@ -1057,6 +1782,7 @@ async fn close_during_native_creation_destroys_the_eventual_resource() -> Result
                     backend: "docker".into(),
                     workspace: Workspace::Image("mock-image".into()),
                     env: BTreeMap::new(),
+                    ..Default::default()
                 },
                 create_host,
             )
@@ -1095,6 +1821,7 @@ async fn close_cancels_owned_native_execution_after_its_waiter_drops() -> Result
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock-image".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             },
             host.clone(),
         )
@@ -1151,6 +1878,7 @@ async fn idle_and_active_admission_are_bounded_and_expiry_never_reopens_ids() ->
         backend: "passthrough".into(),
         workspace: Workspace::Directory(".".into()),
         env: BTreeMap::new(),
+        ..Default::default()
     };
     assert!(resources.create(request(first)).await.is_err());
     for _ in 0..tinybox_bus::MAX_ACTIVE_RESOURCES {
@@ -1190,6 +1918,7 @@ async fn a_pending_create_does_not_block_closing_another_resource() -> Result<()
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     let host = Arc::new(DelayedHost::default());
@@ -1203,6 +1932,7 @@ async fn a_pending_create_does_not_block_closing_another_resource() -> Result<()
                     backend: "docker".into(),
                     workspace: Workspace::Image("mock".into()),
                     env: BTreeMap::new(),
+                    ..Default::default()
                 },
                 pending_host,
             )
@@ -1228,6 +1958,7 @@ async fn process_admission_refuses_overflow_before_native_start() -> Result<()> 
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     let mut processes = Vec::new();
@@ -1286,6 +2017,7 @@ async fn close_reaps_a_running_native_exec_before_returning() -> Result<()> {
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     let runner = resources.clone();
@@ -1334,6 +2066,7 @@ async fn module_collection_enforces_output_cap_before_a_reply_is_allocated() -> 
             backend: "passthrough".into(),
             workspace: Workspace::Directory(".".into()),
             env: BTreeMap::new(),
+            ..Default::default()
         })
         .await?;
     let error = resources
@@ -1367,6 +2100,7 @@ async fn shutdown_drains_other_processes_and_resources_after_a_process_failure()
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             })
             .await?;
         ids.push(id);
@@ -1473,6 +2207,7 @@ async fn failed_commands_release_native_slots_through_public_cleanup_retries() -
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: BTreeMap::new(),
+                ..Default::default()
             })
             .await?;
         let cycles = if index == 0 {

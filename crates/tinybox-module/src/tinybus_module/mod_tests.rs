@@ -81,6 +81,28 @@ fn terminal_shutdown_is_an_explicit_module_operation() {
 }
 
 #[tokio::test]
+async fn forwarding_methods_dispatch_and_unknown_close_is_idempotent() -> tinybus::Result<()> {
+    let service = BoxService::default();
+    assert!(
+        service
+            .forward(tinybox_bus::ForwardRequest {
+                resource: tinybox_bus::ResourceId("missing-resource".into()),
+                forward: tinybox_bus::ResourceId("reserved-forward".into()),
+                guest_port: 8080,
+            })
+            .await
+            .is_err()
+    );
+    service
+        .close_forward(tinybox_bus::CloseForwardRequest {
+            resource: tinybox_bus::ResourceId("missing-resource".into()),
+            forward: tinybox_bus::ResourceId("reserved-forward".into()),
+        })
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn capabilities_and_shutdown_report_actual_supported_ownership() -> tinybus::Result<()> {
     let service = BoxService::default();
     let capabilities = service.capabilities().await?;
@@ -293,7 +315,8 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
                         .await?,
                     backend: backend.into(),
                     workspace: Workspace::Directory(".".into()),
-                    env: std::collections::BTreeMap::new()
+                    env: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 })
                 .await
                 .is_err()
@@ -307,7 +330,8 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
                     .await?,
                 backend: "passthrough".into(),
                 workspace: Workspace::Image("alpine".into()),
-                env: std::collections::BTreeMap::new()
+                env: std::collections::BTreeMap::new(),
+                ..Default::default()
             })
             .await
             .is_err()
@@ -337,6 +361,7 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: std::collections::BTreeMap::new(),
+                ..Default::default()
             },),
         )
         .await?;
@@ -434,6 +459,7 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
         backend: "passthrough".into(),
         workspace: Workspace::Directory(".".into()),
         env: std::collections::BTreeMap::new(),
+        ..Default::default()
     };
     service.close(resource.clone()).await?;
     assert!(service.create(request.clone()).await.is_err());
@@ -504,7 +530,8 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
                 resource: empty,
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
-                env: std::collections::BTreeMap::new()
+                env: std::collections::BTreeMap::new(),
+                ..Default::default()
             })
             .await
             .is_err()

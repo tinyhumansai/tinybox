@@ -9,8 +9,8 @@ use tinybox_core::{IsolationLevel, SandboxCapabilities};
 use tinybus::{Connection, Result as TinyBusResult};
 
 use tinybox_bus::{
-    CreateRequest, ExecOutput, ExecRequest, INTERFACE, OBJECT_PATH, ProcessRef, ResourceId,
-    ResourceInfo, ShellAnalysis, SpawnRequest,
+    CloseForwardRequest, CreateRequest, ExecOutput, ExecRequest, ForwardInfo, ForwardRequest,
+    INTERFACE, OBJECT_PATH, ProcessRef, ResourceId, ResourceInfo, ShellAnalysis, SpawnRequest,
 };
 
 mod resources;
@@ -49,6 +49,24 @@ impl BoxService {
     async fn shutdown(&self) -> TinyBusResult<()> {
         let resources = self.resources.clone();
         finish_operation(tokio::spawn(async move { resources.shutdown().await })).await
+    }
+
+    /// Open a module-owned gateway to one of a resource's published ports.
+    async fn forward(&self, request: ForwardRequest) -> TinyBusResult<ForwardInfo> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.forward(request).await },
+        ))
+        .await
+    }
+
+    /// Close a gateway opened by Forward; repeated calls are harmless.
+    async fn close_forward(&self, request: CloseForwardRequest) -> TinyBusResult<()> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(async move {
+            resources.close_forward(request).await
+        }))
+        .await
     }
     /// Report which operations own native cleanup on this platform.
     #[expect(
@@ -283,7 +301,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward"],
     signals = [],
     requires = [],
     optional = [],

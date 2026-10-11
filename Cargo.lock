@@ -993,6 +993,7 @@ name = "tinybox-docker"
 version = "0.1.17"
 dependencies = [
  "async-trait",
+ "serde_json",
  "tempfile",
  "tinybox-core",
  "tinybox-host",
@@ -1062,6 +1063,7 @@ dependencies = [
  "tinybox-host",
  "tinybox-linux",
  "tinybox-microvm",
+ "tinybox-ssh",
  "tinybus",
  "tinybus-module",
  "tokio",
