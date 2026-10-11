@@ -69,3 +69,94 @@ fn conditional_include_sections_accept_horizontal_tabs() {
         ["~/conditional.conf"]
     );
 }
+
+#[test]
+fn explicit_xdg_root_excludes_fallback_config_and_its_includes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let xdg = tempfile::tempdir()?;
+    std::fs::create_dir_all(home.path().join(".config/git"))?;
+    std::fs::create_dir_all(xdg.path().join("git"))?;
+    std::fs::write(home.path().join(".gitconfig"), "")?;
+    std::fs::write(
+        home.path().join(".config/git/config"),
+        "[include]\npath = ../../stale.conf\n",
+    )?;
+    std::fs::write(home.path().join("stale.conf"), "")?;
+    std::fs::write(xdg.path().join("git/config"), "")?;
+    let protected = tinybox_bus::ProtectedPaths::default();
+    let mut builder = Builder::new(Some(home.path()), &protected);
+    builder.add_gitconfig_at(home.path(), Some(xdg.path().as_os_str()))?;
+    assert!(
+        builder
+            .grants
+            .read_only
+            .contains(&home.path().join(".gitconfig").canonicalize()?)
+    );
+    assert!(
+        builder
+            .grants
+            .read_only
+            .contains(&xdg.path().join("git/config").canonicalize()?)
+    );
+    assert!(
+        !builder
+            .grants
+            .read_only
+            .contains(&home.path().join(".config/git/config").canonicalize()?)
+    );
+    assert!(
+        !builder
+            .grants
+            .read_only
+            .contains(&home.path().join("stale.conf").canonicalize()?)
+    );
+    Ok(())
+}
+
+#[test]
+fn include_assignment_after_section_header_is_parsed() {
+    assert_eq!(
+        include_paths("[include] path = ~/shared.conf\n"),
+        ["~/shared.conf"]
+    );
+    assert_eq!(
+        include_paths("[includeIf \"gitdir:~/work/]repo/\"] path = ~/conditional.conf\n"),
+        ["~/conditional.conf"]
+    );
+    assert!(include_paths("[core] path = ~/ignored.conf\n").is_empty());
+}
+
+#[test]
+fn git_include_chain_grants_all_ten_supported_levels() -> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join(".gitconfig"),
+        "[include]\npath = level-1\n",
+    )?;
+    for depth in 1..=11 {
+        std::fs::write(
+            home.path().join(format!("level-{depth}")),
+            format!("[include]\npath = level-{}\n", depth + 1),
+        )?;
+    }
+    let protected = tinybox_bus::ProtectedPaths::default();
+    let mut builder = Builder::new(Some(home.path()), &protected);
+    builder.add_gitconfig_at(home.path(), None)?;
+    for depth in 1..=10 {
+        assert!(
+            builder
+                .grants
+                .read_only
+                .contains(&home.path().join(format!("level-{depth}")).canonicalize()?),
+            "missing include depth {depth}"
+        );
+    }
+    assert!(
+        !builder
+            .grants
+            .read_only
+            .contains(&home.path().join("level-11").canonicalize()?)
+    );
+    Ok(())
+}
