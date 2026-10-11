@@ -9,10 +9,14 @@ use tinybox_core::{IsolationLevel, SandboxCapabilities};
 use tinybus::{Connection, Result as TinyBusResult};
 
 use tinybox_bus::{
-    CloseForwardRequest, CreateRequest, ExecOutput, ExecRequest, ForwardInfo, ForwardRequest,
-    INTERFACE, OBJECT_PATH, ProcessRef, ResourceId, ResourceInfo, ShellAnalysis, SpawnRequest,
+    AbortFileWriteRequest, BeginFileReadRequest, BeginFileWriteRequest, CloseForwardRequest,
+    CreateRequest, ExecOutput, ExecRequest, FileChunk, FileReadInfo, FileWriteInfo,
+    FileWriteProgress, FinishFileReadRequest, FinishFileWriteRequest, ForwardInfo, ForwardRequest,
+    INTERFACE, OBJECT_PATH, ProcessRef, ReadFileChunkRequest, ResourceId, ResourceInfo,
+    ShellAnalysis, SpawnRequest, WriteFileChunkRequest,
 };
 
+mod output;
 mod resources;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +49,18 @@ struct BoxService {
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
+    /// Return detailed generic shell facts for caller-owned execution policy.
+    #[expect(clippy::unused_async, reason = "TinyBus methods are asynchronous")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "TinyBus methods are asynchronous"
+    )]
+    async fn analyze_command(
+        &self,
+        command: String,
+    ) -> TinyBusResult<tinybox_bus::CommandAnalysis> {
+        Ok(tinybox_core::shell::analysis::analyze_command(&command))
+    }
     /// Report native jail enforcement facts without starting a workload.
     #[expect(clippy::unused_async, reason = "TinyBus methods are asynchronous")]
     #[expect(
@@ -93,6 +109,50 @@ impl BoxService {
         }))
         .await
     }
+
+    /// Open a bounded read handle in the resource's mounted workspace.
+    async fn begin_file_read(&self, request: BeginFileReadRequest) -> TinyBusResult<FileReadInfo> {
+        self.resources.begin_file_read(request).await
+    }
+
+    /// Read one bounded range from an open workspace file.
+    async fn read_file_chunk(&self, request: ReadFileChunkRequest) -> TinyBusResult<FileChunk> {
+        self.resources.read_file_chunk(request).await
+    }
+
+    /// Release an open workspace reader.
+    async fn finish_file_read(&self, request: FinishFileReadRequest) -> TinyBusResult<()> {
+        self.resources.finish_file_read(request).await
+    }
+
+    /// Begin an atomic staged write in the resource's mounted workspace.
+    async fn begin_file_write(
+        &self,
+        request: BeginFileWriteRequest,
+    ) -> TinyBusResult<FileWriteInfo> {
+        self.resources.begin_file_write(request).await
+    }
+
+    /// Append one bounded, sequential chunk to a staged workspace write.
+    async fn write_file_chunk(
+        &self,
+        request: WriteFileChunkRequest,
+    ) -> TinyBusResult<FileWriteProgress> {
+        self.resources.write_file_chunk(request).await
+    }
+
+    /// Atomically publish a completed staged workspace write.
+    async fn finish_file_write(
+        &self,
+        request: FinishFileWriteRequest,
+    ) -> TinyBusResult<FileWriteProgress> {
+        self.resources.finish_file_write(request).await
+    }
+
+    /// Discard an incomplete staged workspace write.
+    async fn abort_file_write(&self, request: AbortFileWriteRequest) -> TinyBusResult<()> {
+        self.resources.abort_file_write(request).await
+    }
     /// Report which operations own native cleanup on this platform.
     #[expect(
         clippy::unused_async,
@@ -140,6 +200,27 @@ impl BoxService {
     async fn spawn(&self, request: SpawnRequest) -> TinyBusResult<ProcessRef> {
         let resources = self.resources.clone();
         finish_operation(tokio::spawn(async move { resources.spawn(request).await })).await
+    }
+
+    /// Start module-owned execution with replayable bounded output.
+    async fn start_exec(&self, request: SpawnRequest) -> TinyBusResult<ProcessRef> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.start_exec(request).await },
+        ))
+        .await
+    }
+    /// Read a replayable output batch beginning at the supplied sequence.
+    async fn read_output(
+        &self,
+        process: ProcessRef,
+        cursor: u64,
+    ) -> TinyBusResult<tinybox_bus::OutputBatch> {
+        self.resources.read_output(&process, cursor).await
+    }
+    /// Release a completed execution journal after native cleanup is acknowledged.
+    async fn release_output(&self, process: ProcessRef) -> TinyBusResult<()> {
+        self.resources.release_output(&process).await
     }
 
     /// Ask whether a tracked process remains alive.
@@ -326,7 +407,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "AnalyzeCommand", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite", "StartExec", "ReadOutput", "ReleaseOutput"],
     signals = [],
     requires = [],
     optional = [],
