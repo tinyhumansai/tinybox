@@ -40,6 +40,32 @@ struct State {
     finished: watch::Sender<u64>,
 }
 
+// Preserve the native child if a provider/receiver panics inside the supervisor.
+// Drop cannot acknowledge reaping; the normal drain path retries this handle.
+struct RetainedOnDrop {
+    child: Option<process::NativeChild>,
+    group: i32,
+    state: Arc<State>,
+}
+impl Drop for RetainedOnDrop {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.take() {
+            #[cfg(unix)]
+            {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(self.group),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            self.state
+                .cleanup_failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(self.group, Arc::new(tokio::sync::Mutex::new(Some(child))));
+        }
+    }
+}
+
 struct Active(Arc<State>);
 impl Drop for Active {
     fn drop(&mut self) {
@@ -147,6 +173,16 @@ impl LimitedLocalHost {
         let (cancel, cancelled) = oneshot::channel::<()>();
         let supervisor = tokio::spawn(async move {
             let _active = Active(state.clone());
+            let mut ownership = RetainedOnDrop {
+                child: Some(child),
+                group,
+                state: state.clone(),
+            };
+            let child = ownership.child.as_mut().ok_or_else(|| Error::Backend {
+                sandbox: crate::LOCAL.into(),
+                operation: "own output collector",
+                message: "missing native child".into(),
+            })?;
             let collection = async {
                 tokio::try_join!(
                     read_with_observer(
@@ -172,7 +208,7 @@ impl LimitedLocalHost {
                         Ok(())
                     },
                     async {
-                        process::wait_native(&mut child)
+                        process::wait_native(child)
                             .await
                             .map_err(|error| Error::io("wait", &error))
                     }
@@ -183,6 +219,11 @@ impl LimitedLocalHost {
                 () = observer_cancelled(observer.as_deref()) => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
                 _ = cancelled => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
             };
+            let child = ownership.child.take().ok_or_else(|| Error::Backend {
+                sandbox: crate::LOCAL.into(),
+                operation: "own output collector",
+                message: "missing native child".into(),
+            })?;
             cleanup(&state, child, group).await?;
             result
         });

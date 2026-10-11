@@ -176,3 +176,59 @@ async fn live_observation_keeps_the_shared_stdout_stderr_budget() -> Result<()> 
     assert!(!host.has_pending_cleanup());
     Ok(())
 }
+
+#[derive(Debug, Default)]
+struct PanickingObserver(Mutex<Option<i32>>);
+#[async_trait]
+impl ExecutionObserver for PanickingObserver {
+    #[allow(
+        clippy::panic,
+        reason = "exercise native ownership across a receiver panic"
+    )]
+    fn output(&self, _: OutputStream, bytes: &[u8]) -> Result<()> {
+        if let Ok(text) = std::str::from_utf8(bytes)
+            && let Ok(group) = text.trim().parse::<i32>()
+        {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(group);
+        }
+        panic!("fixture receiver panicked");
+    }
+}
+impl Drop for PanickingObserver {
+    fn drop(&mut self) {
+        // A failing regression must not leave its fixture descendants behind.
+        if let Some(group) = *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+#[tokio::test]
+async fn a_panicking_receiver_retains_native_cleanup_ownership() -> Result<()> {
+    let host = LimitedLocalHost::new(64);
+    let observer = Arc::new(PanickingObserver::default());
+    let result = host
+        .run_observed(
+            &ExecRequest::new(["/bin/sh", "-c", "sleep 600 & printf '%s' $$; wait"]),
+            observer,
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(
+        host.has_pending_cleanup(),
+        "supervisor panic must retain the native child for acknowledged cleanup"
+    );
+    host.drain_checked().await?;
+    assert!(!host.has_pending_cleanup());
+    assert_eq!(host.state.active.load(Ordering::SeqCst), 0);
+    Ok(())
+}
