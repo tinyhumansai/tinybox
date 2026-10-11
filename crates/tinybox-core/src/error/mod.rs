@@ -39,6 +39,13 @@ pub enum Error {
         capability: Capability,
     },
 
+    /// The provider cannot produce live bounded output observations.
+    #[error("provider {provider} does not support live output observation")]
+    UnsupportedStreaming {
+        /// Provider that explicitly refused the operation.
+        provider: String,
+    },
+
     /// A hard constraint could not be fully enforced before execution.
     #[error("sandbox {sandbox} cannot enforce {constraint}: {enforcement}")]
     ConstraintNotEnforced {

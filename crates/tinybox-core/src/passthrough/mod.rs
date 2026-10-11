@@ -173,6 +173,16 @@ impl Sandbox for PassthroughSandbox {
         self.host.run(&resolved).await
     }
 
+    async fn exec_observed(
+        &self,
+        id: &BoxId,
+        request: &ExecRequest,
+        observer: std::sync::Arc<dyn crate::ExecutionObserver>,
+    ) -> Result<ExecOutput> {
+        let resolved = self.resolve_command(id, request)?;
+        self.host.run_observed(&resolved, observer).await
+    }
+
     async fn snapshot(&self, _id: &BoxId) -> Result<SnapshotId> {
         Err(Error::Unsupported {
             sandbox: NAME.to_owned(),

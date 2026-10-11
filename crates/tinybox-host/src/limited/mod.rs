@@ -6,7 +6,9 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
+use tinybox_core::{
+    Error, ExecOutput, ExecRequest, ExecutionObserver, Forward, Host, OutputStream, Result,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{oneshot, watch};
 
@@ -112,13 +114,12 @@ impl LimitedLocalHost {
     }
 }
 
-#[async_trait]
-impl Host for LimitedLocalHost {
-    fn name(&self) -> &'static str {
-        crate::LOCAL
-    }
-
-    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+impl LimitedLocalHost {
+    async fn collect(
+        &self,
+        request: &ExecRequest,
+        observer: Option<Arc<dyn ExecutionObserver>>,
+    ) -> Result<ExecOutput> {
         let mut command = LocalHost::command(request)?;
         process::prepare(&mut command)?;
         command
@@ -146,8 +147,20 @@ impl Host for LimitedLocalHost {
             let _active = Active(state.clone());
             let collection = async {
                 tokio::try_join!(
-                    read(stdout, budget.clone(), limit),
-                    read(stderr, budget, limit),
+                    read_with_observer(
+                        stdout,
+                        budget.clone(),
+                        limit,
+                        OutputStream::Stdout,
+                        observer.clone()
+                    ),
+                    read_with_observer(
+                        stderr,
+                        budget,
+                        limit,
+                        OutputStream::Stderr,
+                        observer.clone()
+                    ),
                     async {
                         if let (Some(mut pipe), Some(payload)) = (stdin, payload) {
                             pipe.write_all(&payload)
@@ -165,6 +178,7 @@ impl Host for LimitedLocalHost {
             };
             let result = tokio::select! {
                 result = collection => result.map(|(stdout, stderr, (), status)| ExecOutput::new(status.code().unwrap_or(128), stdout, stderr)),
+                () = observer_cancelled(observer.as_deref()) => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
                 _ = cancelled => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
             };
             cleanup(&state, child, group).await?;
@@ -177,6 +191,25 @@ impl Host for LimitedLocalHost {
         });
         drop(cancel);
         result?
+    }
+}
+
+#[async_trait]
+impl Host for LimitedLocalHost {
+    fn name(&self) -> &'static str {
+        crate::LOCAL
+    }
+
+    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+        self.collect(request, None).await
+    }
+
+    async fn run_observed(
+        &self,
+        request: &ExecRequest,
+        observer: Arc<dyn ExecutionObserver>,
+    ) -> Result<ExecOutput> {
+        self.collect(request, Some(observer)).await
     }
 
     async fn forward(&self, remote: std::net::SocketAddr) -> Result<Forward> {
@@ -242,10 +275,28 @@ fn pipe<T>(value: Option<T>, stream: &str) -> Result<T> {
     })
 }
 
+async fn observer_cancelled(observer: Option<&dyn ExecutionObserver>) {
+    match observer {
+        Some(observer) => observer.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(test)]
 async fn read(
+    pipe: impl AsyncRead + Unpin,
+    budget: Arc<AtomicUsize>,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    read_with_observer(pipe, budget, limit, OutputStream::Stdout, None).await
+}
+
+async fn read_with_observer(
     mut pipe: impl AsyncRead + Unpin,
     budget: Arc<AtomicUsize>,
     limit: usize,
+    stream: OutputStream,
+    observer: Option<Arc<dyn ExecutionObserver>>,
 ) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
@@ -267,6 +318,9 @@ async fn read(
                 Err(actual) => used = actual,
             }
         }
+        if let Some(observer) = &observer {
+            observer.output(stream, &buffer[..count])?;
+        }
         bytes.extend_from_slice(&buffer[..count]);
     }
 }
@@ -274,3 +328,7 @@ async fn read(
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "observed_tests.rs"]
+mod observed_tests;

@@ -28,6 +28,9 @@ use crate::error::{Error, Result};
 use crate::identity::{BoxId, ProcessId, SnapshotId};
 use crate::spec::BoxSpec;
 
+mod output;
+pub use output::{ExecutionObserver, OutputStream};
+
 mod forward;
 #[cfg(test)]
 #[path = "forward_tests.rs"]
@@ -58,6 +61,21 @@ pub trait Host: std::fmt::Debug + Send + Sync + 'static {
     /// [`ExecOutput::exit_code`], because a failing command is a result, not a
     /// transport fault.
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput>;
+
+    /// Run with live bounded output and cooperative cancellation.
+    ///
+    /// # Errors
+    /// Returns [`Error::UnsupportedStreaming`] by default, without executing a
+    /// collected fallback. Implementations retain native cleanup ownership.
+    async fn run_observed(
+        &self,
+        _request: &ExecRequest,
+        _observer: std::sync::Arc<dyn ExecutionObserver>,
+    ) -> Result<ExecOutput> {
+        Err(Error::UnsupportedStreaming {
+            provider: self.name().to_owned(),
+        })
+    }
 
     /// Make `remote` — an address in *this host's* address space — reachable
     /// from the machine tinybox is running on.
@@ -142,6 +160,22 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     /// the box is not running, or a backend error when the command cannot be
     /// started.
     async fn exec(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecOutput>;
+
+    /// Execute with live output and cooperative cancellation inside this sandbox.
+    ///
+    /// # Errors
+    /// Returns [`Error::UnsupportedStreaming`] unless the backend implements
+    /// bounded live collection and native cleanup acknowledgement.
+    async fn exec_observed(
+        &self,
+        _id: &BoxId,
+        _request: &ExecRequest,
+        _observer: std::sync::Arc<dyn ExecutionObserver>,
+    ) -> Result<ExecOutput> {
+        Err(Error::UnsupportedStreaming {
+            provider: self.name().to_owned(),
+        })
+    }
 
     /// Capture the current state of a box.
     ///

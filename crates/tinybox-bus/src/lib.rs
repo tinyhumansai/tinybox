@@ -384,3 +384,6 @@ pub struct ShellAnalysis {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+mod output;
+pub use output::{ExecutionFailure, ExecutionState, OutputBatch, OutputChunk, OutputStream};
