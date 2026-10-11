@@ -39,8 +39,11 @@ pub use files::{
 /// 1.4 adds detailed shell facts for host execution policy. 1.5 adds bounded
 /// file transfer for mounted workspaces. 1.6 adds bounded live native output.
 /// 1.7 adds explicitly approved native directory-jail execution. 1.8 adds a
-/// bounded, module-owned one-shot Docker operation. 1.9 adds local grant discovery.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 9);
+/// bounded, module-owned one-shot Docker operation. 1.9 adds bounded Docker
+/// daemon status and label-scoped cleanup operations. 1.10 adds a bounded
+/// Docker command that does not mount a host workspace. 1.11 adds local
+/// grant discovery.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 11);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -110,6 +113,9 @@ pub const METHODS: &[&str] = &[
     "ReleaseOutput",
     "StartJailedExec",
     "RunDocker",
+    "DockerStatus",
+    "CleanupDocker",
+    "RunDockerWithoutWorkspace",
     "ResolveLocalGrants",
 ];
 
@@ -165,6 +171,10 @@ pub const FILE_UNSUPPORTED: &str = "ai.tinyhumans.tinybox.Error.FileUnsupported"
 pub const FILE_ERROR: &str = "ai.tinyhumans.tinybox.Error.FileOperation";
 /// Stable error name for an invalid Docker run request.
 pub const INVALID_DOCKER_RUN: &str = "ai.tinyhumans.tinybox.Error.InvalidDockerRun";
+/// Stable error name for invalid Docker lifecycle requests.
+pub const INVALID_DOCKER_CONTROL: &str = "ai.tinyhumans.tinybox.Error.InvalidDockerControl";
+/// Stable error name for failed Docker lifecycle operations.
+pub const DOCKER_CONTROL_FAILED: &str = "ai.tinyhumans.tinybox.Error.DockerControlFailed";
 
 /// Opaque module-minted reservation identifier bound by one module instance.
 /// IDs use ASCII letters, digits, hyphens, or underscores, up to [`MAX_ID_BYTES`].
@@ -321,13 +331,17 @@ pub struct CreateRequest {
 /// Run one Docker-isolated shell command and collect bounded output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockerRunRequest {
-    /// Host workspace mounted read-write at `/workspace`.
+    /// Host workspace mounted read-write at `/workspace` for `RunDocker`; must
+    /// be empty for `RunDockerWithoutWorkspace`.
     pub workspace: String,
     /// Container image; `None` uses the existing one-shot default.
     #[serde(default)]
     pub image: Option<String>,
-    /// Shell command executed with `sh -c`.
+    /// Shell command executed with `sh -c`, or `sh -lc` when `login_shell` is true.
     pub command: String,
+    /// Start the POSIX shell as a login shell (`sh -lc`) instead of `sh -c`.
+    #[serde(default)]
+    pub login_shell: bool,
     /// Docker network mode; `None` uses the existing isolated default.
     #[serde(default)]
     pub network: Option<String>,
@@ -370,6 +384,41 @@ pub struct DockerRunOutput {
     /// Whether the module stopped the command after its deadline.
     pub timed_out: bool,
 }
+
+/// Check whether the module's Docker daemon responds within a bounded interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerStatusRequest {
+    /// Maximum probe duration in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// Result of a bounded Docker daemon probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerStatus {
+    /// Whether Docker responded successfully before the deadline.
+    pub available: bool,
+}
+
+/// Stop module-owned containers matching a caller-selected Docker label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupDockerRequest {
+    /// Docker label filter in `key=value` form.
+    pub label: String,
+    /// Maximum total list-and-stop duration in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// Result of a completed labeled-container cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupDockerOutput {
+    /// Number of matching container identifiers successfully submitted to Docker kill.
+    pub containers_stopped: u32,
+}
+
+/// Default Docker lifecycle operation timeout, in milliseconds.
+pub const DEFAULT_DOCKER_CONTROL_TIMEOUT_MS: u64 = 10_000;
+/// Maximum Docker lifecycle operation timeout, in milliseconds.
+pub const MAX_DOCKER_CONTROL_TIMEOUT_MS: u64 = 60_000;
 
 /// Maximum accepted one-shot Docker runtime, in milliseconds.
 pub const MAX_DOCKER_RUN_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;

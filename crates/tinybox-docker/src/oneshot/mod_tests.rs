@@ -25,6 +25,11 @@ fn canon(p: &Path) -> String {
     p.canonicalize().unwrap().display().to_string()
 }
 
+fn has_pair(argv: &[String], flag: &str, value: &str) -> bool {
+    argv.windows(2)
+        .any(|pair| pair[0] == flag && pair[1] == value)
+}
+
 /// A fake client that records its argv (NUL separated) then runs `body`.
 fn fake(dir: &Path, body: &str) -> (DockerCli, PathBuf) {
     let out = dir.join("argv.out");
@@ -101,6 +106,34 @@ fn defaults_produce_the_pinned_command_line() {
         "echo hi && ls",
     ]));
     assert_eq!(strings(&spec.argv()), expected);
+}
+
+#[test]
+fn without_workspace_preserves_isolation_flags_without_mount_or_workdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = OneShot::new(tmp.path(), "printf '%s' \"$MODE\"")
+        .without_workspace()
+        .with_network("bridge")
+        .with_memory_mb(2048)
+        .with_cpus(2.5)
+        .with_read_only_rootfs(false)
+        .with_login_shell()
+        .with_env([(OsString::from("MODE"), OsString::from("host-cwd"))]);
+    let argv = strings(&spec.argv());
+
+    assert!(has_pair(&argv, "--network", "bridge"));
+    assert!(has_pair(&argv, "-m", "2048m"));
+    assert!(has_pair(&argv, "--cpus", "2.5"));
+    assert!(has_pair(&argv, "-e", "MODE=host-cwd"));
+    assert!(!argv.iter().any(|arg| arg == "-v"));
+    assert!(!argv.iter().any(|arg| arg == "-w"));
+    assert!(!argv.iter().any(|arg| arg == "--read-only"));
+    assert_eq!(argv[0], "run");
+    assert_eq!(argv[1], "--rm");
+    assert_eq!(
+        argv[argv.len() - 3..],
+        ["sh", "-lc", "printf '%s' \"$MODE\""]
+    );
 }
 
 #[test]
@@ -267,4 +300,36 @@ async fn kill_labelled_lists_then_kills() {
     let (cli, out) = fake(tmp.path(), "exit 0");
     assert_eq!(cli.kill_labelled("l=1").await.unwrap(), 0);
     assert_eq!(recorded(&out), s(&["ps", "-q", "--filter", "label=l=1"]));
+}
+
+#[tokio::test]
+async fn checked_label_cleanup_rejects_unsuccessful_listing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cli, out) = fake(
+        tmp.path(),
+        "if [ \"$1\" = ps ]; then echo ignored-id; exit 1; fi",
+    );
+    assert!(cli.kill_labelled_checked("l=1").await.is_err());
+    assert_eq!(recorded(&out), s(&["ps", "-q", "--filter", "label=l=1"]));
+}
+
+#[tokio::test]
+async fn checked_label_cleanup_requires_successful_kill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cli, out) = fake(
+        tmp.path(),
+        "if [ \"$1\" = ps ]; then echo container-id; exit 0; fi; exit 1",
+    );
+    assert!(cli.kill_labelled_checked("l=1").await.is_err());
+    assert_eq!(recorded(&out), s(&["kill", "container-id"]));
+}
+
+#[tokio::test]
+async fn legacy_label_cleanup_keeps_its_best_effort_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cli, _) = fake(
+        tmp.path(),
+        "if [ \"$1\" = ps ]; then echo container-id; exit 0; fi; exit 1",
+    );
+    assert_eq!(cli.kill_labelled("l=1").await.unwrap(), 1);
 }

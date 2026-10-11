@@ -278,6 +278,30 @@ impl BoxService {
     ) -> TinyBusResult<tinybox_bus::DockerRunOutput> {
         docker::run(request).await
     }
+
+    /// Run one Docker-isolated shell command without mounting a host workspace.
+    async fn run_docker_without_workspace(
+        &self,
+        request: tinybox_bus::DockerRunRequest,
+    ) -> TinyBusResult<tinybox_bus::DockerRunOutput> {
+        docker::run_without_workspace(&tinybox_docker::DockerCli::new(), request).await
+    }
+
+    /// Probe the Docker daemon on the module's host with a bounded deadline.
+    async fn docker_status(
+        &self,
+        request: tinybox_bus::DockerStatusRequest,
+    ) -> TinyBusResult<tinybox_bus::DockerStatus> {
+        docker::status(request).await
+    }
+
+    /// Stop containers matching the supplied label on the module's host.
+    async fn cleanup_docker(
+        &self,
+        request: tinybox_bus::CleanupDockerRequest,
+    ) -> TinyBusResult<tinybox_bus::CleanupDockerOutput> {
+        docker::cleanup(request).await
+    }
     /// Read a replayable output batch beginning at the supplied sequence.
     async fn read_output(
         &self,
@@ -460,7 +484,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "AnalyzeCommand", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite", "StartExec", "ReadOutput", "ReleaseOutput", "StartJailedExec", "RunDocker", "ResolveLocalGrants"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "AnalyzeCommand", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite", "StartExec", "ReadOutput", "ReleaseOutput", "StartJailedExec", "RunDocker", "DockerStatus", "CleanupDocker", "RunDockerWithoutWorkspace", "ResolveLocalGrants"],
     signals = [],
     requires = [],
     optional = [],

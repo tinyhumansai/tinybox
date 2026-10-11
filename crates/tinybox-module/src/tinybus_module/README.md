@@ -20,6 +20,9 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
 | RunDocker | DockerRunRequest | DockerRunOutput |
+| RunDockerWithoutWorkspace | DockerRunRequest with an empty `workspace` | DockerRunOutput |
+| DockerStatus | DockerStatusRequest | DockerStatus |
+| CleanupDocker | CleanupDockerRequest | CleanupDockerOutput |
 | Forward | ForwardRequest | ForwardInfo |
 | CloseForward | CloseForwardRequest | unit |
 | Exec | ExecRequest | ExecOutput |
@@ -43,7 +46,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | AbortFileWrite | AbortFileWriteRequest | unit |
 | ResolveLocalGrants | ResolveLocalGrantsRequest | LocalGrants |
 
-Capabilities advertises contract version 1.9; 1.0 denotes the original
+Capabilities advertises contract version 1.11; 1.0 denotes the original
 discovery-only surface. Hosts require equal majors and a module minor at least
 as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
 added reserved resource/process ownership and terminal shutdown; 1.2 adds host
@@ -79,6 +82,22 @@ mount, capability-drop, environment, label, and timeout settings. Runtime is
 capped at 24 hours. It does not create a long-lived resource or fall back to a
 host command. The caller remains responsible for validating requested network
 and mount policy before sending the request.
+
+Version 1.9 adds bounded `DockerStatus` and `CleanupDocker` operations. The
+status probe reports whether the module host's daemon responds before the
+requested deadline. Cleanup lists and stops containers matching the requested
+`key=value` label and reports the number of IDs submitted to Docker. Invalid
+labels and deadlines are refused; daemon or cleanup failures return a stable
+module error rather than claiming successful cleanup.
+
+Version 1.10 adds `RunDockerWithoutWorkspace` for Docker runtimes that do not
+mount a host workspace. It accepts the same bounded Docker settings as
+`RunDocker`, requires an empty `workspace`, and omits both the workspace bind
+mount and working-directory override. `login_shell` defaults to false for
+existing callers; when true, the command runs through `sh -lc` rather than
+`sh -c`, preserving login-shell runtime behavior. All other image, network,
+resource, rootfs, read-only mount, capability-drop, environment, label, output,
+and timeout behavior remains shared with `RunDocker`.
 
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on
@@ -263,7 +282,7 @@ cover actual Docker when a local daemon is available.
 
 ### Local grant discovery
 
-Contract 1.9 adds `ResolveLocalGrants`. The caller supplies its operator home,
+Contract 1.11 adds `ResolveLocalGrants`. The caller supplies its operator home,
 `LocalGrantConfig`, and `ProtectedPaths` floor. TinyBox resolves existing paths,
 canonicalizes symlinks, discovers toolchain homes and Git include chains, and
 returns read-only and writable grants. Discovery does not start a process or

@@ -156,6 +156,10 @@ async fn compiled_module_transfers_workspace_files_over_a_broker()
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBOX_TEST_MODULE to point at the built cdylib"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the compiled artifact proof verifies both existing and no-workspace Docker calls through one broker"
+)]
 async fn compiled_module_runs_one_shot_docker_through_a_broker()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -195,6 +199,23 @@ async fn compiled_module_runs_one_shot_docker_through_a_broker()
     let client = Connection::connect(bus.connect().await?).await?;
     wait_until_serving(&client, &modules).await?;
     let proxy = client.proxy(BUS_NAME, OBJECT_PATH, BUS_NAME)?;
+    let status: tinybox_bus::DockerStatus = proxy
+        .call(
+            "DockerStatus",
+            (tinybox_bus::DockerStatusRequest { timeout_ms: 5_000 },),
+        )
+        .await?;
+    assert!(status.available, "the local fixture answers Docker info");
+    let cleanup: tinybox_bus::CleanupDockerOutput = proxy
+        .call(
+            "CleanupDocker",
+            (tinybox_bus::CleanupDockerRequest {
+                label: "openhuman.sandbox=true".into(),
+                timeout_ms: 5_000,
+            },),
+        )
+        .await?;
+    assert_eq!(cleanup.containers_stopped, 1);
     let result: tinybox_bus::DockerRunOutput = proxy
         .call(
             "RunDocker",
@@ -202,6 +223,7 @@ async fn compiled_module_runs_one_shot_docker_through_a_broker()
                 workspace: workspace.path().display().to_string(),
                 image: None,
                 command: "ignored by fixture".into(),
+                login_shell: false,
                 network: None,
                 memory_limit_mb: None,
                 cpus: None,
@@ -218,6 +240,30 @@ async fn compiled_module_runs_one_shot_docker_through_a_broker()
     assert_eq!(result.stdout, "fixture-container\n");
     assert_eq!(result.stderr, "");
     assert!(!result.timed_out);
+    let unmounted: tinybox_bus::DockerRunOutput = proxy
+        .call(
+            "RunDockerWithoutWorkspace",
+            (tinybox_bus::DockerRunRequest {
+                workspace: String::new(),
+                image: None,
+                command: "ignored by fixture".into(),
+                login_shell: true,
+                network: None,
+                memory_limit_mb: None,
+                cpus: None,
+                read_only_rootfs: None,
+                read_only_mounts: Vec::new(),
+                extra_cap_drops: Vec::new(),
+                env: std::collections::BTreeMap::new(),
+                label: None,
+                timeout_ms: 120_000,
+            },),
+        )
+        .await?;
+    assert_eq!(unmounted.exit_code, 0);
+    assert_eq!(unmounted.stdout, "fixture-container\n");
+    assert_eq!(unmounted.stderr, "");
+    assert!(!unmounted.timed_out);
     modules.shutdown(Duration::from_secs(5)).await;
     broker_task.abort();
     Ok(())

@@ -5,7 +5,7 @@ and verification for the existing discovery slice.
 
 1. Define LocalGrantConfig, ProtectedPaths, ResolveLocalGrantsRequest and
    LocalGrants in crates/tinybox-bus/src/grants.rs; append ResolveLocalGrants
-   and contract 1.9 in src/lib.rs, with wire compatibility tests.
+   and contract 1.11 in src/lib.rs, with wire compatibility tests.
 2. Implement discovery in crates/tinybox-jail/src/grants/mod.rs and types.rs.
    Put alias/component boundaries in floor.rs, bounded subtree admission in
    inspection.rs and bounded quote-aware Git include discovery in git_config.rs.

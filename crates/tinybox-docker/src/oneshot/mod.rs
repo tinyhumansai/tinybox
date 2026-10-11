@@ -53,10 +53,12 @@ pub struct OneShot {
     cpus: f64,
     read_only_rootfs: bool,
     workspace: PathBuf,
+    mount_workspace: bool,
     read_only_mounts: Vec<PathBuf>,
     env: Vec<(OsString, OsString)>,
     label: Option<String>,
     command: String,
+    login_shell: bool,
 }
 
 impl OneShot {
@@ -72,11 +74,27 @@ impl OneShot {
             cpus: DEFAULT_ONE_SHOT_CPUS,
             read_only_rootfs: true,
             workspace: workspace.into(),
+            mount_workspace: true,
             read_only_mounts: Vec::new(),
             env: Vec::new(),
             label: None,
             command: command.into(),
+            login_shell: false,
         }
+    }
+
+    /// Run without mounting a host workspace or changing the container working directory.
+    #[must_use]
+    pub fn without_workspace(mut self) -> Self {
+        self.mount_workspace = false;
+        self
+    }
+
+    /// Execute through a login POSIX shell (`sh -lc`).
+    #[must_use]
+    pub fn with_login_shell(mut self) -> Self {
+        self.login_shell = true;
+        self
     }
 
     /// The image to run in.
@@ -185,11 +203,13 @@ impl OneShot {
         push("--security-opt");
         push("no-new-privileges");
 
-        let workspace = resolve(&self.workspace);
-        push("-v");
-        push(&format!("{}:{ONE_SHOT_WORKSPACE}", workspace.display()));
-        push("-w");
-        push(ONE_SHOT_WORKSPACE);
+        if self.mount_workspace {
+            let workspace = resolve(&self.workspace);
+            push("-v");
+            push(&format!("{}:{ONE_SHOT_WORKSPACE}", workspace.display()));
+            push("-w");
+            push(ONE_SHOT_WORKSPACE);
+        }
 
         for ro in &self.read_only_mounts {
             let ro = resolve(ro);
@@ -208,7 +228,7 @@ impl OneShot {
         let mut push = |s: &str| argv.push(OsString::from(s));
         push(&self.image);
         push("sh");
-        push("-c");
+        push(if self.login_shell { "-lc" } else { "-c" });
         push(&self.command);
         argv
     }
@@ -269,6 +289,7 @@ impl DockerCli {
             .args(["info", "--format", "{{.ServerVersion}}"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .output()
             .await;
         result.is_ok_and(|output| output.status.success())
@@ -322,18 +343,40 @@ impl DockerCli {
     }
 
     /// Kill every running container carrying `label` (`key=value`), returning
-    /// how many there were.
+    /// how many identifiers Docker accepted the request for.
     ///
     /// # Errors
     ///
-    /// Returns the I/O error when the listing command cannot be started.
+    /// Returns an I/O error when the listing command cannot be started.
     pub async fn kill_labelled(&self, label: &str) -> io::Result<u32> {
+        self.kill_labelled_inner(label, false).await
+    }
+
+    /// Kill matching containers and require Docker to confirm both listing
+    /// and kill completion. Use this when a lifecycle API reports success.
+    /// The historical [`Self::kill_labelled`] method retains its best-effort
+    /// behavior for existing callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when Docker cannot be started, the container
+    /// listing fails, or any requested container kill is not confirmed.
+    pub async fn kill_labelled_checked(&self, label: &str) -> io::Result<u32> {
+        self.kill_labelled_inner(label, true).await
+    }
+
+    async fn kill_labelled_inner(&self, label: &str, checked: bool) -> io::Result<u32> {
         let output = Command::new(&self.program)
             .args(["ps", "-q", "--filter", &format!("label={label}")])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .output()
             .await?;
+
+        if checked && !output.status.success() {
+            return Err(io::Error::other("Docker container listing failed"));
+        }
 
         let ids: Vec<&str> = std::str::from_utf8(&output.stdout)
             .unwrap_or("")
@@ -348,11 +391,18 @@ impl DockerCli {
         kill.arg("kill");
         kill.args(&ids);
         // Best effort: a container that exited in the meantime is not an error.
-        let _ = kill
+        let status = kill
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .status()
             .await;
+        if checked {
+            let status = status?;
+            if !status.success() {
+                return Err(io::Error::other("Docker kill command failed"));
+            }
+        }
         Ok(u32::try_from(ids.len()).unwrap_or(u32::MAX))
     }
 }

@@ -256,6 +256,7 @@ async fn new_module_operations_dispatch_and_preserve_validation_errors() -> tiny
             workspace: "/workspace".into(),
             image: None,
             command: "true".into(),
+            login_shell: false,
             network: None,
             memory_limit_mb: None,
             cpus: None,
@@ -268,6 +269,25 @@ async fn new_module_operations_dispatch_and_preserve_validation_errors() -> tiny
         })
         .await;
     assert!(docker.is_err());
+
+    let docker_without_workspace = service
+        .run_docker_without_workspace(tinybox_bus::DockerRunRequest {
+            workspace: "/must/not/be/mounted".into(),
+            image: None,
+            command: "true".into(),
+            login_shell: false,
+            network: None,
+            memory_limit_mb: None,
+            cpus: None,
+            read_only_rootfs: None,
+            read_only_mounts: Vec::new(),
+            extra_cap_drops: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            label: None,
+            timeout_ms: 1000,
+        })
+        .await;
+    assert!(docker_without_workspace.is_err());
     Ok(())
 }
 

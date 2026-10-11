@@ -3,7 +3,7 @@
 Status: implemented contract under review. Owner: TinyBox.
 Sequence: [local-grants plan](../plans/local-grants.md).
 
-Contract 1.9 appends ResolveLocalGrants(ResolveLocalGrantsRequest) -> LocalGrants.
+Contract 1.11 appends ResolveLocalGrants(ResolveLocalGrantsRequest) -> LocalGrants.
 The caller supplies operator home, LocalGrantConfig and ProtectedPaths.
 The host owns authorization and the unconditional floor; discovery starts no
 process and makes no approval decision.

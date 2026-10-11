@@ -3,6 +3,11 @@
 operation=$1
 shift
 case "$operation" in
+  info) printf 'fixture-engine\n' ;;
+  ps) printf 'fixture-container\n' ;;
+  kill)
+    [ "$#" -eq 1 ] && [ "$1" = fixture-container ] || exit 1
+    ;;
   run) printf 'fixture-container\n' ;;
   exec)
     while [ "$#" -gt 0 ]; do
