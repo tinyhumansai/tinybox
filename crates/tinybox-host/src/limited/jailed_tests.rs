@@ -377,3 +377,90 @@ fn jail_supervisor_fault_retains_child_for_cleanup_acknowledgement()
     assert!(!host.has_pending_cleanup());
     Ok(())
 }
+
+struct MissingOutputBackend;
+impl tinybox_jail::JailBackend for MissingOutputBackend {
+    fn name(&self) -> &'static str {
+        "missing-output"
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn spawn(
+        &self,
+        _: &Jail,
+        mut command: std::process::Command,
+    ) -> std::io::Result<std::process::Child> {
+        command.spawn()
+    }
+    fn spawn_captured(
+        &self,
+        _: &Jail,
+        mut command: std::process::Command,
+    ) -> std::io::Result<std::process::Child> {
+        command.stdout(std::process::Stdio::null()).spawn()
+    }
+}
+
+#[tokio::test]
+async fn malformed_provider_output_still_cleans_native_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let host = JailLocalHost::with_backend(
+        Jail::new(root.path(), "fixture"),
+        Arc::new(MissingOutputBackend),
+        64,
+    )?;
+    let error = host
+        .run(&ExecRequest::new(["/bin/sh", "-c", "exec sleep 60"]))
+        .await;
+    assert!(matches!(
+        error,
+        Err(Error::Backend {
+            operation: "collect output",
+            ..
+        })
+    ));
+    host.drain_checked().await?;
+    assert!(!host.has_pending_cleanup());
+    assert_eq!(host.state.active.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+struct PanickingStartup;
+impl tinybox_jail::JailBackend for PanickingStartup {
+    fn name(&self) -> &'static str {
+        "panicking-startup"
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    // Deliberate provider panic verifies the supervisor fault boundary.
+    #[allow(clippy::panic)]
+    fn spawn(&self, _: &Jail, _: std::process::Command) -> std::io::Result<std::process::Child> {
+        panic!("fixture provider fault before native creation");
+    }
+}
+
+#[tokio::test]
+async fn provider_startup_fault_releases_native_supervisor_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let host = JailLocalHost::with_backend(
+        Jail::new(root.path(), "fixture"),
+        Arc::new(PanickingStartup),
+        64,
+    )?;
+    let error = host.run(&ExecRequest::new(["/bin/sh", "-c", "true"])).await;
+    assert!(matches!(
+        error,
+        Err(Error::Backend {
+            operation: "start native jail",
+            ..
+        })
+    ));
+    host.drain_checked().await?;
+    assert!(!host.has_pending_cleanup());
+    assert_eq!(host.state.active.load(Ordering::SeqCst), 0);
+    Ok(())
+}
