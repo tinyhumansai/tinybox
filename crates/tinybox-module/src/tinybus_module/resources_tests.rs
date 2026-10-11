@@ -2955,3 +2955,66 @@ async fn failed_commands_release_native_slots_through_public_cleanup_retries() -
     assert!(resources.state.lock().await.entries.is_empty());
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_one_live_execution_does_not_wait_for_another_running_stream() -> Result<()> {
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(".".into()),
+            ..Default::default()
+        })
+        .await?;
+    let mut streams = Vec::new();
+    for _ in 0..2 {
+        let process = resources
+            .reserve(ReserveRequest::Process(resource.clone()))
+            .await?;
+        streams.push(
+            resources
+                .start_exec(SpawnRequest {
+                    process,
+                    command: ExecRequest {
+                        resource: resource.clone(),
+                        argv: vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            "printf ready; exec sleep 600".into(),
+                        ],
+                        cwd: None,
+                        env: BTreeMap::new(),
+                        stdin: None,
+                    },
+                })
+                .await?,
+        );
+    }
+    for stream in &streams {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !resources.read_output(stream, 0).await?.chunks.is_empty() {
+                    return Ok::<(), Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| Error::failed("stream did not produce its live prefix"))??;
+    }
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        resources.cancel(&streams[0]),
+    )
+    .await;
+    resources.cancel(&streams[1]).await?;
+    resources.close(&resource).await?;
+    assert!(
+        first.is_ok_and(|result| result.is_ok()),
+        "cancel must acknowledge only its own execution cleanup"
+    );
+    Ok(())
+}

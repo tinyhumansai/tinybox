@@ -16,6 +16,7 @@ use tinybox_bus::{
     ShellAnalysis, SpawnRequest, WriteFileChunkRequest,
 };
 
+mod output;
 mod resources;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +200,27 @@ impl BoxService {
     async fn spawn(&self, request: SpawnRequest) -> TinyBusResult<ProcessRef> {
         let resources = self.resources.clone();
         finish_operation(tokio::spawn(async move { resources.spawn(request).await })).await
+    }
+
+    /// Start module-owned execution with replayable bounded output.
+    async fn start_exec(&self, request: SpawnRequest) -> TinyBusResult<ProcessRef> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.start_exec(request).await },
+        ))
+        .await
+    }
+    /// Read a replayable output batch beginning at the supplied sequence.
+    async fn read_output(
+        &self,
+        process: ProcessRef,
+        cursor: u64,
+    ) -> TinyBusResult<tinybox_bus::OutputBatch> {
+        self.resources.read_output(&process, cursor).await
+    }
+    /// Release a completed execution journal after native cleanup is acknowledged.
+    async fn release_output(&self, process: ProcessRef) -> TinyBusResult<()> {
+        self.resources.release_output(&process).await
     }
 
     /// Ask whether a tracked process remains alive.
@@ -385,7 +407,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "AnalyzeCommand", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "AnalyzeCommand", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite", "StartExec", "ReadOutput", "ReleaseOutput"],
     signals = [],
     requires = [],
     optional = [],

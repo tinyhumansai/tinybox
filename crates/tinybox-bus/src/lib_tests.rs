@@ -82,9 +82,10 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (1, 5));
+    assert_eq!(CONTRACT_VERSION, (1, 6));
     assert!(is_compatible(CONTRACT_VERSION));
-    assert!(is_compatible((1, 5)));
+    assert!(is_compatible((1, 6)));
+    assert!(!is_compatible((1, 5)));
     assert!(!is_compatible((1, 4)));
     assert!(!is_compatible((1, 3)));
     assert!(!is_compatible((1, 2)));
@@ -97,7 +98,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[1,5],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[1,6],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
