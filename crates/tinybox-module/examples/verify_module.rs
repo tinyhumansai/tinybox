@@ -72,6 +72,12 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
     if !tinybox_bus::is_compatible(capabilities.contract_version) {
         return Err(io::Error::other("artifact contract version mismatch").into());
     }
+    let jail: tinybox_bus::JailStatus = proxy.call("JailStatus", ()).await?;
+    if jail.backend.is_empty()
+        || ((!jail.available || jail.isolation == "none") && jail.suitable_for_untrusted_code)
+    {
+        return Err(io::Error::other("invalid native jail enforcement facts").into());
+    }
     // Exercise real resource ownership through the loaded native artifact.
     let analysis: ShellAnalysis = proxy
         .call("AnalyzeShell", ("echo hello".to_owned(),))
