@@ -5,6 +5,7 @@ resolver = "3"
 # `tinybox-cli` are named in `docs/specs/tinybox-runtime.md` but are not
 # scaffolded until they do something — an empty crate is a placeholder.
 members = [
+    "crates/tinybox-bus",
     "crates/tinybox-cli",
     "crates/tinybox-core",
     "crates/tinybox-docker",
@@ -56,6 +57,7 @@ serde_json = "1"
 # The model types are serializable; see `tinybox-core`'s dependency comment.
 serde = { version = "1", features = ["derive"] }
 # Internal path dependencies between workspace members.
+tinybox-bus = { path = "crates/tinybox-bus", version = "0.1.16" }
 tinybox-core = { path = "crates/tinybox-core", version = "0.1.5" }
 tinybox-host = { path = "crates/tinybox-host", version = "0.1.5" }
 tinybox-jail = { path = "crates/tinybox-jail", version = "0.1.5" }

@@ -10,7 +10,8 @@ use std::borrow::Cow;
 use super::scan::{
     command_basename, contains_unquoted_background_ampersand, contains_unquoted_char,
     contains_unquoted_single_ampersand, has_leading_env_assignment, normalized_command_name,
-    skip_env_assignments, split_unquoted_segments, strip_quoted_heredoc_bodies,
+    skip_env_assignments, split_unquoted_segments, strip_heredoc_bodies,
+    strip_quoted_heredoc_bodies,
 };
 
 fn segs(command: &str) -> Vec<String> {
@@ -134,6 +135,86 @@ fn unquoted_heredoc_delimiter_is_left_alone() {
         strip_quoted_heredoc_bodies(dash),
         Cow::Borrowed(_)
     ));
+}
+
+#[test]
+fn all_heredoc_bodies_are_blank_for_structural_scans() {
+    let body_only = strip_heredoc_bodies("cat << EOF\nbody > is not a redirect\nEOF\n");
+    assert!(!contains_unquoted_char(&body_only, '>'));
+    let outside =
+        strip_heredoc_bodies("cat << EOF\nbody > is not a redirect\nEOF\nprintf done > out\n");
+    assert!(contains_unquoted_char(&outside, '>'));
+    assert!(outside.contains("printf done > out"));
+}
+
+#[test]
+fn heredoc_structural_scan_handles_tabs_quoting_and_multiple_bodies() {
+    let tabs = strip_heredoc_bodies("cat <<- EOF\n\tbody > data\n\tEOF\n");
+    assert!(!contains_unquoted_char(&tabs, '>'));
+
+    let mixed_quote = strip_heredoc_bodies("cat <<'E'OF\nbody > data\nEOF\n");
+    assert!(!contains_unquoted_char(&mixed_quote, '>'));
+
+    let double_quote = strip_heredoc_bodies("cat << \"E\\\"OF\"\nbody > data\nE\"OF\n");
+    assert!(!contains_unquoted_char(&double_quote, '>'));
+
+    let multiple = strip_heredoc_bodies(
+        "cat << FIRST << SECOND\nfirst > data\nFIRST\nsecond > data\nSECOND\n",
+    );
+    assert!(!contains_unquoted_char(&multiple, '>'));
+
+    assert!(matches!(
+        strip_heredoc_bodies("echo \"<< not a heredoc\""),
+        Cow::Borrowed(_)
+    ));
+    assert!(matches!(
+        strip_heredoc_bodies("cat <<< \"text > data\""),
+        Cow::Borrowed(_)
+    ));
+    assert!(matches!(
+        strip_heredoc_bodies("cat << EOF"),
+        Cow::Borrowed(_)
+    ));
+}
+
+#[test]
+fn heredoc_comment_does_not_consume_the_next_command() {
+    let command = "# << EOF\nprintf done > out\n";
+    let stripped = strip_heredoc_bodies(command);
+
+    assert!(contains_unquoted_char(&stripped, '>'));
+    assert!(stripped.contains("printf done > out"));
+}
+
+#[test]
+fn arithmetic_shifts_do_not_hide_following_redirects() {
+    for command in [
+        "echo $((1 << 2))\nprintf done > out\n",
+        "((1 << 2))\nprintf done > out\n",
+        "echo $((1 + (2 << 3)))\nprintf done > out\n",
+        "echo $((1\n << 2))\nprintf done > out\n",
+    ] {
+        let stripped = strip_heredoc_bodies(command);
+        assert!(contains_unquoted_char(&stripped, '>'), "{command}");
+        assert!(stripped.contains("printf done > out"), "{command}");
+    }
+}
+
+#[test]
+fn heredoc_inside_arithmetic_command_substitution_remains_data() {
+    let command = "echo $((1 + $(cat <<'EOF'\n2 > data\nEOF\n)))\nprintf done > out\n";
+    let stripped = strip_heredoc_bodies(command);
+    assert!(!stripped.contains("2 > data"));
+    assert!(stripped.contains("printf done > out"));
+}
+
+#[test]
+fn double_quoted_heredoc_delimiter_preserves_literal_backslash() {
+    let command = "cat << \"E\\OF\"\nbody > data\nE\\OF\nprintf done > out\n";
+    let stripped = strip_heredoc_bodies(command);
+
+    assert!(contains_unquoted_char(&stripped, '>'));
+    assert!(stripped.contains("printf done > out"));
 }
 
 #[test]

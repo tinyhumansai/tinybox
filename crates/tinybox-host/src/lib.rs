@@ -32,6 +32,10 @@
 //! [`LOCAL`] is the name `LocalHost` registers under, re-exported so callers
 //! can build a [`HostRef`](tinybox_core::HostRef) without hard-coding it.
 
+mod limited;
 mod local;
+
+/// Local reach with an enforced combined output budget and supervised cleanup.
+pub use limited::{LimitedLocalHost, ManagedProcess};
 
 pub use local::{LocalHost, NAME as LOCAL};

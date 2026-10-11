@@ -32,6 +32,9 @@
 
 mod tinybus_module;
 
+/// Serialized vocabulary for clients that previously depended on this library.
+pub use tinybox_bus as bus;
+
 /// Constructs this module for registration with an in-process `TinyBus` host.
 #[cfg(feature = "static-link")]
 pub use tinybus_module::linked_module;

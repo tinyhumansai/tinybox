@@ -79,10 +79,33 @@ impl Host for ScriptedHost {
 
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
         self.seen().push(request.argv.clone());
+        let attempt_owner = if request
+            .argv
+            .iter()
+            .any(|argument| argument.contains(args::OWNER_ATTEMPT_LABEL))
+        {
+            self.seen()
+                .iter()
+                .rev()
+                .find_map(|command| {
+                    command.windows(2).find_map(|pair| {
+                        pair[0]
+                            .eq("--label")
+                            .then_some(pair[1].as_str())
+                            .filter(|label| {
+                                label.starts_with(&format!("{}=", args::OWNER_ATTEMPT_LABEL))
+                            })
+                    })
+                })
+                .and_then(|label| label.split_once('=').map(|(_, value)| value.to_owned()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         Ok(self
             .replies()
             .pop_front()
-            .unwrap_or_else(|| ExecOutput::new(0, Vec::new(), Vec::new())))
+            .unwrap_or_else(|| ExecOutput::new(0, attempt_owner.into_bytes(), Vec::new())))
     }
 }
 
@@ -314,7 +337,7 @@ async fn a_git_source_is_refused_before_anything_runs() -> Result<()> {
             kind: "git repository",
         })
     );
-    assert!(host.commands().is_empty(), "nothing should have been run");
+    assert_eq!(host.commands().len(), 0, "nothing should have been run");
     Ok(())
 }
 
@@ -336,6 +359,105 @@ async fn a_docker_failure_carries_dockers_own_diagnostic() -> Result<()> {
         })
     );
     // A container that was never created must leave no record.
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_name_conflict_never_removes_the_existing_container() -> Result<()> {
+    let host = ScriptedHost::silent();
+    let first_store = Arc::new(MemoryStore::new());
+    let second_store = Arc::new(MemoryStore::new());
+    let first = DockerSandbox::new(host.clone(), first_store.clone());
+    let second = DockerSandbox::new(host.clone(), second_store.clone());
+    first.create(&spec()?).await?;
+    host.push_failure("Conflict. The container name \"/tinybox-default-box-0\" is already in use");
+
+    let outcome = second.create(&spec()?).await;
+
+    assert!(outcome.is_err());
+    let commands = host.commands();
+    assert_eq!(commands.len(), 2, "a name conflict must not run rm");
+    assert!(commands.iter().all(|command| command[1] == "run"));
+    assert_eq!(first_store.list()?.len(), 1);
+    assert_eq!(second_store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_removes_only_our_verified_create_attempt() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("connection reset after create");
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+
+    let commands = host.commands();
+    assert_eq!(commands.len(), 3);
+    assert_eq!(commands[1][1], "container");
+    assert_eq!(commands[1][2], "inspect");
+    assert!(commands[1][4].contains(args::OWNER_ATTEMPT_LABEL));
+    assert_eq!(commands[2][1], "rm");
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_create_ownership_probe_uses_container_specific_inspection() -> Result<()> {
+    let store = Arc::new(MemoryStore::new());
+    let sandbox = DockerSandbox::new(Arc::new(MissingContainerHost), store.clone());
+    assert!(sandbox.create(&spec()?).await.is_err());
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+/// Model the Docker CLI's different missing-object diagnostics, without a daemon.
+#[derive(Debug)]
+struct MissingContainerHost;
+
+#[async_trait]
+impl Host for MissingContainerHost {
+    fn name(&self) -> &'static str {
+        "scripted"
+    }
+
+    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+        let error = match request.argv.get(1).map(String::as_str) {
+            Some("run") => "image download failed",
+            Some("container") => "Error: No such container: tinybox-default-box-0",
+            _ => "Error: No such object: tinybox-default-box-0",
+        };
+        Ok(ExecOutput::new(1, Vec::new(), error.as_bytes().to_vec()))
+    }
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_leaves_a_foreign_container_untouched() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("connection reset after create");
+    host.push_ok("different-owner");
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+
+    let commands = host.commands();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[1][1], "container");
+    assert_eq!(commands[1][2], "inspect");
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_same_id_container_from_another_attempt_is_not_removed() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("connection reset after create");
+    host.push_ok("box-0"); // matching box id, but not the per-attempt token
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+
+    let commands = host.commands();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[1][1], "container");
+    assert_eq!(commands[1][2], "inspect");
     assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
@@ -434,6 +556,69 @@ async fn a_stopped_container_accepts_no_commands() -> Result<()> {
             expected: BoxState::Ready,
         })
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_nonzero_detached_stop_is_reported_as_unfinished_cleanup() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    let process = tinybox_core::ProcessId::new("process-1")?;
+    host.push_ok("running");
+    host.push_failure("process cleanup was refused");
+
+    assert_eq!(
+        sandbox.stop(&info.id, &process).await.err(),
+        Some(Error::Backend {
+            sandbox: NAME.to_owned(),
+            operation: "stop a detached process",
+            message: "process cleanup was refused".to_owned(),
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_retains_the_record_until_named_cleanup_is_acknowledged() -> Result<()>
+{
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("docker connection was interrupted");
+    host.push_failure("daemon temporarily unavailable");
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+    assert_eq!(store.list()?.len(), 1);
+
+    sandbox.destroy(&BoxId::new("box-0")?).await?;
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_releases_the_record_after_named_cleanup_succeeds() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    host.push_failure("docker connection was interrupted");
+
+    assert!(sandbox.create(&spec()?).await.is_err());
+
+    assert_eq!(store.list()?.len(), 0);
+    let commands = host.commands();
+    assert_eq!(commands.len(), 3);
+    assert_eq!(commands[0].get(1).map(String::as_str), Some("run"));
+    assert_eq!(commands[1].get(1).map(String::as_str), Some("container"));
+    assert_eq!(commands[1].get(2).map(String::as_str), Some("inspect"));
+    assert_eq!(commands[2].get(1).map(String::as_str), Some("rm"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_missing_named_container_completes_destroy_cleanup() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    host.push_failure("Error: No such container: tinybox-default-box-0");
+
+    sandbox.destroy(&info.id).await?;
+
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 

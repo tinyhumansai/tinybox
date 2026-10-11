@@ -1,0 +1,19 @@
+[package]
+name = "tinybox-bus"
+description = "Serializable TinyBox module contract without a runtime or backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The bus boundary contains data only; serialization is its sole dependency.
+serde.workspace = true
+
+[dev-dependencies]
+# Round-trip tests pin the serialized public vocabulary.
+serde_json.workspace = true
+
+[lints]
+workspace = true

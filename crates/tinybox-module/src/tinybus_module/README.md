@@ -1,54 +1,111 @@
-# TinyBus module adapter
+# TinyBox module
 
-The bus-facing half of tinybox. It exposes the model in `tinybox-core` over
-TinyBus and exports the ABI v1 symbols the host's dynamic loader looks for.
+The native module owns sandbox providers, box identifiers, detached processes,
+and their lifetimes. Clients depend on `tinybox-bus`, whose only production
+dependency is serde. It contains serialized vocabulary, no runtime or TinyBus
+connection. `tinybox-module::bus` re-exports that vocabulary for compatibility.
 
 ## Public surface
 
-The module claims `ai.tinyhumans.tinybox.Box` and serves the object at
-`/ai/tinyhumans/tinybox/Box`.
+The interface is `ai.tinyhumans.tinybox.Box` at
+`/ai/tinyhumans/tinybox/Box`. Every argument below is one positional argument;
+`Describe` retains its original zero-argument shape and string result.
 
-| Method | Arguments | Returns |
+| Method | Argument | Result |
 | --- | --- | --- |
-| `Describe` | none | `String` — crate version, registered sandboxes, and which of them clear the untrusted-code isolation floor |
+| Describe | none | Original version/backend summary |
+| Shutdown | none | unit |
+| Capabilities | none | ModuleCapabilities |
+| Reserve | ReserveRequest | ResourceId |
+| Create | CreateRequest | ResourceInfo |
+| Exec | ExecRequest | ExecOutput |
+| Inspect | ResourceId | ResourceInfo |
+| Close | ResourceId | unit |
+| Spawn | SpawnRequest | ProcessRef |
+| IsRunning | ProcessRef | bool |
+| Cancel | ProcessRef | unit |
+| AnalyzeShell | String | ShellAnalysis |
 
-`registered_sandboxes` is empty until backend crates land. `Describe` reports
-`sandboxes: none` rather than omitting the field, because a caller reading an
-absent list cannot tell "no backends" from "the field was dropped".
+Capabilities advertises contract version 1.1; 1.0 denotes the original
+discovery-only surface. Hosts require equal majors and a module minor at least
+as new as their vocabulary, using tinybox-bus::is_compatible. This version is
+independent of package/artifact releases. Describe remains unchanged.
 
-## Design
+Create requires an explicit backend and rejects one unavailable on the current
+platform before it creates a resource slot. `passthrough` is record-only on
+platforms where TinyBox cannot supervise native children; Docker is available
+on Unix, and the Linux namespace backend is available only on Linux. An
+unsupported backend, including microvm without its required image
+configuration, fails; there is no passthrough fallback. Describe remains the
+existing summary of compiled providers, rather than claiming every provider is
+configurable through Create. Passthrough runs trusted code without isolation.
 
-This module is deliberately thin. The CLI and this adapter are both adapters
-over `tinybox-core`, so behavior implemented here would be unavailable to the
-other. Anything beyond translating bus calls belongs in core.
+Clients call Reserve with Resource or Process(resource) before Create or Spawn.
+The module mints an opaque, single-use handle without starting native work.
+Unused reservations expire after 60 seconds and are bounded at 4096; Reserve
+reclaims expired entries. Consuming, closing, or cancelling a reservation removes
+it. Create and Spawn accept only still-live reservations, so forgotten or old
+handles can never resurrect side effects. Reservations are independent: startup
+can arrive out of order and cleanup removes only its selected target. Process
+reservations are bound to their resource. Random per-instance identity and a
+monotonic sequence prevent IDs from being reused across module incarnations.
 
-It is a **private** module rather than the crate root. `module_export!`
-generates three `#[unsafe(no_mangle)]` items, and at the crate root those become
-publicly reachable and trip `missing_docs`. Keeping them private is also
-honest — they are an ABI, not an API anyone should call from Rust.
+Native handles remain module-owned. Close/Cancel before startup removes the
+reservation, and cleanup during native startup waits for its resource lock and
+cleans the eventual result. Completed/cancelled process entries are removed
+rather than consuming admission forever. IsRunning reports false for a process
+that is no longer retained. Command failures are reported once, separately from native cleanup: successfully
+reaped process/resource slots are released even when the command failed. Native
+cleanup errors retain the child and group for a public Cancel/Close/Shutdown retry.
+Callers must call terminal Shutdown before ABI unload or runtime shutdown.
+Shutdown is a lifecycle control for the trusted module host. TinyBus currently
+does not enforce per-peer method authorization, so the host must keep this
+interface on a bus shared only with trusted, admitted peers and authorize its
+lifecycle call.
+Shutdown freezes Reserve/Create/Spawn/Exec admission, cancels native execution,
+waits pending startup locks and queued process workers, stops every owned process
+group, drains supervisors, and destroys resources. A native startup already
+underway must finish so cleanup can destroy its eventual allocation; it cannot
+publish a usable result once shutdown starts. Failed cleanup retains native ownership
+and returns an error; retry Shutdown before unloading. Command errors can be
+returned after complete resource release; repeating Shutdown then succeeds. The terminal instance
+never restarts. Host ordering is stop submissions, await Shutdown, then unload
+the ABI/module runtime. The SDK shutdown timeout alone is not this barrier. Output streaming,
+transfer, forwarding, SSH and microVM configuration remain subsequent slices.
 
-`describe` takes the sandbox list as a parameter instead of reading it. That
-makes the rendering a pure function testable against a populated registry today,
-before any backend exists to populate one.
+Operations serialize within each resource; unrelated resources have independent
+locks. Spawn uses an owned local process group, never legacy pid-file detach helpers.
+Capabilities distinguishes Create backends from supervised execution backends.
+Exec/Spawn currently support Unix passthrough and Docker; namespace execution
+and Windows job-object supervision require subsequent owning-provider slices.
+Unsupported operations fail explicitly without fallback. Legacy library APIs
+remain available. A detached process can be cancelled after Spawn returns. Close fences new
+execution, aborts its resource's collected Exec, waits for its output supervisor
+to kill/reap the child, then stops tracked detached processes and destroys the
+sandbox. Create, Spawn, Exec, Cancel, and Close run in module-owned tasks, so a
+caller dropping or timing out its wait cannot discard startup/cleanup ownership.
 
-## Constraints
+Admission bounds live resources at 64, live processes at 64 per resource, and
+queued process startups at 64 per resource. Unused reservation capacity is
+reclaimed on consumption, cleanup or expiry. Sequential Create/Close and
+Spawn/Cancel cycles impose no lifetime admission limit and keep no history sets.
+Collected commands use LimitedLocalHost with a combined 1 MiB stdout/stderr
+budget enforced during reading; overflow fails rather than truncating output.
 
-- The manifest's `methods = [...]` list must match the `#[tinybus::interface]`
-  dispatch table. `declared_methods_match_the_dispatch_table` asserts this;
-  a mismatch means the host advertises a method that does not resolve.
-- The `cdylib` is named `tinybox`, not after the package. `release.yml` reads
-  that target name out of `cargo metadata`, so the released file stays
-  `libtinybox.so` — do not rename `[lib] name` without updating the workflow.
-- Do not retain Rust-owned data across the ABI boundary, and do not bypass the
-  SDK exports with ad hoc FFI.
-- Each module owns its own Tokio runtime, sized by `worker_threads` in the
-  manifest. Borrowing the host's runtime is incorrect: a statically linked
-  cdylib has its own Tokio thread-locals.
-- `setup` returning `Ok(())` means *ready*, not *done*. The SDK then calls
-  `host.ready()` and parks, keeping the connection and object tree alive.
+AnalyzeShell removes quoted heredoc bodies before segment analysis. Its
+redirection fact ignores all heredoc bodies, while hidden-execution analysis
+retains expansion-aware behavior for unquoted bodies. It returns segments and
+hidden-execution/redirection facts. Authorization,
+credential/path restrictions, and access-tier decisions remain host policy.
+Errors use the stable dotted names declared in `tinybox-bus`; backend failures
+retain the underlying diagnostic without exposing native handles.
 
-## Trust
+## Native boundary
 
-TinyBus modules are trusted in-process code with the host's full address-space
-privileges. tinybox exists to give a host somewhere to put code it does *not*
-trust; nothing here confines the module itself.
+The SDK owns ABI v1 exports and the module runtime. The artifact remains
+`libtinybox.so`, `libtinybox.dylib`, or `tinybox.dll`. The manifest declares all
+methods and the test compares that declaration with the dispatch table.
+`verify_module` loads the compiled artifact through ModuleHost and exercises
+analysis, creation, execution, inspection, and close. In-memory bus tests also
+exercise detached cancellation and cleanup. Modules are trusted native code;
+the module itself is not confined by the sandboxes it creates.

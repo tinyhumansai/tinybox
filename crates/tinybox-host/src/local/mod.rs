@@ -36,12 +36,13 @@ impl LocalHost {
     /// # Errors
     ///
     /// Returns [`Error::EmptyCommand`] when the request names no program.
-    fn command(request: &ExecRequest) -> Result<Command> {
+    pub(super) fn command(request: &ExecRequest) -> Result<Command> {
         let program = request.program().ok_or_else(|| Error::EmptyCommand {
             sandbox: NAME.to_owned(),
         })?;
 
         let mut command = Command::new(program);
+        command.kill_on_drop(true);
         command.args(&request.argv[1..]);
         command.envs(&request.env);
         if let Some(cwd) = &request.cwd {

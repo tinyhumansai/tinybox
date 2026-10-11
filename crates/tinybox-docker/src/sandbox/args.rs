@@ -17,6 +17,10 @@ use super::NAME;
 /// traced back to the tool that made it.
 pub const OWNER_LABEL: &str = "ai.tinyhumans.tinybox";
 
+/// A per-create token used to distinguish an in-flight create from a
+/// pre-existing container with the same deterministic name.
+pub(super) const OWNER_ATTEMPT_LABEL: &str = "ai.tinyhumans.tinybox.attempt";
+
 /// Where a bind-mounted local directory appears inside the container.
 pub const WORKSPACE_MOUNT: &str = "/workspace";
 
@@ -93,7 +97,12 @@ const KEEPALIVE: [&str; 3] = ["sh", "-c", "while :; do sleep 86400; done"];
 ///
 /// Returns [`Error::UnsupportedWorkspaceSource`] when the spec names a source
 /// this backend cannot turn into a container.
-pub(super) fn run(namespace: &str, id: &BoxId, spec: &BoxSpec) -> Result<Vec<String>> {
+pub(super) fn run(
+    namespace: &str,
+    id: &BoxId,
+    attempt: &str,
+    spec: &BoxSpec,
+) -> Result<Vec<String>> {
     let mut argv = vec![
         "docker".to_owned(),
         "run".to_owned(),
@@ -102,6 +111,8 @@ pub(super) fn run(namespace: &str, id: &BoxId, spec: &BoxSpec) -> Result<Vec<Str
         container_name(namespace, id),
         "--label".to_owned(),
         format!("{OWNER_LABEL}={id}"),
+        "--label".to_owned(),
+        format!("{OWNER_ATTEMPT_LABEL}={attempt}"),
     ];
 
     argv.extend(resource_flags(&spec.resources));
@@ -221,6 +232,19 @@ pub(super) fn inspect(namespace: &str, id: &BoxId) -> Vec<String> {
         "inspect".to_owned(),
         "--format".to_owned(),
         "{{.State.Status}}".to_owned(),
+        container_name(namespace, id),
+    ]
+}
+
+/// Read a container's per-create ownership token before reconciling an
+/// ambiguous `docker run` failure.
+pub(super) fn inspect_attempt(namespace: &str, id: &BoxId) -> Vec<String> {
+    vec![
+        "docker".to_owned(),
+        "container".to_owned(),
+        "inspect".to_owned(),
+        "--format".to_owned(),
+        format!("{{{{ index .Config.Labels \"{OWNER_ATTEMPT_LABEL}\" }}}}"),
         container_name(namespace, id),
     ]
 }

@@ -1,6 +1,6 @@
 //! A sandbox backed by Docker containers.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use tinybox_core::{
@@ -40,6 +40,7 @@ pub struct DockerSandbox {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     namespace: String,
+    failed_create_attempts: Arc<std::sync::Mutex<HashMap<BoxId, String>>>,
 }
 
 /// The namespace used when a caller names none.
@@ -59,6 +60,7 @@ impl DockerSandbox {
             store,
             clock: Arc::new(SystemClock::new()),
             namespace: DEFAULT_NAMESPACE.to_owned(),
+            failed_create_attempts: Arc::default(),
         }
     }
 
@@ -98,6 +100,7 @@ impl DockerSandbox {
             store,
             clock: Arc::new(SystemClock::new()),
             namespace,
+            failed_create_attempts: Arc::default(),
         })
     }
 
@@ -132,9 +135,11 @@ impl DockerSandbox {
     /// Run a `docker` command, treating a non-zero exit as a failure.
     ///
     /// Unlike [`Host::run`], where a non-zero status is a result, a failing
-    /// `docker` invocation means the operation did not happen — so it becomes
-    /// an [`Error::Backend`] carrying Docker's own diagnostic, which is more
-    /// specific than anything reconstructed here.
+    /// `docker` invocation is an operation error — so it becomes an
+    /// [`Error::Backend`] carrying Docker's own diagnostic, which is more
+    /// specific than anything reconstructed here. A remote daemon may have
+    /// completed a create before its response was lost, so callers reconcile
+    /// that case by checking the created container's ownership label.
     async fn docker(&self, operation: &'static str, argv: Vec<String>) -> Result<String> {
         let output = self.host.run(&ExecRequest::new(argv)).await?;
         if !output.succeeded() {
@@ -145,6 +150,29 @@ impl DockerSandbox {
             });
         }
         Ok(output.stdout_lossy().trim().to_owned())
+    }
+
+    /// Remove a named container, treating Docker's explicit missing-container
+    /// response as an already-completed cleanup.
+    async fn remove_container(&self, argv: Vec<String>) -> Result<()> {
+        let output = self.host.run(&ExecRequest::new(argv)).await?;
+        if output.succeeded() || output.stderr_lossy().contains("No such container") {
+            return Ok(());
+        }
+        Err(Error::Backend {
+            sandbox: NAME.to_owned(),
+            operation: "remove the container",
+            message: output.stderr_lossy().trim().to_owned(),
+        })
+    }
+
+    fn discard_failed_create_record(&self, id: &BoxId, attempt: &str) {
+        if self.store.remove(id).is_err() {
+            self.failed_create_attempts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id.clone(), attempt.to_owned());
+        }
     }
 }
 
@@ -171,6 +199,7 @@ impl Sandbox for DockerSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        let attempt = uuid::Uuid::new_v4().to_string();
         // Claim the record first. A container is expensive to create and has to
         // be torn down if the record cannot be written, so taking the cheap
         // resource first keeps the failure path short.
@@ -179,19 +208,66 @@ impl Sandbox for DockerSandbox {
 
         // Build the command before running anything, so a source this backend
         // cannot handle leaves no container behind.
-        let argv = match args::run(&self.namespace, &info.id, spec) {
+        let argv = match args::run(&self.namespace, &info.id, &attempt, spec) {
             Ok(argv) => argv,
             Err(error) => {
-                let _ = self.store.remove(&info.id);
+                self.discard_failed_create_record(&info.id, &attempt);
                 return Err(error);
             }
         };
 
         if let Err(error) = self.docker("create the container", argv).await {
-            // No container, so the record would point at nothing.
-            let _ = self.store.remove(&info.id);
+            // Docker reports a name collision before creating a container.
+            // Never remove that name: it belongs to the pre-existing owner.
+            if is_name_conflict(&error) {
+                self.discard_failed_create_record(&info.id, &attempt);
+                return Err(error);
+            }
+
+            // A lost response can hide a successful create. Reconcile only
+            // after the daemon confirms this exact attempt token; otherwise a
+            // deterministic name may refer to another store's container with
+            // the same box id.
+            match self
+                .docker(
+                    "inspect the failed create",
+                    args::inspect_attempt(&self.namespace, &info.id),
+                )
+                .await
+            {
+                Ok(owner) if owner == attempt => {
+                    if self
+                        .remove_container(args::remove(&self.namespace, &info.id))
+                        .await
+                        .is_ok()
+                    {
+                        self.discard_failed_create_record(&info.id, &attempt);
+                    } else {
+                        self.failed_create_attempts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(info.id.clone(), attempt);
+                    }
+                }
+                Ok(_) => {
+                    self.discard_failed_create_record(&info.id, &attempt);
+                }
+                Err(Error::Backend { message, .. }) if message.contains("No such container") => {
+                    self.discard_failed_create_record(&info.id, &attempt);
+                }
+                Err(_) => {
+                    self.failed_create_attempts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(info.id.clone(), attempt);
+                }
+            }
             return Err(error);
         }
+        self.failed_create_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&info.id);
         Ok(info)
     }
 
@@ -214,8 +290,16 @@ impl Sandbox for DockerSandbox {
     }
 
     async fn stop(&self, id: &BoxId, process: &ProcessId) -> Result<()> {
-        self.exec(id, &detach::stop(process, detach::DEFAULT_GRACE))
+        let output = self
+            .exec(id, &detach::stop(process, detach::DEFAULT_GRACE))
             .await?;
+        if !output.succeeded() {
+            return Err(Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "stop a detached process",
+                message: output.stderr_lossy().trim().to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -282,12 +366,48 @@ impl Sandbox for DockerSandbox {
     async fn destroy(&self, id: &BoxId) -> Result<()> {
         // Fail on an unknown box before touching Docker.
         self.store.get(id)?;
+        let attempt = self
+            .failed_create_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned();
+        if let Some(attempt) = attempt {
+            let owner = self
+                .docker(
+                    "inspect the failed create",
+                    args::inspect_attempt(&self.namespace, id),
+                )
+                .await;
+            match owner {
+                Ok(owner) if owner == attempt => {}
+                Err(Error::Backend { message, .. }) if message.contains("No such container") => {}
+                Ok(_) => {
+                    return Err(Error::Backend {
+                        sandbox: NAME.to_owned(),
+                        operation: "verify failed container ownership",
+                        message: "container belongs to another create attempt".to_owned(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
         // Remove the container first: a record without a container is
         // recoverable, a container without a record is a leak.
-        self.docker("remove the container", args::remove(&self.namespace, id))
+        self.remove_container(args::remove(&self.namespace, id))
             .await?;
-        self.store.remove(id)
+        self.store.remove(id)?;
+        self.failed_create_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
+        Ok(())
     }
+}
+
+fn is_name_conflict(error: &Error) -> bool {
+    matches!(error, Error::Backend { message, .. }
+        if message.contains("container name") && message.contains("already in use"))
 }
 
 #[cfg(test)]

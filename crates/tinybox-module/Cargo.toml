@@ -22,6 +22,14 @@ name = "tinybox"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+# Serialized-only module vocabulary, shared with hosts independently of backends.
+tinybox-bus.workspace = true
+# The module constructs local reach itself, keeping process handles module-owned.
+tinybox-host.workspace = true
+# Random instance identity prevents reservations from another module incarnation binding.
+uuid = { version = "1", features = ["v4"] }
+# Resource operations serialize against close and allocate opaque identifiers.
+tokio.workspace = true
 tinybox-core.workspace = true
 tinybox-docker.workspace = true
 tinybox-linux.workspace = true
@@ -30,6 +38,10 @@ tinybus.workspace = true
 tinybus-module.workspace = true
 
 [dev-dependencies]
+# Native cancellation verification uses isolated readiness files, not wall-clock sleeps.
+tempfile = "3"
+# Deterministic delayed-host fixtures implement the existing object-safe host trait.
+async-trait.workspace = true
 # Module integration tests exercise the real asynchronous in-memory TinyBus.
 tokio.workspace = true
 # The GitHub release verifier passes an explicit empty module configuration.
