@@ -41,8 +41,8 @@ pub use files::{
 /// 1.7 adds explicitly approved native directory-jail execution. 1.8 adds a
 /// bounded, module-owned one-shot Docker operation. 1.9 adds bounded Docker
 /// daemon status and label-scoped cleanup operations. 1.10 adds a bounded
-/// Docker command that does not mount a host workspace. 1.11 adds local
-/// grant discovery.
+/// Docker command that does not mount a host workspace. 1.11 adds local grant
+/// discovery.
 pub const CONTRACT_VERSION: (u32, u32) = (1, 11);
 
 /// Whether this host vocabulary can bind to a module's advertised version.

@@ -99,6 +99,11 @@ existing callers; when true, the command runs through `sh -lc` rather than
 resource, rootfs, read-only mount, capability-drop, environment, label, output,
 and timeout behavior remains shared with `RunDocker`.
 
+Version 1.11 adds `ResolveLocalGrants` for discovering canonical read-only and
+writable local grants under a caller-supplied protected-path floor. Git
+configuration discovery follows Git's XDG config-home selection and supports
+include chains up to Git's ten-level limit.
+
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on
 platforms where TinyBox cannot supervise native children; Docker is available

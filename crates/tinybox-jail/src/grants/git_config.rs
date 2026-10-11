@@ -3,6 +3,9 @@ use super::Builder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Git config files read at startup, relative to `$HOME`.
+const GITCONFIG_FILE: &str = ".gitconfig";
+
 /// Deepest `include` chain followed when collecting git config files.
 const GITCONFIG_MAX_DEPTH: usize = 10;
 
@@ -19,12 +22,9 @@ impl Builder<'_> {
         home: &Path,
         xdg: Option<&std::ffi::OsStr>,
     ) -> tinybox_core::Result<()> {
-        let config_root = xdg_root(xdg).map_or_else(|| home.join(".config"), Path::to_path_buf);
-        let roots = [home.join(".gitconfig"), config_root.join("git/config")];
-        self.fixed_read_only(&home.join(".config/git/ignore"), "gitignore");
-        if let Some(xdg) = xdg_root(xdg) {
-            self.fixed_read_only(&Path::new(&xdg).join("git/ignore"), "gitignore");
-        }
+        let config_home = xdg_root(xdg).map_or_else(|| home.join(".config"), Path::to_path_buf);
+        let roots = [home.join(GITCONFIG_FILE), config_home.join("git/config")];
+        self.fixed_read_only(&config_home.join("git/ignore"), "gitignore");
         let mut visited = HashSet::new();
         for root in roots {
             self.add_gitconfig_file(&root, home, 0, &mut visited)?;

@@ -410,7 +410,7 @@ fn gitconfig_include_depth_is_bounded_and_non_files_are_skipped()
         home.path().join(".gitconfig"),
         "[include]\n path = ~/next-0\n path = ~/.cargo\n",
     )?;
-    for index in 0..11 {
+    for index in 0..12 {
         fs::write(
             home.path().join(format!("next-{index}")),
             format!("[include]\n path = ~/next-{}\n", index + 1),

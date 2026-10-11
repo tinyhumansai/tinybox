@@ -53,6 +53,7 @@ fn docker_run_vocabulary_is_typed_bounded_and_additive() -> Result<(), serde_jso
         Some(&"RunDockerWithoutWorkspace")
     );
     assert_eq!(METHODS.last(), Some(&"ResolveLocalGrants"));
+    assert!(METHODS.contains(&"RunDockerWithoutWorkspace"));
     assert_eq!(CONTRACT_VERSION, (1, 11));
     assert_eq!(MAX_DOCKER_RUN_TIMEOUT_MS, 86_400_000);
     let serialized = serde_json::to_value(&request)?;
@@ -160,7 +161,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 }
 
 #[test]
-fn no_workspace_docker_operation_is_appended_to_the_contract() {
+fn no_workspace_docker_operation_is_present_in_the_contract() {
     assert_eq!(
         METHODS.get(METHODS.len() - 2),
         Some(&"RunDockerWithoutWorkspace")

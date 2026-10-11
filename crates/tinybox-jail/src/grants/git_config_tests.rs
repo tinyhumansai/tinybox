@@ -160,3 +160,41 @@ fn git_include_chain_grants_all_ten_supported_levels() -> Result<(), Box<dyn std
     );
     Ok(())
 }
+
+#[test]
+fn absolute_xdg_config_home_replaces_home_config_root() -> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let xdg = tempfile::tempdir()?;
+    std::fs::create_dir_all(home.path().join(".config/git"))?;
+    std::fs::create_dir_all(xdg.path().join("git"))?;
+    std::fs::write(home.path().join(".config/git/config"), "")?;
+    std::fs::write(xdg.path().join("git/config"), "")?;
+    std::fs::write(home.path().join(".config/git/ignore"), "")?;
+    std::fs::write(xdg.path().join("git/ignore"), "")?;
+    let protected = tinybox_bus::ProtectedPaths::default();
+    let mut builder = Builder::new(Some(home.path()), &protected);
+    builder.add_gitconfig_at(home.path(), Some(xdg.path().as_os_str()))?;
+    assert!(
+        builder
+            .fixed_read_only
+            .contains(&xdg.path().join("git/config"))
+    );
+    assert!(
+        !builder
+            .fixed_read_only
+            .contains(&home.path().join(".config/git/config"))
+    );
+    assert!(
+        builder
+            .grants
+            .read_only
+            .contains(&xdg.path().join("git/ignore"))
+    );
+    assert!(
+        !builder
+            .grants
+            .read_only
+            .contains(&home.path().join(".config/git/ignore"))
+    );
+    Ok(())
+}
