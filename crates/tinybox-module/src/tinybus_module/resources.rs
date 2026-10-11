@@ -734,9 +734,11 @@ fn validate_platform_backend(platform: super::Platform, backend: &str) -> Result
     }
 }
 
-fn supports_execution(platform: super::Platform, backend: &str) -> bool {
-    matches!(platform, super::Platform::Linux | super::Platform::Unix)
-        && matches!(backend, "passthrough" | "docker")
+pub(super) fn supports_execution(platform: super::Platform, backend: &str) -> bool {
+    matches!(
+        platform,
+        super::Platform::Linux | super::Platform::Unix | super::Platform::Windows
+    ) && matches!(backend, "passthrough" | "docker")
 }
 
 async fn stop_process(

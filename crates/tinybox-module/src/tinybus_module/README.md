@@ -34,7 +34,7 @@ independent of package/artifact releases. Describe remains unchanged.
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on
 platforms where TinyBox cannot supervise native children; Docker is available
-on Unix, and the Linux namespace backend is available only on Linux. An
+on Unix and Windows, and the Linux namespace backend is available only on Linux. An
 unsupported backend, including microvm without its required image
 configuration, fails; there is no passthrough fallback. Describe remains the
 existing summary of compiled providers, rather than claiming every provider is
@@ -74,10 +74,10 @@ the ABI/module runtime. The SDK shutdown timeout alone is not this barrier. Outp
 transfer, forwarding, SSH and microVM configuration remain subsequent slices.
 
 Operations serialize within each resource; unrelated resources have independent
-locks. Spawn uses an owned local process group, never legacy pid-file detach helpers.
-Capabilities distinguishes Create backends from supervised execution backends.
-Exec/Spawn currently support Unix passthrough and Docker; namespace execution
-and Windows job-object supervision require subsequent owning-provider slices.
+locks. Spawn uses an owned local process group on Unix and a Job Object on
+Windows, never legacy pid-file detach helpers. Capabilities distinguishes Create
+backends from supervised execution backends. Exec/Spawn support passthrough and
+Docker on Unix and Windows; namespace execution remains Linux-only.
 Unsupported operations fail explicitly without fallback. Legacy library APIs
 remain available. A detached process can be cancelled after Spawn returns. Close fences new
 execution, aborts its resource's collected Exec, waits for its output supervisor
