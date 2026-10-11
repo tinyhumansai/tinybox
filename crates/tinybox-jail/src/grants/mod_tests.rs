@@ -1121,3 +1121,32 @@ fn resolve_fixture_grants(
 ) -> tinybox_core::Result<JailGrants> {
     super::resolve_local_jail_grants_at(home, cfg, protected, None)
 }
+
+#[test]
+fn rejected_toolchain_root_still_blocks_writable_executable_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = fake_home()?;
+    fs::create_dir_all(home.path().join(".nvm/bin"))?;
+    fs::write(home.path().join(".nvm/.npmrc"), "credential")?;
+    fs::write(home.path().join(".nvm/bin/node"), "executable")?;
+    let cfg = LocalGrantConfig {
+        extra_read_write: vec!["~/.nvm/bin/node".into()],
+        ..Default::default()
+    };
+    let grants = resolve(Some(home.path()), &cfg)?;
+    assert!(grants.read_write.is_empty(), "{grants:?}");
+    Ok(())
+}
+
+#[test]
+fn non_utf8_git_config_rejects_discovery_instead_of_missing_includes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    fs::write(home.path().join("shared.conf"), "[core]\n")?;
+    fs::write(
+        home.path().join(".gitconfig"),
+        b"[include]\npath = shared.conf\n[core]\nvalue = \xff\n",
+    )?;
+    assert!(resolve(Some(home.path()), &LocalGrantConfig::default()).is_err());
+    Ok(())
+}
