@@ -31,6 +31,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    let interface = info
+        .manifest
+        .provided(&INTERFACE.try_into()?)
+        .ok_or_else(|| io::Error::other("artifact omits its contract interface"))?;
+    let mut actual: Vec<_> = interface
+        .methods
+        .iter()
+        .map(tinybus::MemberName::as_str)
+        .collect();
+    let mut expected = tinybox_bus::METHODS.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    if actual != expected {
+        return Err(
+            io::Error::other("artifact method manifest differs from its bus contract").into(),
+        );
+    }
+
     let client = Connection::connect(bus.connect().await?).await?;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
