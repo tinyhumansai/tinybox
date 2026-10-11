@@ -838,6 +838,10 @@ async fn queued_spawn_stays_fenced_after_close_cleanup_fails() -> Result<()> {
                 backend: "docker".into(),
                 workspace: Workspace::Image("mock".into()),
                 env: BTreeMap::new(),
+                host: HostConfig::default(),
+                network: tinybox_bus::NetworkPolicy::default(),
+                resources: tinybox_bus::ResourceLimits::default(),
+                ports: Vec::new(),
             },
             host.clone(),
         )
