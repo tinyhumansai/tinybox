@@ -137,8 +137,9 @@ impl LimitedLocalHost {
                         Ok(())
                     },
                     async {
-                        child
-                            .wait()
+                        // Completion observes the command itself. Descendant
+                        // termination and job draining belong to cleanup below.
+                        wait_native(&mut child)
                             .await
                             .map_err(|error| Error::io("wait", &error))
                     }
