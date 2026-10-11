@@ -31,6 +31,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    let interface = info
+        .manifest
+        .provided(&INTERFACE.try_into()?)
+        .ok_or_else(|| io::Error::other("artifact omits its contract interface"))?;
+    let mut actual: Vec<_> = interface
+        .methods
+        .iter()
+        .map(tinybus::MemberName::as_str)
+        .collect();
+    let mut expected = tinybox_bus::METHODS.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    if actual != expected {
+        return Err(
+            io::Error::other("artifact method manifest differs from its bus contract").into(),
+        );
+    }
+
     let client = Connection::connect(bus.connect().await?).await?;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -71,6 +89,25 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
     let capabilities: tinybox_bus::ModuleCapabilities = proxy.call("Capabilities", ()).await?;
     if !tinybox_bus::is_compatible(capabilities.contract_version) {
         return Err(io::Error::other("artifact contract version mismatch").into());
+    }
+    let jail: tinybox_bus::JailStatus = proxy.call("JailStatus", ()).await?;
+    if jail.backend.is_empty()
+        || ((!jail.available || jail.isolation == "none") && jail.suitable_for_untrusted_code)
+    {
+        return Err(io::Error::other("invalid native jail enforcement facts").into());
+    }
+    let facts: tinybox_bus::CommandAnalysis = proxy
+        .call("AnalyzeCommand", ("echo hello".to_owned(),))
+        .await?;
+    if facts.segments.len() != 1
+        || facts.segments[0].class != tinybox_bus::CommandClass::Read
+        || facts.literal_words != ["echo", "hello"]
+        || facts.hidden_execution
+        || facts.redirection
+        || facts.expansion
+        || facts.background
+    {
+        return Err(io::Error::other("unexpected command classification facts").into());
     }
     // Exercise real resource ownership through the loaded native artifact.
     let analysis: ShellAnalysis = proxy

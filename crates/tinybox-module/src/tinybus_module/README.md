@@ -16,6 +16,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | Describe | none | Original version/backend summary |
 | Shutdown | none | unit |
 | Capabilities | none | ModuleCapabilities |
+| JailStatus | none | JailStatus |
 | Reserve | ReserveRequest | ResourceId |
 | Create | CreateRequest | ResourceInfo |
 | Forward | ForwardRequest | ForwardInfo |
@@ -27,14 +28,43 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | IsRunning | ProcessRef | bool |
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
+| AnalyzeCommand | String | CommandAnalysis |
+| BeginFileRead | BeginFileReadRequest | FileReadInfo |
+| ReadFileChunk | ReadFileChunkRequest | FileChunk |
+| FinishFileRead | FinishFileReadRequest | unit |
+| BeginFileWrite | BeginFileWriteRequest | FileWriteInfo |
+| WriteFileChunk | WriteFileChunkRequest | FileWriteProgress |
+| FinishFileWrite | FinishFileWriteRequest | FileWriteProgress |
+| AbortFileWrite | AbortFileWriteRequest | unit |
 
-Capabilities advertises contract version 1.2; 1.0 denotes the original
+Capabilities advertises contract version 1.5; 1.0 denotes the original
 discovery-only surface. Hosts require equal majors and a module minor at least
 as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
 added reserved resource/process ownership and terminal shutdown; 1.2 adds host
 selection, sandbox networking/resource/port inputs, effective published-port
-facts, and module-owned forwarding. This version is independent of
-package/artifact releases. Describe remains unchanged.
+facts, and module-owned forwarding. Version 1.3 adds `JailStatus`, which reports
+the detected native directory-jail backend's availability, process isolation,
+and filesystem, network, and subprocess enforcement. The module probes the
+backend; the host applies its own policy to the returned facts. This version is independent of
+package/artifact releases. Version 1.4 adds `AnalyzeCommand`, returning generic
+classification, executor/environment signals, expansion, background execution,
+and literal tokens. Hosts continue to own path resolution, allowlists, approval
+gates, and policy-disabled behavior. `AnalyzeShell` retains its arity and result.
+Describe remains unchanged.
+
+Version 1.5 adds bounded file transfer for mounted directory workspaces.
+Reserve `FileRead(resource)` or `FileWrite(resource)` before opening a transfer.
+Paths are relative to the workspace and reject traversal; each resource holds
+at most eight active handles, each chunk is at most 64 KiB, and writes are
+limited to 256 MiB. Writes remain in a sibling staging file until Finish
+atomically publishes them; Abort and resource Close discard unfinished writes.
+Exact retries of the most recently acknowledged write chunk and completed
+Finish calls replay their acknowledgement. The module implements path
+confinement with capability-based local directory handles. Docker workspaces
+use their caller-mounted local directory. Image-backed workspaces and SSH
+hosts return a stable unsupported error; file transfer does not shell out or
+copy data through an execution command. The caller remains responsible for
+approving the workspace and requested relative path.
 
 Create requires an explicit backend and rejects one unavailable on the current
 platform before it creates a resource slot. `passthrough` is record-only on
@@ -97,8 +127,21 @@ and returns an error; retry Shutdown before unloading. Command errors can be
 returned after complete resource release; repeating Shutdown then succeeds. The terminal instance
 never restarts. Host ordering is stop submissions, await Shutdown, then unload
 the ABI/module runtime. The SDK shutdown timeout alone is not this barrier.
-Output streaming, workspace transfer, and microVM configuration remain
-subsequent slices.
+Live local execution uses `StartExec(SpawnRequest)` with a Process reservation,
+`ReadOutput(ProcessRef, sequence)` for replayable binary stdout/stderr batches,
+and `ReleaseOutput(ProcessRef)` after completion. Each execution owns its native
+collector, so cancellation joins its own cleanup without waiting for another
+running command. Combined output is capped at 1 MiB per execution, chunks at
+8 KiB, batches at 64 KiB, and retained live/output handles at 32 per module.
+Nonzero exits remain results. Cancellation is acknowledged only after kill/reap;
+failed cleanup retains native ownership for Cancel, Close or Shutdown retry.
+Release refuses running or unacknowledged cleanup. Resource Close retires its
+journals after stream cleanup is acknowledged. Streaming is currently available
+for local passthrough resources; other providers explicitly refuse it.
+
+Workspace file transfer uses the bounded Begin/Read/Write/Finish/Abort operations
+above. MicroVM configuration and streaming for other providers remain subsequent
+slices.
 
 Operations serialize within each resource; unrelated resources have independent
 locks. Spawn uses an owned local process group on Unix and a Job Object on
