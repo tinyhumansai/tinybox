@@ -425,6 +425,7 @@ pub fn strip_heredoc_bodies(command: &str) -> Cow<'_, str> {
     let mut output = String::with_capacity(command.len());
     let mut pending = std::collections::VecDeque::<(String, bool)>::new();
     let mut changed = false;
+    let mut arithmetic = Vec::new();
     for line in command.split_inclusive('\n') {
         if let Some((delimiter, strip_tabs)) = pending.front() {
             let body = line.trim_end_matches(['\n', '\r']);
@@ -446,7 +447,7 @@ pub fn strip_heredoc_bodies(command: &str) -> Cow<'_, str> {
         }
 
         output.push_str(line);
-        pending.extend(heredoc_delimiters(line));
+        pending.extend(heredoc_delimiters(line, &mut arithmetic));
     }
     if changed {
         Cow::Owned(output)
@@ -455,7 +456,7 @@ pub fn strip_heredoc_bodies(command: &str) -> Cow<'_, str> {
     }
 }
 
-fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
+fn heredoc_delimiters(line: &str, arithmetic: &mut Vec<bool>) -> Vec<(String, bool)> {
     let mut delimiters = Vec::new();
     let mut chars = line.char_indices().peekable();
     let mut quote = QuoteState::None;
@@ -494,6 +495,24 @@ fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
                         at_word_start = false;
                     }
                     '#' if at_word_start => break,
+                    '(' => {
+                        // A command substitution inside arithmetic resumes shell syntax.
+                        if chars.next_if(|(_, value)| *value == '(').is_some() {
+                            arithmetic.extend([true, true]);
+                        } else if line[..index].ends_with('$') {
+                            arithmetic.push(false);
+                        } else {
+                            arithmetic.push(arithmetic.last().copied().unwrap_or(false));
+                        }
+                        at_word_start = true;
+                    }
+                    ')' => {
+                        arithmetic.pop();
+                        at_word_start = true;
+                    }
+                    '<' if arithmetic.last().copied().unwrap_or(false) => {
+                        at_word_start = true;
+                    }
                     '<' if chars.next_if(|(_, value)| *value == '<').is_some() => {
                         if chars.next_if(|(_, value)| *value == '<').is_some() {
                             at_word_start = true;
