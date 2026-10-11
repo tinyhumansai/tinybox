@@ -37,6 +37,21 @@ pub fn resolve_local_jail_grants(
     cfg: &LocalGrantConfig,
     protected: &ProtectedPaths,
 ) -> tinybox_core::Result<JailGrants> {
+    resolve_local_jail_grants_at(
+        home,
+        cfg,
+        protected,
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+    )
+}
+
+/// Discover grants with an explicit XDG root so fixtures do not inherit host state.
+fn resolve_local_jail_grants_at(
+    home: Option<&Path>,
+    cfg: &LocalGrantConfig,
+    protected: &ProtectedPaths,
+    xdg: Option<&std::ffi::OsStr>,
+) -> tinybox_core::Result<JailGrants> {
     let home = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
     let mut b = Builder::new(home.as_deref(), protected);
 
@@ -51,7 +66,7 @@ pub fn resolve_local_jail_grants(
             b.fixed_read_only(Path::new(dir), "toolchain");
         }
         if let Some(h) = home.as_deref() {
-            b.add_gitconfig(h)?;
+            b.add_gitconfig_at(h, xdg)?;
         }
     }
     for raw in &cfg.extra_read_only {

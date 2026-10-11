@@ -124,6 +124,14 @@ fn include_assignment_after_section_header_is_parsed() {
         include_paths("[includeIf \"gitdir:~/work/]repo/\"] path = ~/conditional.conf\n"),
         ["~/conditional.conf"]
     );
+    assert_eq!(
+        include_paths(r#"[includeIf "gitdir:~/quo\"te/"] path = ~/quoted.conf"#),
+        ["~/quoted.conf"]
+    );
+    assert_eq!(
+        include_paths("[include]\npath = before\n[include\npath = ignored\n"),
+        ["before"]
+    );
     assert!(include_paths("[core] path = ~/ignored.conf\n").is_empty());
 }
 
@@ -188,13 +196,13 @@ fn absolute_xdg_config_home_replaces_home_config_root() -> Result<(), Box<dyn st
         builder
             .grants
             .read_only
-            .contains(&xdg.path().join("git/ignore"))
+            .contains(&xdg.path().join("git/ignore").canonicalize()?)
     );
     assert!(
         !builder
             .grants
             .read_only
-            .contains(&home.path().join(".config/git/ignore"))
+            .contains(&home.path().join(".config/git/ignore").canonicalize()?)
     );
     Ok(())
 }

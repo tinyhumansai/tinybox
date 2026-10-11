@@ -325,7 +325,7 @@ fn floor(home: Option<&Path>) -> ProtectedPaths {
     }
 }
 fn resolve(home: Option<&Path>, config: &LocalGrantConfig) -> tinybox_core::Result<JailGrants> {
-    resolve_local_jail_grants(home, config, &floor(home))
+    resolve_fixture_grants(home, config, &floor(home))
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn custom_host_floor_excludes_direct_and_ancestor_grants() -> Result<(), Box<dyn
         credential_roots: vec![private.to_string_lossy().into_owned()],
         ..ProtectedPaths::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &protected)?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &protected)?;
     assert_eq!(grants.read_only, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -497,7 +497,7 @@ fn protected_credential_alias_does_not_grant_its_neutral_target()
         components: vec![".npmrc".into()],
         ..ProtectedPaths::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &protected)?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &protected)?;
     assert_eq!(grants.read_only, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -512,7 +512,7 @@ fn procfs_extras_cannot_bypass_the_dedicated_toggle_with_an_empty_floor()
         extra_read_write: vec!["/proc".into(), "/proc/self".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(None, &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(None, &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_only, Vec::<PathBuf>::new());
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
@@ -528,7 +528,7 @@ fn procfs_toggle_grants_read_only_access_even_when_extras_ask_for_writes()
         extra_read_write: vec!["/proc".into(), "/proc/self".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(None, &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(None, &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_only, vec![PathBuf::from("/proc")]);
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
@@ -543,7 +543,7 @@ fn discovered_cargo_dependency_sources_cannot_be_poisoned_for_later_host_builds(
         fs::create_dir_all(&source)?;
         fs::write(source.join("build.rs"), "fn main() {}")?;
     }
-    let grants = resolve_local_jail_grants(
+    let grants = resolve_fixture_grants(
         Some(home.path()),
         &LocalGrantConfig::default(),
         &ProtectedPaths::default(),
@@ -575,7 +575,7 @@ fn rejected_git_config_cannot_grant_its_nested_includes() -> Result<(), Box<dyn 
         ..ProtectedPaths::default()
     };
     let grants =
-        resolve_local_jail_grants(Some(home.path()), &LocalGrantConfig::default(), &protected)?;
+        resolve_fixture_grants(Some(home.path()), &LocalGrantConfig::default(), &protected)?;
     assert!(
         !has(
             &grants.read_only,
@@ -606,7 +606,7 @@ fn protected_prefixes_also_reject_recursive_ancestor_grants()
         extra_read_write: vec![home.path().to_str().ok_or("non-UTF8 fixture")?.into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(None, &config, &protected)?;
+    let grants = resolve_fixture_grants(None, &config, &protected)?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -634,7 +634,7 @@ fn protected_prefix_alias_also_blocks_its_canonical_spelling()
         extra_read_only: vec![target.to_str().ok_or("non-UTF8 fixture")?.into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(None, &config, &protected)?;
+    let grants = resolve_fixture_grants(None, &config, &protected)?;
     assert_eq!(grants.read_only, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -651,7 +651,7 @@ fn explicit_writable_grants_cannot_promote_shared_cargo_sources()
         extra_read_write: vec!["~/.cargo/git".into(), "~/.cargo/registry".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     for cache in ["git", "registry"] {
         assert!(
@@ -675,7 +675,7 @@ fn git_ignore_patterns_cannot_add_config_include_grants() -> Result<(), Box<dyn 
         "[include]\npath = ~/neutral-secret\n",
     )?;
     fs::write(home.path().join("neutral-secret"), "fixture")?;
-    let grants = resolve_local_jail_grants(
+    let grants = resolve_fixture_grants(
         Some(home.path()),
         &LocalGrantConfig::default(),
         &ProtectedPaths::default(),
@@ -719,7 +719,7 @@ fn credential_root_alias_keeps_its_requested_ancestor_protected()
         extra_read_only: vec!["~".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &protected)?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &protected)?;
     assert_eq!(grants.read_only, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -753,7 +753,7 @@ fn credential_floor_preserves_alias_locations_under_aliased_parent_directories()
             extra_read_only: vec!["~".into()],
             ..LocalGrantConfig::default()
         };
-        let grants = resolve_local_jail_grants(Some(&home), &config, &protected)?;
+        let grants = resolve_fixture_grants(Some(&home), &config, &protected)?;
         assert_eq!(grants.read_only, Vec::<PathBuf>::new(), "{credential}");
     }
     Ok(())
@@ -774,7 +774,7 @@ fn writable_extras_cannot_replace_cargo_executables_or_launch_configuration()
             .collect(),
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -793,7 +793,7 @@ fn automatic_toolchain_roots_cannot_be_promoted_through_writable_descendants()
             .collect(),
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -811,7 +811,7 @@ fn discovered_git_configuration_cannot_be_poisoned_via_its_target_ancestor()
         extra_read_write: vec!["~/dotfiles".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -832,7 +832,7 @@ fn directory_extras_cannot_expose_nested_protected_components()
         extra_read_write: vec!["~/project".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &protected)?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &protected)?;
     assert_eq!(grants, JailGrants::default());
     Ok(())
 }
@@ -856,7 +856,7 @@ fn directory_extras_cannot_expose_nested_protected_component_pairs()
         ..LocalGrantConfig::default()
     };
     assert_eq!(
-        resolve_local_jail_grants(Some(home.path()), &config, &protected)?,
+        resolve_fixture_grants(Some(home.path()), &config, &protected)?,
         JailGrants::default()
     );
     Ok(())
@@ -880,7 +880,7 @@ fn aliased_directory_extras_preserve_logical_parent_component_pairs()
         ..LocalGrantConfig::default()
     };
     assert_eq!(
-        resolve_local_jail_grants(Some(home.path()), &config, &protected)?,
+        resolve_fixture_grants(Some(home.path()), &config, &protected)?,
         JailGrants::default()
     );
     Ok(())
@@ -953,7 +953,7 @@ fn subtree_pair_protection_cannot_be_bypassed_by_a_directory_symlink()
         ..LocalGrantConfig::default()
     };
     assert_eq!(
-        resolve_local_jail_grants(None, &config, &protected)?,
+        resolve_fixture_grants(None, &config, &protected)?,
         JailGrants::default()
     );
     Ok(())
@@ -988,7 +988,7 @@ fn git_include_with_a_trailing_comment_grants_the_actual_file()
         "[include]\npath = ~/work.conf # local\n",
     )?;
     fs::write(home.path().join("work.conf"), "[core]\n")?;
-    let grants = resolve_local_jail_grants(
+    let grants = resolve_fixture_grants(
         Some(home.path()),
         &LocalGrantConfig::default(),
         &ProtectedPaths::default(),
@@ -1014,7 +1014,7 @@ fn discovered_git_config_links_cannot_be_replaced_through_writable_parents()
         extra_read_write: vec!["~/.config".into(), "~/.config/git".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -1034,7 +1034,7 @@ fn duplicate_git_config_targets_keep_each_discovered_alias_read_only()
         extra_read_write: vec!["~/.config/git".into()],
         ..LocalGrantConfig::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     Ok(())
 }
@@ -1057,7 +1057,7 @@ fn git_include_aliases_preserve_each_logical_sibling_location()
         )?;
         fs::write(home.path().join(directory).join("sibling"), "[core]\n")?;
     }
-    let grants = resolve_local_jail_grants(
+    let grants = resolve_fixture_grants(
         Some(home.path()),
         &LocalGrantConfig::default(),
         &ProtectedPaths::default(),
@@ -1107,8 +1107,17 @@ fn missing_git_include_locations_cannot_be_created_from_writable_grants()
         extra_read_write: vec!["~/future".into()],
         ..Default::default()
     };
-    let grants = resolve_local_jail_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
+    let grants = resolve_fixture_grants(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     assert!(!has(&grants.read_only, &home.path().join("future/config")));
     Ok(())
+}
+
+/// Use fixture-local Git configuration regardless of the runner environment.
+fn resolve_fixture_grants(
+    home: Option<&Path>,
+    cfg: &LocalGrantConfig,
+    protected: &ProtectedPaths,
+) -> tinybox_core::Result<JailGrants> {
+    super::resolve_local_jail_grants_at(home, cfg, protected, None)
 }
