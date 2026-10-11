@@ -20,6 +20,8 @@
 //! callers are in different crates. Every function here is pure, so every case
 //! can be pinned in a test.
 
+pub mod analysis;
+
 /// Wrap one argument so a POSIX shell reproduces it exactly.
 ///
 /// Single quotes suppress every form of expansion a shell performs — variables,

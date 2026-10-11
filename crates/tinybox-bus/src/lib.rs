@@ -15,12 +15,24 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod shell;
+pub use shell::{CommandAnalysis, CommandClass, CommandSegment};
+mod files;
+pub use files::{
+    AbortFileWriteRequest, BeginFileReadRequest, BeginFileWriteRequest, FileChunk, FileReadInfo,
+    FileWriteInfo, FileWriteProgress, FinishFileReadRequest, FinishFileWriteRequest,
+    ReadFileChunkRequest, WriteFileChunkRequest,
+};
+
 /// Wire vocabulary version, independent of the release workflow's package version.
 ///
 /// 1.0 denotes the original discovery-only surface. 1.1 adds resource
 /// reservations, owned lifecycle/operations, capabilities and terminal shutdown.
 /// 1.2 adds host selection, container networking/ports, and owned forwards.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 2);
+/// 1.3 adds native jail discovery.
+/// 1.4 adds detailed shell facts for host execution policy. 1.5 adds bounded
+/// file transfer for mounted workspaces. 1.6 adds bounded live native output.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 6);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -43,6 +55,14 @@ pub const MAX_RESERVATIONS: usize = 4096;
 pub const RESERVATION_TTL_SECS: u64 = 60;
 /// Maximum combined stdout and stderr bytes collected by the module host.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Maximum bytes returned or accepted by one file-transfer chunk.
+pub const MAX_FILE_CHUNK_BYTES: usize = 64 * 1024;
+/// Maximum total bytes accepted by one file write.
+pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum read and write handles held by one resource.
+pub const MAX_FILE_TRANSFERS_PER_RESOURCE: usize = 8;
+/// Maximum UTF-8 path length accepted for a workspace file.
+pub const MAX_FILE_PATH_BYTES: usize = 4096;
 /// Stable error name for module admission capacity exhaustion.
 pub const RESOURCE_LIMIT: &str = "ai.tinyhumans.tinybox.Error.ResourceLimit";
 
@@ -66,7 +86,39 @@ pub const METHODS: &[&str] = &[
     "Shutdown",
     "Forward",
     "CloseForward",
+    "JailStatus",
+    "AnalyzeCommand",
+    "BeginFileRead",
+    "ReadFileChunk",
+    "FinishFileRead",
+    "BeginFileWrite",
+    "WriteFileChunk",
+    "FinishFileWrite",
+    "AbortFileWrite",
+    "StartExec",
+    "ReadOutput",
+    "ReleaseOutput",
 ];
+
+/// Facts about the detected native directory-jail backend.
+/// Hosts apply their own execution policy to these facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JailStatus {
+    /// Stable backend identifier.
+    pub backend: String,
+    /// Whether this build can apply the detected backend.
+    pub available: bool,
+    /// Declared process isolation: none, process, kernel, or hardware.
+    pub isolation: String,
+    /// Whether process isolation and filesystem enforcement meet the security floor.
+    pub suitable_for_untrusted_code: bool,
+    /// Filesystem constraint: unsupported, best effort, or enforced.
+    pub filesystem: String,
+    /// Network constraint: unsupported, best effort, or enforced.
+    pub network: String,
+    /// Subprocess constraint: unsupported, best effort, or enforced.
+    pub subprocess: String,
+}
 
 /// Stable error name for an unknown or closed module resource.
 pub const UNKNOWN_RESOURCE: &str = "ai.tinyhumans.tinybox.Error.UnknownResource";
@@ -86,6 +138,18 @@ pub const OUTPUT_LIMIT: &str = "ai.tinyhumans.tinybox.Error.OutputLimit";
 pub const EXEC_CANCELLED: &str = "ai.tinyhumans.tinybox.Error.ExecCancelled";
 /// Stable error name for a native backend operation failure.
 pub const BACKEND_ERROR: &str = "ai.tinyhumans.tinybox.Error.Backend";
+/// Stable error name for an invalid workspace-relative file path.
+pub const INVALID_FILE_PATH: &str = "ai.tinyhumans.tinybox.Error.InvalidFilePath";
+/// Stable error name for a missing or mismatched file-transfer handle.
+pub const UNKNOWN_FILE_TRANSFER: &str = "ai.tinyhumans.tinybox.Error.UnknownFileTransfer";
+/// Stable error name for a file-transfer size or handle limit.
+pub const FILE_LIMIT: &str = "ai.tinyhumans.tinybox.Error.FileLimit";
+/// Stable error name for an invalid file-transfer offset or chunk.
+pub const INVALID_FILE_CHUNK: &str = "ai.tinyhumans.tinybox.Error.InvalidFileChunk";
+/// Stable error name when safe workspace file access is unavailable.
+pub const FILE_UNSUPPORTED: &str = "ai.tinyhumans.tinybox.Error.FileUnsupported";
+/// Stable error name for a workspace file operation failure.
+pub const FILE_ERROR: &str = "ai.tinyhumans.tinybox.Error.FileOperation";
 
 /// Opaque module-minted reservation identifier bound by one module instance.
 /// IDs use ASCII letters, digits, hyphens, or underscores, up to [`MAX_ID_BYTES`].
@@ -101,6 +165,10 @@ pub enum ReserveRequest {
     Process(ResourceId),
     /// Reserve a forward associated with a resource.
     Forward(ResourceId),
+    /// Reserve a workspace file reader associated with a resource.
+    FileRead(ResourceId),
+    /// Reserve a staged workspace file writer associated with a resource.
+    FileWrite(ResourceId),
 }
 
 /// Backend operations with acknowledged native ownership in this module build.
@@ -357,3 +425,6 @@ pub struct ShellAnalysis {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+mod output;
+pub use output::{ExecutionFailure, ExecutionState, OutputBatch, OutputChunk, OutputStream};

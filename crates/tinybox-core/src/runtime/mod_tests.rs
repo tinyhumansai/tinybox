@@ -553,3 +553,27 @@ fn unknown_sandbox_constraints_are_conservative_through_a_trait_object() {
         ));
     }
 }
+
+#[derive(Debug)]
+struct EmptyObserver;
+#[async_trait]
+impl super::ExecutionObserver for EmptyObserver {
+    fn output(&self, _: super::OutputStream, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn a_sandbox_without_live_output_refuses_without_executing_its_collected_path() -> Result<()>
+{
+    let sandbox = FakeSandbox::new(SandboxCapabilities::PASSTHROUGH);
+    let result = sandbox
+        .exec_observed(
+            &BoxId::new("unknown-box")?,
+            &ExecRequest::new(["echo", "fixture"]),
+            std::sync::Arc::new(EmptyObserver),
+        )
+        .await;
+    assert!(matches!(result, Err(Error::UnsupportedStreaming { .. })));
+    assert_eq!(sandbox.boxes().len(), 0);
+    Ok(())
+}

@@ -71,6 +71,10 @@ impl JailBackend for SeatbeltBackend {
         }
         wrapper.spawn()
     }
+
+    fn spawn_captured(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
+        prepare_captured_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec")).spawn()
+    }
 }
 
 /// Executable presence does not prove the host enforces Seatbelt profiles.
@@ -123,6 +127,21 @@ fn prepare_command(jail: &Jail, cmd: &Command, launcher: &std::ffi::OsStr) -> Co
     // defaults — callers can re-wire by spawning into a pre-set stdio
     // via the returned `Child` is not possible; for now we match the
     // sandbox-exec defaults (inherit). Document this in mod.rs.
+    wrapper
+}
+
+/// Reconstruct the launcher with explicit owned-pipe semantics.
+fn prepare_captured_command(jail: &Jail, cmd: &Command, launcher: &std::ffi::OsStr) -> Command {
+    let mut wrapper = prepare_command(jail, cmd, launcher);
+    wrapper
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        wrapper.process_group(0);
+    }
     wrapper
 }
 

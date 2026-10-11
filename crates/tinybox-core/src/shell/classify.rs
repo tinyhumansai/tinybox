@@ -5,30 +5,8 @@
 use super::executor::is_command_executor;
 use super::scan::{contains_unquoted_background_ampersand, strip_quoted_heredoc_bodies};
 
-/// How risky a shell command is, in increasing order of severity.
-///
-/// Classification is **fail-closed**: a command that is not provably read-only
-/// (and not a recognized network/destructive command) is treated as at least
-/// [`CommandClass::Write`]. Across multiple shell segments the **highest** class
-/// wins (so `ls | curl ...` is `Network`). Variants are ordered low to high so
-/// [`Ord`] / [`Iterator::max`] compose them directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CommandClass {
-    /// Provably read-only / observational (curated safe-read allowlist).
-    Read,
-    /// State-changing but not inherently catastrophic: the fail-closed default
-    /// for anything not recognized as read/network/destructive.
-    Write,
-    /// Reaches the network (curl/wget/ssh/scp/...). Always prompts, every tier.
-    Network,
-    /// Installs an OS / language package (system package manager, or a *global*
-    /// npm/pnpm/yarn/cargo/pip install). Always-ask in every acting tier,
-    /// including Full. Project-local installs are ordinary `Write`.
-    Install,
-    /// Catastrophic / irreversible / privilege-escalating / system-control.
-    /// Always prompts, even in Full.
-    Destructive,
-}
+/// Serialized command vocabulary shared with hosts; classification remains here.
+pub use tinybox_bus::CommandClass;
 
 /// Provably read-only command bases (cross-platform union). A base **not** in
 /// this set — and not a recognized network/destructive/executor command, nor a
