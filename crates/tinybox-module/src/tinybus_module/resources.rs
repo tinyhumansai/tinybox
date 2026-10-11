@@ -1,11 +1,15 @@
 //! Module-owned sandbox and detached-process lifetimes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tinybox_bus::{
-    CloseForwardRequest, CreateRequest, ExecOutput, ExecRequest, ForwardInfo, ForwardRequest,
-    HostConfig, ProcessRef, ReserveRequest, ResourceId, ResourceInfo, SpawnRequest, Workspace,
+    AbortFileWriteRequest, BeginFileReadRequest, BeginFileWriteRequest, CloseForwardRequest,
+    CreateRequest, ExecOutput, ExecRequest, FileChunk, FileReadInfo, FileWriteInfo,
+    FileWriteProgress, FinishFileReadRequest, FinishFileWriteRequest, ForwardInfo, ForwardRequest,
+    HostConfig, ProcessRef, ReadFileChunkRequest, ReserveRequest, ResourceId, ResourceInfo,
+    SpawnRequest, Workspace, WriteFileChunkRequest,
 };
 use tinybox_core::clock::{Clock, SystemClock};
 use tinybox_core::{
@@ -26,6 +30,29 @@ struct Resource {
     local_sandbox: Option<Arc<tinybox_core::PassthroughSandbox>>,
     collector: Option<Arc<tinybox_host::LimitedLocalHost>>,
     forwards: BTreeMap<ResourceId, OwnedForward>,
+    workspace_root: Option<PathBuf>,
+    readers: BTreeMap<ResourceId, OwnedReader>,
+    writers: BTreeMap<ResourceId, OwnedWriter>,
+    completed_writes: BTreeMap<ResourceId, CompletedWrite>,
+    completed_write_order: VecDeque<ResourceId>,
+}
+
+struct OwnedReader {
+    path: String,
+    size: u64,
+    reader: Box<dyn tinybox_core::WorkspaceFileReader>,
+}
+
+struct OwnedWriter {
+    path: String,
+    writer: Box<dyn tinybox_core::WorkspaceFileWriter>,
+    next_offset: u64,
+    last_chunk: Option<(u64, Vec<u8>, u64)>,
+}
+
+struct CompletedWrite {
+    path: String,
+    next_offset: u64,
 }
 
 struct OwnedForward {
@@ -107,12 +134,18 @@ impl Resources {
                 "idle reservation limit reached",
             ));
         }
-        if let ReserveRequest::Process(resource) | ReserveRequest::Forward(resource) = &request
+        if let ReserveRequest::Process(resource)
+        | ReserveRequest::Forward(resource)
+        | ReserveRequest::FileRead(resource)
+        | ReserveRequest::FileWrite(resource) = &request
             && !state.entries.contains_key(resource)
         {
             return Err(failure(tinybox_bus::UNKNOWN_RESOURCE, "unknown resource"));
         }
-        if let ReserveRequest::Process(resource) | ReserveRequest::Forward(resource) = &request
+        if let ReserveRequest::Process(resource)
+        | ReserveRequest::Forward(resource)
+        | ReserveRequest::FileRead(resource)
+        | ReserveRequest::FileWrite(resource) = &request
             && self
                 .executions
                 .lock()
@@ -268,6 +301,11 @@ impl Resources {
                             collector,
                             local_sandbox,
                             forwards: BTreeMap::new(),
+                            workspace_root: directory_workspace(&request.workspace),
+                            readers: BTreeMap::new(),
+                            writers: BTreeMap::new(),
+                            completed_writes: BTreeMap::new(),
+                            completed_write_order: VecDeque::new(),
                         });
                     }
                     return Err(backend_error(&error));
@@ -284,6 +322,11 @@ impl Resources {
                 collector,
                 local_sandbox,
                 forwards: BTreeMap::new(),
+                workspace_root: directory_workspace(&request.workspace),
+                readers: BTreeMap::new(),
+                writers: BTreeMap::new(),
+                completed_writes: BTreeMap::new(),
+                completed_write_order: VecDeque::new(),
             });
             let published_ports = published_port_facts(sandbox.as_ref(), &info.id, &info).await?;
             let result = ResourceInfo {
@@ -334,6 +377,355 @@ impl Resources {
             state: info.state.to_string(),
             published_ports: published_port_facts(entry.sandbox.as_ref(), &entry.id, &info).await?,
         })
+    }
+
+    pub(super) async fn begin_file_read(
+        &self,
+        request: BeginFileReadRequest,
+    ) -> Result<FileReadInfo> {
+        validate_id(&request.resource)?;
+        validate_file_path(&request.path)?;
+        validate_id(&request.transfer)?;
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        if let Some(existing) = entry.readers.get(&request.transfer) {
+            return if existing.path == request.path {
+                Ok(FileReadInfo {
+                    resource: request.resource,
+                    transfer: request.transfer,
+                    size: existing.size,
+                })
+            } else {
+                Err(failure(
+                    tinybox_bus::INVALID_ID,
+                    "file transfer belongs to another path",
+                ))
+            };
+        }
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            self.check_reservation(
+                &mut state,
+                &request.transfer,
+                &ReserveRequest::FileRead(request.resource.clone()),
+            )?;
+        }
+        ensure_transfer_capacity(entry)?;
+        let root = workspace_root(entry)?;
+        let reader = entry
+            .host
+            .open_workspace_file(root, Path::new(&request.path))
+            .await
+            .map_err(file_error)?;
+        let size = reader.size();
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(error) = check_resource_open(&state, &executions, &request.resource) {
+                return Err(error);
+            }
+            self.consume(
+                &mut state,
+                &request.transfer,
+                &ReserveRequest::FileRead(request.resource.clone()),
+            )?;
+        }
+        entry.readers.insert(
+            request.transfer.clone(),
+            OwnedReader {
+                path: request.path,
+                size,
+                reader,
+            },
+        );
+        Ok(FileReadInfo {
+            resource: request.resource,
+            transfer: request.transfer,
+            size,
+        })
+    }
+
+    pub(super) async fn read_file_chunk(&self, request: ReadFileChunkRequest) -> Result<FileChunk> {
+        validate_id(&request.resource)?;
+        validate_id(&request.transfer)?;
+        if request.max_bytes == 0 || request.max_bytes > tinybox_bus::MAX_FILE_CHUNK_BYTES {
+            return Err(failure(
+                tinybox_bus::INVALID_FILE_CHUNK,
+                "invalid read chunk size",
+            ));
+        }
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        check_entry_open(self, &request.resource).await?;
+        let reader = entry
+            .readers
+            .get_mut(&request.transfer)
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file reader"))?;
+        if request.offset > reader.size {
+            return Err(failure(
+                tinybox_bus::INVALID_FILE_CHUNK,
+                "read offset exceeds file size",
+            ));
+        }
+        let bytes = reader
+            .reader
+            .read_chunk(request.offset, request.max_bytes)
+            .await
+            .map_err(file_error)?;
+        if bytes.len() > request.max_bytes {
+            return Err(failure(
+                tinybox_bus::BACKEND_ERROR,
+                "workspace reader returned more bytes than requested",
+            ));
+        }
+        Ok(FileChunk {
+            offset: request.offset,
+            bytes,
+            total_bytes: reader.size,
+        })
+    }
+
+    pub(super) async fn finish_file_read(&self, request: FinishFileReadRequest) -> Result<()> {
+        validate_id(&request.resource)?;
+        validate_id(&request.transfer)?;
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        check_entry_open(self, &request.resource).await?;
+        entry
+            .readers
+            .remove(&request.transfer)
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file reader"))?;
+        Ok(())
+    }
+
+    pub(super) async fn begin_file_write(
+        &self,
+        request: BeginFileWriteRequest,
+    ) -> Result<FileWriteInfo> {
+        validate_id(&request.resource)?;
+        validate_file_path(&request.path)?;
+        validate_id(&request.transfer)?;
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        if let Some(completed) = entry.completed_writes.get(&request.transfer) {
+            return if completed.path == request.path {
+                Ok(FileWriteInfo {
+                    resource: request.resource,
+                    transfer: request.transfer,
+                    next_offset: completed.next_offset,
+                })
+            } else {
+                Err(failure(
+                    tinybox_bus::INVALID_ID,
+                    "file transfer belongs to another path",
+                ))
+            };
+        }
+        if let Some(existing) = entry.writers.get(&request.transfer) {
+            return if existing.path == request.path {
+                Ok(FileWriteInfo {
+                    resource: request.resource,
+                    transfer: request.transfer,
+                    next_offset: existing.next_offset,
+                })
+            } else {
+                Err(failure(
+                    tinybox_bus::INVALID_ID,
+                    "file transfer belongs to another path",
+                ))
+            };
+        }
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            self.check_reservation(
+                &mut state,
+                &request.transfer,
+                &ReserveRequest::FileWrite(request.resource.clone()),
+            )?;
+        }
+        ensure_transfer_capacity(entry)?;
+        let root = workspace_root(entry)?;
+        let writer = entry
+            .host
+            .begin_workspace_file_write(root, Path::new(&request.path), &request.transfer.0)
+            .await
+            .map_err(file_error)?;
+        let admission = {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource).and_then(|()| {
+                self.consume(
+                    &mut state,
+                    &request.transfer,
+                    &ReserveRequest::FileWrite(request.resource.clone()),
+                )
+            })
+        };
+        if let Err(error) = admission {
+            let mut writer = writer;
+            let _ = writer.abort().await;
+            return Err(error);
+        }
+        entry.writers.insert(
+            request.transfer.clone(),
+            OwnedWriter {
+                path: request.path,
+                writer,
+                next_offset: 0,
+                last_chunk: None,
+            },
+        );
+        Ok(FileWriteInfo {
+            resource: request.resource,
+            transfer: request.transfer,
+            next_offset: 0,
+        })
+    }
+
+    pub(super) async fn write_file_chunk(
+        &self,
+        request: WriteFileChunkRequest,
+    ) -> Result<FileWriteProgress> {
+        validate_id(&request.resource)?;
+        validate_id(&request.transfer)?;
+        if request.bytes.is_empty() || request.bytes.len() > tinybox_bus::MAX_FILE_CHUNK_BYTES {
+            return Err(failure(
+                tinybox_bus::INVALID_FILE_CHUNK,
+                "invalid write chunk size",
+            ));
+        }
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        check_entry_open(self, &request.resource).await?;
+        let writer = entry
+            .writers
+            .get_mut(&request.transfer)
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file writer"))?;
+        if let Some((offset, bytes, next)) = &writer.last_chunk
+            && *offset == request.offset
+        {
+            return if bytes == &request.bytes {
+                Ok(FileWriteProgress { next_offset: *next })
+            } else {
+                Err(failure(
+                    tinybox_bus::INVALID_FILE_CHUNK,
+                    "conflicting retry at an acknowledged offset",
+                ))
+            };
+        }
+        if request.offset != writer.next_offset {
+            return Err(failure(
+                tinybox_bus::INVALID_FILE_CHUNK,
+                "write offset is not the next expected offset",
+            ));
+        }
+        let next = request
+            .offset
+            .checked_add(request.bytes.len() as u64)
+            .filter(|next| *next <= tinybox_bus::MAX_FILE_BYTES)
+            .ok_or_else(|| failure(tinybox_bus::FILE_LIMIT, "workspace file size limit reached"))?;
+        let acknowledged = writer
+            .writer
+            .write_chunk(request.offset, &request.bytes)
+            .await
+            .map_err(file_error)?;
+        if acknowledged != next {
+            return Err(failure(
+                tinybox_bus::BACKEND_ERROR,
+                "workspace writer returned an invalid offset",
+            ));
+        }
+        writer.last_chunk = Some((request.offset, request.bytes, next));
+        writer.next_offset = next;
+        Ok(FileWriteProgress { next_offset: next })
+    }
+
+    pub(super) async fn finish_file_write(
+        &self,
+        request: FinishFileWriteRequest,
+    ) -> Result<FileWriteProgress> {
+        validate_id(&request.resource)?;
+        validate_id(&request.transfer)?;
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        check_entry_open(self, &request.resource).await?;
+        if let Some(completed) = entry.completed_writes.get(&request.transfer) {
+            return Ok(FileWriteProgress {
+                next_offset: completed.next_offset,
+            });
+        }
+        let writer = entry
+            .writers
+            .get_mut(&request.transfer)
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file writer"))?;
+        let next_offset = writer.writer.finish().await.map_err(file_error)?;
+        let completed = CompletedWrite {
+            path: writer.path.clone(),
+            next_offset,
+        };
+        entry.writers.remove(&request.transfer);
+        entry
+            .completed_writes
+            .insert(request.transfer.clone(), completed);
+        entry.completed_write_order.push_back(request.transfer);
+        while entry.completed_write_order.len() > tinybox_bus::MAX_FILE_TRANSFERS_PER_RESOURCE {
+            if let Some(expired) = entry.completed_write_order.pop_front() {
+                entry.completed_writes.remove(&expired);
+            }
+        }
+        Ok(FileWriteProgress { next_offset })
+    }
+
+    pub(super) async fn abort_file_write(&self, request: AbortFileWriteRequest) -> Result<()> {
+        validate_id(&request.resource)?;
+        validate_id(&request.transfer)?;
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        check_entry_open(self, &request.resource).await?;
+        let writer = entry
+            .writers
+            .get_mut(&request.transfer)
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_FILE_TRANSFER, "unknown file writer"))?;
+        writer.writer.abort().await.map_err(file_error)?;
+        entry.writers.remove(&request.transfer);
+        Ok(())
     }
 
     pub(super) async fn forward(&self, request: ForwardRequest) -> Result<ForwardInfo> {
@@ -771,6 +1163,8 @@ impl Resources {
             state.reservations.retain(|_, (kind, _)| {
                 kind != &ReserveRequest::Process(resource.clone())
                     && kind != &ReserveRequest::Forward(resource.clone())
+                    && kind != &ReserveRequest::FileRead(resource.clone())
+                    && kind != &ReserveRequest::FileWrite(resource.clone())
             });
             let mut executions = self
                 .executions
@@ -789,6 +1183,27 @@ impl Resources {
             // process or container cleanup must be retried, the closed
             // resource no longer accepts new forwarded connections.
             entry.forwards.clear();
+            let writer_ids: Vec<_> = entry.writers.keys().cloned().collect();
+            for transfer in writer_ids {
+                let result = match entry.writers.get_mut(&transfer) {
+                    Some(writer) => writer.writer.abort().await.map_err(file_error),
+                    None => Ok(()),
+                };
+                match result {
+                    Ok(()) => {
+                        entry.writers.remove(&transfer);
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+            if !entry.writers.is_empty() {
+                return failure.map_or_else(
+                    || Err(Error::failed("staged file cleanup remains pending")),
+                    Err,
+                );
+            }
             let sandbox = entry.sandbox.clone();
             let id = entry.id.clone();
             for process in entry.processes.values_mut() {
@@ -872,6 +1287,71 @@ impl Resources {
         }
         failure.map_or(Ok(()), Err)
     }
+}
+
+fn directory_workspace(workspace: &Workspace) -> Option<PathBuf> {
+    match workspace {
+        Workspace::Directory(path) => Some(PathBuf::from(path)),
+        Workspace::Image(_) => None,
+    }
+}
+
+fn workspace_root(entry: &Resource) -> Result<&Path> {
+    entry.workspace_root.as_deref().ok_or_else(|| {
+        failure(
+            tinybox_bus::FILE_UNSUPPORTED,
+            "workspace file transfer is unavailable for image workspaces",
+        )
+    })
+}
+
+fn validate_file_path(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.len() > tinybox_bus::MAX_FILE_PATH_BYTES
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.contains(':')
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(failure(
+            tinybox_bus::INVALID_FILE_PATH,
+            "workspace file path must be normalized and relative",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_transfer_capacity(entry: &Resource) -> Result<()> {
+    if entry.readers.len() + entry.writers.len() >= tinybox_bus::MAX_FILE_TRANSFERS_PER_RESOURCE {
+        return Err(failure(
+            tinybox_bus::FILE_LIMIT,
+            "workspace file transfer limit reached",
+        ));
+    }
+    Ok(())
+}
+
+async fn check_entry_open(resources: &Resources, resource: &ResourceId) -> Result<()> {
+    let state = resources.state.lock().await;
+    let executions = resources
+        .executions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    check_resource_open(&state, &executions, resource)
+}
+
+fn file_error(error: tinybox_core::Error) -> Error {
+    let name = match error {
+        tinybox_core::Error::Unsupported { .. }
+        | tinybox_core::Error::UnsupportedHostFileTransfer { .. }
+        | tinybox_core::Error::UnsupportedWorkspaceSource { .. } => tinybox_bus::FILE_UNSUPPORTED,
+        tinybox_core::Error::InvalidWorkspacePath => tinybox_bus::INVALID_FILE_PATH,
+        tinybox_core::Error::InvalidFileTransfer { .. } => tinybox_bus::INVALID_FILE_CHUNK,
+        _ => tinybox_bus::FILE_ERROR,
+    };
+    failure(name, "workspace file operation failed")
 }
 
 fn check_resource_open(

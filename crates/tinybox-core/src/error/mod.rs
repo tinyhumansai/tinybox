@@ -39,6 +39,13 @@ pub enum Error {
         capability: Capability,
     },
 
+    /// A host cannot safely access files in the workspace mounted for a box.
+    #[error("host {host} does not support workspace file transfer")]
+    UnsupportedHostFileTransfer {
+        /// The host provider that refused the request.
+        host: String,
+    },
+
     /// A hard constraint could not be fully enforced before execution.
     #[error("sandbox {sandbox} cannot enforce {constraint}: {enforcement}")]
     ConstraintNotEnforced {
@@ -89,6 +96,17 @@ pub enum Error {
         actual: crate::runtime::BoxState,
         /// The state the operation required.
         expected: crate::runtime::BoxState,
+    },
+
+    /// A workspace-relative file path was empty, absolute, or not normalized.
+    #[error("workspace file path is invalid")]
+    InvalidWorkspacePath,
+
+    /// A file-transfer operation used an invalid offset or handle state.
+    #[error("workspace file transfer is invalid: {reason}")]
+    InvalidFileTransfer {
+        /// Stable, non-sensitive reason for rejecting the operation.
+        reason: &'static str,
     },
 
     /// A sandbox was handed a workspace source it cannot materialize.

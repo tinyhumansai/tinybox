@@ -35,6 +35,18 @@ fn an_unsupported_capability_names_the_sandbox() {
 }
 
 #[test]
+fn an_unsupported_host_file_transfer_names_the_host() {
+    let error = Error::UnsupportedHostFileTransfer {
+        host: "ssh".to_owned(),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "host ssh does not support workspace file transfer"
+    );
+}
+
+#[test]
 fn a_zero_resource_limit_names_the_field() {
     let error = Error::ZeroResourceLimit {
         limit: "memory_bytes",

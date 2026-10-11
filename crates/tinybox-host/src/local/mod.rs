@@ -1,7 +1,10 @@
 //! Running commands on the machine tinybox is running on.
 
 use async_trait::async_trait;
-use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
+use std::path::Path;
+use tinybox_core::{
+    Error, ExecOutput, ExecRequest, Forward, Host, Result, WorkspaceFileReader, WorkspaceFileWriter,
+};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
@@ -112,6 +115,31 @@ impl Host for LocalHost {
             .await
             .map_err(|error| Error::io("wait", &error))?;
         Ok(Self::collect(&output))
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "workspace file operations share the async Host provider interface"
+    )]
+    async fn open_workspace_file(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Box<dyn WorkspaceFileReader>> {
+        crate::files::open_reader(root, relative)
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "workspace file operations share the async Host provider interface"
+    )]
+    async fn begin_workspace_file_write(
+        &self,
+        root: &Path,
+        relative: &Path,
+        transfer_id: &str,
+    ) -> Result<Box<dyn WorkspaceFileWriter>> {
+        crate::files::begin_writer(root, relative, transfer_id)
     }
 
     /// Hand the address straight back.

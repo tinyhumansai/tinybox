@@ -32,6 +32,7 @@
 //! [`LOCAL`] is the name `LocalHost` registers under, re-exported so callers
 //! can build a [`HostRef`](tinybox_core::HostRef) without hard-coding it.
 
+mod files;
 mod limited;
 mod local;
 

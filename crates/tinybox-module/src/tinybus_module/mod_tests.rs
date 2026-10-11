@@ -306,6 +306,121 @@ async fn module_describes_itself_over_a_real_bus() -> tinybus::Result<()> {
 }
 
 #[tokio::test]
+async fn workspace_file_transfers_roundtrip_through_the_bus_codec() -> tinybus::Result<()> {
+    use tinybox_bus::{
+        BeginFileReadRequest, BeginFileWriteRequest, CreateRequest, FileChunk,
+        FinishFileReadRequest, FinishFileWriteRequest, ReadFileChunkRequest, ReserveRequest,
+        ResourceInfo, Workspace, WriteFileChunkRequest,
+    };
+
+    let workspace = tempfile::tempdir()
+        .map_err(|error| tinybus::Error::failed(format!("create workspace fixture: {error}")))?;
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await?).await?;
+    setup(service.clone()).await?;
+    let client = Connection::connect(bus.connect().await?).await?;
+    let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
+    let resource: tinybox_bus::ResourceId =
+        proxy.call("Reserve", (ReserveRequest::Resource,)).await?;
+    let created: ResourceInfo = proxy
+        .call(
+            "Create",
+            (CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            },),
+        )
+        .await?;
+    let write: tinybox_bus::ResourceId = proxy
+        .call("Reserve", (ReserveRequest::FileWrite(resource.clone()),))
+        .await?;
+    proxy
+        .call::<tinybox_bus::FileWriteInfo>(
+            "BeginFileWrite",
+            (BeginFileWriteRequest {
+                resource: resource.clone(),
+                transfer: write.clone(),
+                path: "report.bin".into(),
+            },),
+        )
+        .await?;
+    proxy
+        .call::<tinybox_bus::FileWriteProgress>(
+            "WriteFileChunk",
+            (WriteFileChunkRequest {
+                resource: resource.clone(),
+                transfer: write.clone(),
+                offset: 0,
+                bytes: vec![0, 1, 0xff, 0x80],
+            },),
+        )
+        .await?;
+    proxy
+        .call::<tinybox_bus::FileWriteProgress>(
+            "FinishFileWrite",
+            (FinishFileWriteRequest {
+                resource: resource.clone(),
+                transfer: write,
+            },),
+        )
+        .await?;
+
+    let read: tinybox_bus::ResourceId = proxy
+        .call("Reserve", (ReserveRequest::FileRead(resource.clone()),))
+        .await?;
+    let traversal = proxy
+        .call::<tinybox_bus::FileReadInfo>(
+            "BeginFileRead",
+            (BeginFileReadRequest {
+                resource: resource.clone(),
+                transfer: read.clone(),
+                path: "../source.bin".into(),
+            },),
+        )
+        .await;
+    assert!(matches!(
+        traversal,
+        Err(tinybus::Error::MethodFailed { name, .. }) if name == tinybox_bus::INVALID_FILE_PATH
+    ));
+    proxy
+        .call::<tinybox_bus::FileReadInfo>(
+            "BeginFileRead",
+            (BeginFileReadRequest {
+                resource: resource.clone(),
+                transfer: read.clone(),
+                path: "report.bin".into(),
+            },),
+        )
+        .await?;
+    let chunk: FileChunk = proxy
+        .call(
+            "ReadFileChunk",
+            (ReadFileChunkRequest {
+                resource: resource.clone(),
+                transfer: read.clone(),
+                offset: 0,
+                max_bytes: 4,
+            },),
+        )
+        .await?;
+    assert_eq!(chunk.bytes, [0, 1, 0xff, 0x80]);
+    proxy
+        .call::<()>(
+            "FinishFileRead",
+            (FinishFileReadRequest {
+                resource: resource.clone(),
+                transfer: read,
+            },),
+        )
+        .await?;
+    proxy.call::<()>("Close", (created.resource,)).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_module_claims_its_well_known_name() -> tinybus::Result<()> {
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());

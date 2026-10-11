@@ -82,9 +82,10 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (1, 4));
+    assert_eq!(CONTRACT_VERSION, (1, 5));
     assert!(is_compatible(CONTRACT_VERSION));
-    assert!(is_compatible((1, 4)));
+    assert!(is_compatible((1, 5)));
+    assert!(!is_compatible((1, 4)));
     assert!(!is_compatible((1, 3)));
     assert!(!is_compatible((1, 2)));
     assert!(!is_compatible((1, 0)));
@@ -96,7 +97,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[1,4],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[1,5],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
@@ -139,5 +140,50 @@ fn command_analysis_wire_facts_round_trip_without_host_policy() -> Result<(), se
     });
     let facts: CommandAnalysis = serde_json::from_value(snapshot.clone())?;
     assert_eq!(serde_json::to_value(facts)?, snapshot);
+    Ok(())
+}
+
+#[test]
+fn workspace_file_transfers_are_chunked_typed_and_bounded() -> Result<(), serde_json::Error> {
+    assert_eq!(MAX_FILE_CHUNK_BYTES, 64 * 1024);
+    assert_eq!(MAX_FILE_TRANSFERS_PER_RESOURCE, 8);
+    assert_eq!(MAX_FILE_BYTES, 256 * 1024 * 1024);
+    assert!(METHODS.contains(&"BeginFileRead"));
+    assert!(METHODS.contains(&"ReadFileChunk"));
+    assert!(METHODS.contains(&"FinishFileRead"));
+    assert!(METHODS.contains(&"BeginFileWrite"));
+    assert!(METHODS.contains(&"WriteFileChunk"));
+    assert!(METHODS.contains(&"FinishFileWrite"));
+    assert!(METHODS.contains(&"AbortFileWrite"));
+
+    let begin = BeginFileReadRequest {
+        resource: ResourceId("resource-1".into()),
+        transfer: ResourceId("transfer-1".into()),
+        path: "nested/report.bin".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&begin)?,
+        serde_json::json!({"resource":"resource-1", "transfer":"transfer-1", "path":"nested/report.bin"})
+    );
+    assert_eq!(
+        serde_json::from_value::<BeginFileReadRequest>(serde_json::to_value(begin.clone())?)?,
+        begin
+    );
+
+    let chunk = WriteFileChunkRequest {
+        resource: ResourceId("resource-1".into()),
+        transfer: ResourceId("transfer-1".into()),
+        offset: 0,
+        bytes: vec![0, 1, 255],
+    };
+    let snapshot = serde_json::json!({
+        "resource":"resource-1", "transfer":"transfer-1", "offset":0,
+        "bytes":[0, 1, 255]
+    });
+    assert_eq!(serde_json::to_value(&chunk)?, snapshot);
+    assert_eq!(
+        serde_json::from_value::<WriteFileChunkRequest>(snapshot)?,
+        chunk
+    );
     Ok(())
 }

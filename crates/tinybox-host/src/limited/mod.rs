@@ -2,11 +2,14 @@
 
 use crate::LocalHost;
 use async_trait::async_trait;
+use std::path::Path;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use tinybox_core::{Error, ExecOutput, ExecRequest, Forward, Host, Result};
+use tinybox_core::{
+    Error, ExecOutput, ExecRequest, Forward, Host, Result, WorkspaceFileReader, WorkspaceFileWriter,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{oneshot, watch};
 
@@ -179,6 +182,33 @@ impl Host for LimitedLocalHost {
 
     async fn forward(&self, remote: std::net::SocketAddr) -> Result<Forward> {
         LocalHost::new().forward(remote).await
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "workspace file operations share the async Host provider interface"
+    )]
+    async fn open_workspace_file(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Box<dyn WorkspaceFileReader>> {
+        LocalHost::new().open_workspace_file(root, relative).await
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "workspace file operations share the async Host provider interface"
+    )]
+    async fn begin_workspace_file_write(
+        &self,
+        root: &Path,
+        relative: &Path,
+        transfer_id: &str,
+    ) -> Result<Box<dyn WorkspaceFileWriter>> {
+        LocalHost::new()
+            .begin_workspace_file_write(root, relative, transfer_id)
+            .await
     }
 }
 

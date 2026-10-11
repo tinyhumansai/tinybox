@@ -86,6 +86,411 @@ async fn local_create_uses_the_production_host_selection_path() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn mounted_workspace_files_transfer_in_bounded_atomic_chunks() -> Result<()> {
+    let workspace = tempfile::tempdir()
+        .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;
+    let destination = workspace.path().join("nested/data.bin");
+    std::fs::create_dir_all(destination.parent().unwrap_or(workspace.path()))
+        .map_err(|error| Error::failed(format!("create fixture directory: {error}")))?;
+    std::fs::write(&destination, b"old")
+        .map_err(|error| Error::failed(format!("write fixture file: {error}")))?;
+
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
+
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    let begun = resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            path: "nested/data.bin".into(),
+        })
+        .await?;
+    assert_eq!(begun.next_offset, 0);
+    let first = WriteFileChunkRequest {
+        resource: resource.clone(),
+        transfer: transfer.clone(),
+        offset: 0,
+        bytes: b"new-".to_vec(),
+    };
+    let progress = resources.write_file_chunk(first.clone()).await?;
+    assert_eq!(progress.next_offset, 4);
+    assert_eq!(resources.write_file_chunk(first).await?.next_offset, 4);
+    assert_eq!(
+        std::fs::read(&destination)
+            .map_err(|error| Error::failed(format!("read old target: {error}")))?,
+        b"old",
+        "staged content is invisible until finish"
+    );
+    let conflict = resources
+        .write_file_chunk(WriteFileChunkRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            offset: 0,
+            bytes: b"bad".to_vec(),
+        })
+        .await;
+    assert_eq!(
+        error_name(conflict.err()).as_deref(),
+        Some(tinybox_bus::INVALID_FILE_CHUNK)
+    );
+    resources
+        .write_file_chunk(WriteFileChunkRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            offset: 4,
+            bytes: b"bytes".to_vec(),
+        })
+        .await?;
+    assert_eq!(
+        resources
+            .finish_file_write(FinishFileWriteRequest {
+                resource: resource.clone(),
+                transfer: transfer.clone(),
+            })
+            .await?
+            .next_offset,
+        9
+    );
+    assert_eq!(
+        resources
+            .finish_file_write(FinishFileWriteRequest {
+                resource: resource.clone(),
+                transfer,
+            })
+            .await?
+            .next_offset,
+        9,
+        "lost finish replies can be replayed without another publish"
+    );
+    assert_eq!(
+        std::fs::read(&destination)
+            .map_err(|error| Error::failed(format!("read published target: {error}")))?,
+        b"new-bytes"
+    );
+
+    let transfer = resources
+        .reserve(ReserveRequest::FileRead(resource.clone()))
+        .await?;
+    let read = resources
+        .begin_file_read(BeginFileReadRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            path: "nested/data.bin".into(),
+        })
+        .await?;
+    assert_eq!(read.size, 9);
+    let chunk = resources
+        .read_file_chunk(ReadFileChunkRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            offset: 4,
+            max_bytes: 5,
+        })
+        .await?;
+    assert_eq!(chunk.offset, 4);
+    assert_eq!(chunk.bytes, b"bytes");
+    resources
+        .finish_file_read(FinishFileReadRequest {
+            resource: resource.clone(),
+            transfer,
+        })
+        .await?;
+
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            path: "nested/data.bin".into(),
+        })
+        .await?;
+    resources
+        .write_file_chunk(WriteFileChunkRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            offset: 0,
+            bytes: b"discard".to_vec(),
+        })
+        .await?;
+    resources
+        .abort_file_write(AbortFileWriteRequest {
+            resource: resource.clone(),
+            transfer,
+        })
+        .await?;
+    assert_eq!(
+        std::fs::read(&destination)
+            .map_err(|error| Error::failed(format!("read after abort: {error}")))?,
+        b"new-bytes"
+    );
+    resources.close(&resource).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_transfer_retries_and_invalid_requests_have_stable_results() -> Result<()> {
+    let workspace = tempfile::tempdir()
+        .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;
+    std::fs::write(workspace.path().join("data.bin"), b"data")
+        .map_err(|error| Error::failed(format!("write fixture file: {error}")))?;
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
+
+    let reader_id = resources
+        .reserve(ReserveRequest::FileRead(resource.clone()))
+        .await?;
+    let read = BeginFileReadRequest {
+        resource: resource.clone(),
+        transfer: reader_id.clone(),
+        path: "data.bin".into(),
+    };
+    assert_eq!(resources.begin_file_read(read.clone()).await?.size, 4);
+    assert_eq!(resources.begin_file_read(read.clone()).await?.size, 4);
+    let mut conflict = read;
+    conflict.path = "other.bin".into();
+    assert_eq!(
+        error_name(resources.begin_file_read(conflict).await.err()).as_deref(),
+        Some(tinybox_bus::INVALID_ID)
+    );
+    for (transfer, offset, max_bytes) in [
+        (reader_id.clone(), 0, 0),
+        (reader_id.clone(), 0, tinybox_bus::MAX_FILE_CHUNK_BYTES + 1),
+        (reader_id.clone(), 5, 1),
+        (ResourceId("unknown-reader".into()), 0, 1),
+    ] {
+        let result = resources
+            .read_file_chunk(ReadFileChunkRequest {
+                resource: resource.clone(),
+                transfer,
+                offset,
+                max_bytes,
+            })
+            .await;
+        assert!(result.is_err());
+    }
+    resources
+        .finish_file_read(FinishFileReadRequest {
+            resource: resource.clone(),
+            transfer: reader_id.clone(),
+        })
+        .await?;
+    assert!(
+        resources
+            .finish_file_read(FinishFileReadRequest {
+                resource: resource.clone(),
+                transfer: reader_id,
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        resources
+            .begin_file_read(BeginFileReadRequest {
+                resource: resource.clone(),
+                transfer: ResourceId("bad-path".into()),
+                path: "../outside".into(),
+            })
+            .await
+            .is_err()
+    );
+
+    let writer_id = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    let write = BeginFileWriteRequest {
+        resource: resource.clone(),
+        transfer: writer_id.clone(),
+        path: "created.bin".into(),
+    };
+    assert_eq!(
+        resources.begin_file_write(write.clone()).await?.next_offset,
+        0
+    );
+    assert_eq!(
+        resources.begin_file_write(write.clone()).await?.next_offset,
+        0
+    );
+    let mut conflict = write;
+    conflict.path = "different.bin".into();
+    assert_eq!(
+        error_name(resources.begin_file_write(conflict).await.err()).as_deref(),
+        Some(tinybox_bus::INVALID_ID)
+    );
+    for (transfer, offset, bytes) in [
+        (writer_id.clone(), 0, Vec::new()),
+        (writer_id.clone(), 1, b"gap".to_vec()),
+        (ResourceId("unknown-writer".into()), 0, b"data".to_vec()),
+    ] {
+        assert!(
+            resources
+                .write_file_chunk(WriteFileChunkRequest {
+                    resource: resource.clone(),
+                    transfer,
+                    offset,
+                    bytes,
+                })
+                .await
+                .is_err()
+        );
+    }
+    resources
+        .abort_file_write(AbortFileWriteRequest {
+            resource: resource.clone(),
+            transfer: writer_id,
+        })
+        .await?;
+    assert!(
+        resources
+            .finish_file_write(FinishFileWriteRequest {
+                resource: resource.clone(),
+                transfer: ResourceId("unknown-writer".into()),
+            })
+            .await
+            .is_err()
+    );
+    resources.close(&resource).await?;
+    Ok(())
+}
+
+fn error_name(error: Option<tinybus::Error>) -> Option<String> {
+    match error {
+        Some(tinybus::Error::MethodFailed { name, .. }) => Some(name),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn file_transfer_capacity_is_reclaimed_and_close_aborts_staging() -> Result<()> {
+    let workspace = tempfile::tempdir()
+        .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
+
+    let mut transfers = Vec::new();
+    for index in 0..tinybox_bus::MAX_FILE_TRANSFERS_PER_RESOURCE {
+        let transfer = resources
+            .reserve(ReserveRequest::FileWrite(resource.clone()))
+            .await?;
+        resources
+            .begin_file_write(BeginFileWriteRequest {
+                resource: resource.clone(),
+                transfer: transfer.clone(),
+                path: format!("file-{index}"),
+            })
+            .await?;
+        transfers.push(transfer);
+    }
+    let ninth = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    let rejected = resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer: ninth.clone(),
+            path: "file-over-capacity".into(),
+        })
+        .await;
+    assert_eq!(
+        error_name(rejected.err()).as_deref(),
+        Some(tinybox_bus::FILE_LIMIT)
+    );
+    resources
+        .abort_file_write(AbortFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfers.remove(0),
+        })
+        .await?;
+    resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer: ninth,
+            path: "file-after-abort".into(),
+        })
+        .await?;
+    resources.close(&resource).await?;
+    assert_eq!(
+        std::fs::read_dir(workspace.path())
+            .map_err(|error| Error::failed(format!("read workspace fixture: {error}")))?
+            .count(),
+        0,
+        "Close discards every unfinished sibling staging file"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_file_transfer_refuses_without_an_exec_fallback() -> Result<()> {
+    let workspace = tempfile::tempdir()
+        .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;
+    let host = Arc::new(RemoteProcessHost::default());
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            host.clone(),
+        )
+        .await?;
+    let transfer = resources
+        .reserve(ReserveRequest::FileRead(resource.clone()))
+        .await?;
+    let result = resources
+        .begin_file_read(BeginFileReadRequest {
+            resource: resource.clone(),
+            transfer,
+            path: "report.txt".into(),
+        })
+        .await;
+    assert_eq!(
+        error_name(result.err()).as_deref(),
+        Some(tinybox_bus::FILE_UNSUPPORTED)
+    );
+    assert!(
+        host.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "file transfer must not be emulated by remote shell commands"
+    );
+    resources.close(&resource).await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ForwardingDockerHost {
     opens: Arc<std::sync::atomic::AtomicUsize>,
