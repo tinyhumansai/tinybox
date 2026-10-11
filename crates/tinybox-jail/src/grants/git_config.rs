@@ -52,12 +52,14 @@ impl Builder<'_> {
         if !visited.insert((canonical.clone(), location)) || depth >= GITCONFIG_MAX_DEPTH {
             return Ok(());
         }
-        let Ok(text) = std::fs::read_to_string(&canonical) else {
+        let Ok(bytes) = std::fs::read(&canonical) else {
             return Ok(());
         };
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| tinybox_core::Error::UnsupportedGitConfigEncoding)?;
         // Relative includes resolve against the directory of the file *as
         // named*, which for a symlinked config is the link's directory.
-        for target in include_paths(&text) {
+        for target in include_paths(text) {
             let resolved = if let Some(rest) = target.strip_prefix("~/") {
                 home.join(rest)
             } else if target.starts_with('~') || target.starts_with("%(prefix)") {

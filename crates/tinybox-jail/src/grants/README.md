@@ -32,3 +32,9 @@ read-only. Mutable tools need separately approved disposable state.
 Hosts supply the complete protected floor and keep authorization. This module
 does not start commands or weaken unavailable confinement. See
 [the contract specification](../../../../docs/specs/local-grants.md).
+
+Fixed toolchain locations remain reserved read-only even when protected entries
+or inspection failures prevent admitting the whole root. Writable descendants
+and aliases cannot turn a refused automatic root into mutable host state.
+Non-UTF-8 Git configuration rejects the complete discovery request with
+UnsupportedGitConfigEncoding rather than returning an incomplete include set.

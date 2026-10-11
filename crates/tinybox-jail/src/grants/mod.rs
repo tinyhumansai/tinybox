@@ -31,7 +31,8 @@ const SUBTREE_MAX_DEPTH: usize = 128;
 /// Build the grant set for `home` (the user's home directory, if known).
 /// # Errors
 /// Returns an error for unsupported Git user-home or installation-prefix
-/// includes instead of returning a partially discovered grant set.
+/// includes or non-UTF-8 Git configuration instead of returning a partially
+/// discovered grant set.
 pub fn resolve_local_jail_grants(
     home: Option<&Path>,
     cfg: &LocalGrantConfig,
@@ -175,11 +176,15 @@ impl<'a> Builder<'a> {
     }
 
     fn add_read_only(&mut self, path: &Path, source: &str, fixed: bool) {
-        if let Some(p) = self.admit(path, source) {
-            if fixed {
-                self.fixed_read_only.push(path.to_path_buf());
-                self.fixed_read_only.push(p.clone());
+        if fixed {
+            // Admission may fail because another entry is protected. The
+            // host executable root must still never become writable.
+            self.fixed_read_only.push(path.to_path_buf());
+            if let Ok(canonical) = path.canonicalize() {
+                self.fixed_read_only.push(canonical);
             }
+        }
+        if let Some(p) = self.admit(path, source) {
             if self.seen.insert(p.clone()) {
                 self.grants.read_only.push(p);
             }

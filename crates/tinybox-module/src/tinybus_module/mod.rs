@@ -82,11 +82,8 @@ impl BoxService {
         .map_err(|_| {
             resources::failure(tinybox_bus::UNSUPPORTED_OPERATION, "grant discovery failed")
         })?;
-        let grants = grants.map_err(|_| {
-            resources::failure(
-                tinybox_bus::UNSUPPORTED_OPERATION,
-                "unsupported git include pathname expansion",
-            )
+        let grants = grants.map_err(|error| {
+            resources::failure(tinybox_bus::UNSUPPORTED_OPERATION, &error.to_string())
         })?;
         if grants.read_only.len() + grants.read_write.len() > tinybox_bus::MAX_NATIVE_JAIL_GRANTS {
             return Err(resources::failure(

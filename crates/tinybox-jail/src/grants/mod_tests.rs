@@ -1147,6 +1147,9 @@ fn non_utf8_git_config_rejects_discovery_instead_of_missing_includes()
         home.path().join(".gitconfig"),
         b"[include]\npath = shared.conf\n[core]\nvalue = \xff\n",
     )?;
-    assert!(resolve(Some(home.path()), &LocalGrantConfig::default()).is_err());
+    assert_eq!(
+        resolve(Some(home.path()), &LocalGrantConfig::default()).err(),
+        Some(tinybox_core::Error::UnsupportedGitConfigEncoding)
+    );
     Ok(())
 }

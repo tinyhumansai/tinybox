@@ -19,6 +19,10 @@ pub enum Error {
     #[error("unsupported git include pathname expansion")]
     UnsupportedGitIncludePath,
 
+    /// Local grant discovery cannot safely parse non-UTF-8 Git configuration.
+    #[error("unsupported git configuration encoding")]
+    UnsupportedGitConfigEncoding,
+
     /// An identifier was empty, over-long, or contained characters outside the
     /// permitted `[A-Za-z0-9._-]` set.
     #[error("identifier {value:?} is not a valid {kind}")]
