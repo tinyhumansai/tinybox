@@ -410,17 +410,17 @@ fn gitconfig_include_depth_is_bounded_and_non_files_are_skipped()
         home.path().join(".gitconfig"),
         "[include]\n path = ~/next-0\n path = ~/.cargo\n",
     )?;
-    for index in 0..10 {
+    for index in 0..11 {
         fs::write(
             home.path().join(format!("next-{index}")),
             format!("[include]\n path = ~/next-{}\n", index + 1),
         )?;
     }
     let grants = resolve(Some(home.path()), &LocalGrantConfig::default())?;
-    assert!(has(&grants.read_only, &canon(&home.path().join("next-7"))?));
+    assert!(has(&grants.read_only, &canon(&home.path().join("next-9"))?));
     assert!(!has(
         &grants.read_only,
-        &canon(&home.path().join("next-8"))?
+        &canon(&home.path().join("next-10"))?
     ));
     Ok(())
 }

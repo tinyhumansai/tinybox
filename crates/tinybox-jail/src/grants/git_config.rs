@@ -3,11 +3,8 @@ use super::Builder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Git config files read at startup, relative to `$HOME`.
-const GITCONFIG_FILES: &[&str] = &[".gitconfig", ".config/git/config"];
-
 /// Deepest `include` chain followed when collecting git config files.
-const GITCONFIG_MAX_DEPTH: usize = 8;
+const GITCONFIG_MAX_DEPTH: usize = 10;
 
 impl Builder<'_> {
     /// Read-only grants for the user's git config files and everything they
@@ -22,10 +19,10 @@ impl Builder<'_> {
         home: &Path,
         xdg: Option<&std::ffi::OsStr>,
     ) -> tinybox_core::Result<()> {
-        let mut roots: Vec<PathBuf> = GITCONFIG_FILES.iter().map(|f| home.join(f)).collect();
-        if let Some(xdg) = xdg_root(xdg) {
-            roots.push(Path::new(&xdg).join("git/config"));
-        }
+        let config_root = xdg_root(xdg)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".config"));
+        let roots = [home.join(".gitconfig"), config_root.join("git/config")];
         self.fixed_read_only(&home.join(".config/git/ignore"), "gitignore");
         if let Some(xdg) = xdg_root(xdg) {
             self.fixed_read_only(&Path::new(&xdg).join("git/ignore"), "gitignore");
@@ -87,12 +84,31 @@ pub(super) fn include_paths(config: &str) -> Vec<String> {
     let mut in_include = false;
     let mut out = Vec::new();
     for line in logical_lines(config) {
-        let line = line.trim();
+        let mut line = line.trim();
         if let Some(section) = line.strip_prefix('[') {
-            let name = section.split([']', ' ', '\t', '"']).next().unwrap_or("");
+            let mut quoted = false;
+            let mut escaped = false;
+            let end = section.char_indices().find_map(|(index, ch)| {
+                if escaped {
+                    escaped = false;
+                } else {
+                    match ch {
+                        '\\' => escaped = true,
+                        '"' => quoted = !quoted,
+                        ']' if !quoted => return Some(index),
+                        _ => {}
+                    }
+                }
+                None
+            });
+            let Some(end) = end else {
+                in_include = false;
+                continue;
+            };
+            let name = section[..end].split([' ', '\t', '"']).next().unwrap_or("");
             in_include =
                 name.eq_ignore_ascii_case("include") || name.eq_ignore_ascii_case("includeif");
-            continue;
+            line = section[end + 1..].trim_start();
         }
         if !in_include {
             continue;

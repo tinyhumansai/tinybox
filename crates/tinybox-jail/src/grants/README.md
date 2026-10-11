@@ -15,8 +15,10 @@ deny rule for entries created later; hosts must control tree mutation.
 git_config.rs reads admitted Git configs only. Relative includes retain their
 logical parent, and visited identity combines canonical file and resolved parent.
 Each link location remains read-only even when targets repeat. Includes stop at
-depth eight. Quotes, supported Git escapes and unquoted comments are parsed.
-Empty XDG_CONFIG_HOME is treated as unset. User-name and installation-prefix
+depth ten. Quotes, supported Git escapes and unquoted comments are parsed.
+An absolute XDG_CONFIG_HOME selects its Git config instead of the home fallback;
+unset or empty values use $HOME/.config/git/config. ~/.gitconfig is always
+considered. Settings after section headers are parsed. User-name and installation-prefix
 include expansion cannot be resolved portably from the supplied contract:
 ~user/ and %(prefix)/ therefore reject the whole request explicitly, without
 returning a partial grant set.

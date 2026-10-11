@@ -24,7 +24,9 @@ Only the explicit allow_proc toggle grants /proc, read-only.
 
 Git include discovery keeps logical relative resolution and protects all link
 locations. The visited key includes canonical file and logical parent, with
-depth eight bounding cycles. Empty XDG_CONFIG_HOME is unset. Quoted markers,
+depth ten bounding cycles. An absolute XDG_CONFIG_HOME selects the XDG config instead of the home fallback;
+unset or empty values select $HOME/.config/git/config. ~/.gitconfig is always
+considered. Settings after section headers are parsed. Quoted markers,
 supported escapes and unquoted comments preserve Git pathname semantics.
 ~user/ and %(prefix)/ expansions are unsupported: the complete request returns
 UnsupportedOperation instead of incomplete grants.
