@@ -182,6 +182,55 @@ async fn stopping_a_windows_job_terminates_its_spawned_descendant() -> Result<()
     Ok(())
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn a_windows_parent_exit_reclaims_its_detached_descendant_without_explicit_stop() -> Result<()>
+{
+    let directory = tempfile::tempdir().map_err(|error| Error::io("tempdir", &error))?;
+    let pid_file = directory.path().join("descendant.pid");
+    let path = pid_file.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 600') -PassThru; [System.IO.File]::WriteAllText('{path}', [string]$child.Id); exit 0"
+    );
+    let host = LimitedLocalHost::new(100);
+    let mut process = host.spawn(&ExecRequest::new([
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        &script,
+    ]))?;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while process.is_running() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    // Always drain the fixture, including the unfixed path that times out.
+    process.stop().await?;
+    host.drain_checked().await?;
+    assert!(
+        completed.is_ok(),
+        "parent exit must finish supervision without waiting for its descendant"
+    );
+    let pid = std::fs::read_to_string(pid_file)
+        .map_err(|error| Error::io("read descendant readiness", &error))?
+        .parse::<u32>()
+        .map_err(|error| Error::Backend {
+            sandbox: crate::LOCAL.into(),
+            operation: "read descendant pid",
+            message: error.to_string(),
+        })?;
+    let check = host.run(&ExecRequest::new([
+        "powershell.exe", "-NoProfile", "-Command",
+        &format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 1 }} else {{ exit 0 }}"),
+    ])).await?;
+    assert_eq!(
+        check.exit_code, 0,
+        "descendant process {pid} is still alive"
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn stop_reports_a_nonzero_terminal_command_status() -> Result<()> {
