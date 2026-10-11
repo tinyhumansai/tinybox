@@ -187,6 +187,28 @@ fn heredoc_comment_does_not_consume_the_next_command() {
 }
 
 #[test]
+fn arithmetic_shifts_do_not_hide_following_redirects() {
+    for command in [
+        "echo $((1 << 2))\nprintf done > out\n",
+        "((1 << 2))\nprintf done > out\n",
+        "echo $((1 + (2 << 3)))\nprintf done > out\n",
+        "echo $((1\n << 2))\nprintf done > out\n",
+    ] {
+        let stripped = strip_heredoc_bodies(command);
+        assert!(contains_unquoted_char(&stripped, '>'), "{command}");
+        assert!(stripped.contains("printf done > out"), "{command}");
+    }
+}
+
+#[test]
+fn heredoc_inside_arithmetic_command_substitution_remains_data() {
+    let command = "echo $((1 + $(cat <<'EOF'\n2 > data\nEOF\n)))\nprintf done > out\n";
+    let stripped = strip_heredoc_bodies(command);
+    assert!(!stripped.contains("2 > data"));
+    assert!(stripped.contains("printf done > out"));
+}
+
+#[test]
 fn double_quoted_heredoc_delimiter_preserves_literal_backslash() {
     let command = "cat << \"E\\OF\"\nbody > data\nE\\OF\nprintf done > out\n";
     let stripped = strip_heredoc_bodies(command);

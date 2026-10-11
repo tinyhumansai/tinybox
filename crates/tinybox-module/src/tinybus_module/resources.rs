@@ -567,6 +567,19 @@ impl Resources {
         result
     }
 
+    fn ensure_not_closing(&self, resource: &ResourceId) -> Result<()> {
+        if self
+            .executions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing
+            .contains(resource)
+        {
+            return Err(failure(tinybox_bus::EXEC_CANCELLED, "resource is closing"));
+        }
+        Ok(())
+    }
+
     async fn spawn_pending(
         &self,
         request: SpawnRequest,
@@ -577,6 +590,7 @@ impl Resources {
         let entry = slot
             .as_mut()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        self.ensure_not_closing(&request.command.resource)?;
         if entry.processes.len() >= tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
             return Err(failure(
                 tinybox_bus::RESOURCE_LIMIT,
