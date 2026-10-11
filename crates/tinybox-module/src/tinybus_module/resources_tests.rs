@@ -115,6 +115,96 @@ struct FailedDockerStopHost {
     exec_attempts: std::sync::atomic::AtomicUsize,
 }
 
+#[tokio::test]
+async fn queued_spawn_stays_fenced_after_close_cleanup_fails() -> Result<()> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let resources = Resources::default();
+    let host = Arc::new(FailedDockerStopHost::default());
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "docker".into(),
+                workspace: Workspace::Image("mock".into()),
+                env: BTreeMap::new(),
+            },
+            host.clone(),
+        )
+        .await?;
+    let command = ExecRequest {
+        resource: resource.clone(),
+        argv: vec!["sleep".into(), "30".into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        stdin: None,
+    };
+    resources
+        .spawn(SpawnRequest {
+            process: resources
+                .reserve(ReserveRequest::Process(resource.clone()))
+                .await?,
+            command: command.clone(),
+        })
+        .await?;
+    let queued = resources
+        .reserve(ReserveRequest::Process(resource.clone()))
+        .await?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut state = resources.state.lock().await;
+        resources.consume(
+            &mut state,
+            &queued,
+            &ReserveRequest::Process(resource.clone()),
+        )?;
+        state
+            .pending_processes
+            .insert(queued.clone(), (resource.clone(), cancelled.clone()));
+    }
+    let slot = resources.slot(&resource).await?;
+    let guard = slot.lock().await;
+    // Pause between Spawn admission and native startup, then deterministically
+    // queue Close first. Both futures use the production resource lock.
+    let mut close = Box::pin(resources.close(&resource));
+    poll_fn(|cx| {
+        assert!(close.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let mut spawn = Box::pin(resources.spawn_pending(
+        SpawnRequest {
+            process: queued.clone(),
+            command,
+        },
+        cancelled,
+    ));
+    poll_fn(|cx| {
+        assert!(spawn.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(guard);
+    assert!(close.await.is_err());
+    let result = spawn.await;
+    resources
+        .state
+        .lock()
+        .await
+        .pending_processes
+        .remove(&queued);
+    let attempts = host.exec_attempts.load(Ordering::SeqCst);
+    resources.close(&resource).await?;
+    assert!(
+        result.is_err(),
+        "a failed Close must continue fencing native startup"
+    );
+    assert_eq!(attempts, 2, "only initial startup and failed cleanup ran");
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl Host for FailedDockerStopHost {
     fn name(&self) -> &'static str {
@@ -343,10 +433,10 @@ impl Host for LostDockerCreateReplyHost {
                     Ok(NativeOutput::new(0, Vec::new(), Vec::new()))
                 }
             }
-            Some("inspect")
+            Some("container")
                 if request
                     .argv
-                    .get(3)
+                    .get(4)
                     .is_some_and(|format| format.contains("tinybox.attempt")) =>
             {
                 let attempt = self
