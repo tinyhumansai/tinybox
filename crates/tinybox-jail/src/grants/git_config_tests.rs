@@ -132,7 +132,10 @@ fn include_assignment_after_section_header_is_parsed() {
         include_paths("[include]\npath = before\n[include\npath = ignored\n"),
         ["before"]
     );
-    assert!(include_paths("[core] path = ~/ignored.conf\n").is_empty());
+    assert_eq!(
+        include_paths("[core] path = ~/ignored.conf\n"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
