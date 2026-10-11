@@ -19,9 +19,7 @@ impl Builder<'_> {
         home: &Path,
         xdg: Option<&std::ffi::OsStr>,
     ) -> tinybox_core::Result<()> {
-        let config_root = xdg_root(xdg)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| home.join(".config"));
+        let config_root = xdg_root(xdg).map_or_else(|| home.join(".config"), Path::to_path_buf);
         let roots = [home.join(".gitconfig"), config_root.join("git/config")];
         self.fixed_read_only(&home.join(".config/git/ignore"), "gitignore");
         if let Some(xdg) = xdg_root(xdg) {
