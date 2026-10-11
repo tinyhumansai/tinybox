@@ -241,6 +241,7 @@ pub(super) fn inspect(namespace: &str, id: &BoxId) -> Vec<String> {
 pub(super) fn inspect_attempt(namespace: &str, id: &BoxId) -> Vec<String> {
     vec![
         "docker".to_owned(),
+        "container".to_owned(),
         "inspect".to_owned(),
         "--format".to_owned(),
         format!("{{{{ index .Config.Labels \"{OWNER_ATTEMPT_LABEL}\" }}}}"),

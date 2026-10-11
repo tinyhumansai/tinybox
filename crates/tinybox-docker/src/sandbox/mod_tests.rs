@@ -393,11 +393,41 @@ async fn a_lost_create_reply_removes_only_our_verified_create_attempt() -> Resul
 
     let commands = host.commands();
     assert_eq!(commands.len(), 3);
-    assert_eq!(commands[1][1], "inspect");
-    assert!(commands[1][3].contains(args::OWNER_ATTEMPT_LABEL));
+    assert_eq!(commands[1][1], "container");
+    assert_eq!(commands[1][2], "inspect");
+    assert!(commands[1][4].contains(args::OWNER_ATTEMPT_LABEL));
     assert_eq!(commands[2][1], "rm");
     assert_eq!(store.list()?.len(), 0);
     Ok(())
+}
+
+#[tokio::test]
+async fn failed_create_ownership_probe_uses_container_specific_inspection() -> Result<()> {
+    let store = Arc::new(MemoryStore::new());
+    let sandbox = DockerSandbox::new(Arc::new(MissingContainerHost), store.clone());
+    assert!(sandbox.create(&spec()?).await.is_err());
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+/// Model the Docker CLI's different missing-object diagnostics, without a daemon.
+#[derive(Debug)]
+struct MissingContainerHost;
+
+#[async_trait]
+impl Host for MissingContainerHost {
+    fn name(&self) -> &'static str {
+        "scripted"
+    }
+
+    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+        let error = match request.argv.get(1).map(String::as_str) {
+            Some("run") => "image download failed",
+            Some("container") => "Error: No such container: tinybox-default-box-0",
+            _ => "Error: No such object: tinybox-default-box-0",
+        };
+        Ok(ExecOutput::new(1, Vec::new(), error.as_bytes().to_vec()))
+    }
 }
 
 #[tokio::test]
@@ -410,7 +440,8 @@ async fn a_lost_create_reply_leaves_a_foreign_container_untouched() -> Result<()
 
     let commands = host.commands();
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[1][1], "inspect");
+    assert_eq!(commands[1][1], "container");
+    assert_eq!(commands[1][2], "inspect");
     assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
@@ -425,7 +456,8 @@ async fn a_same_id_container_from_another_attempt_is_not_removed() -> Result<()>
 
     let commands = host.commands();
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[1][1], "inspect");
+    assert_eq!(commands[1][1], "container");
+    assert_eq!(commands[1][2], "inspect");
     assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
@@ -572,7 +604,8 @@ async fn a_lost_create_reply_releases_the_record_after_named_cleanup_succeeds() 
     let commands = host.commands();
     assert_eq!(commands.len(), 3);
     assert_eq!(commands[0].get(1).map(String::as_str), Some("run"));
-    assert_eq!(commands[1].get(1).map(String::as_str), Some("inspect"));
+    assert_eq!(commands[1].get(1).map(String::as_str), Some("container"));
+    assert_eq!(commands[1].get(2).map(String::as_str), Some("inspect"));
     assert_eq!(commands[2].get(1).map(String::as_str), Some("rm"));
     Ok(())
 }
