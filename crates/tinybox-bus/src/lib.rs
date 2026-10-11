@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 ///
 /// 1.0 denotes the original discovery-only surface. 1.1 adds resource
 /// reservations, owned lifecycle/operations, capabilities and terminal shutdown.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 1);
+/// 1.2 adds host selection, container networking/ports, and owned forwards.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 2);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -34,6 +35,8 @@ pub const MAX_ID_BYTES: usize = 128;
 pub const MAX_ACTIVE_RESOURCES: usize = 64;
 /// Maximum live processes or queued startups in one resource.
 pub const MAX_PROCESSES_PER_RESOURCE: usize = 64;
+/// Maximum live forwarding tunnels per resource.
+pub const MAX_FORWARDS_PER_RESOURCE: usize = 64;
 /// Maximum unused reservations, reclaimed when consumed, closed, or expired.
 pub const MAX_RESERVATIONS: usize = 4096;
 /// Idle lifetime of an unused reservation, in seconds.
@@ -61,6 +64,8 @@ pub const METHODS: &[&str] = &[
     "Reserve",
     "Capabilities",
     "Shutdown",
+    "Forward",
+    "CloseForward",
 ];
 
 /// Stable error name for an unknown or closed module resource.
@@ -94,6 +99,8 @@ pub enum ReserveRequest {
     Resource,
     /// Reserve a process for Spawn, bound to the selected resource.
     Process(ResourceId),
+    /// Reserve a forward associated with a resource.
+    Forward(ResourceId),
 }
 
 /// Backend operations with acknowledged native ownership in this module build.
@@ -118,6 +125,90 @@ pub enum Workspace {
     Image(String),
 }
 
+/// Which host executes the selected sandbox and its commands.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HostConfig {
+    /// Run on the module's machine.
+    #[default]
+    Local,
+    /// Reach a machine using the host's OpenSSH client and configuration.
+    Ssh(SshHostConfig),
+}
+
+/// Explicit OpenSSH target and host-key policy for a remote host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostConfig {
+    /// Host name or `user@host`, passed as one OpenSSH destination argument.
+    pub destination: String,
+    /// Optional SSH port override.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Optional private-key path on the module host.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// Optional known-hosts path on the module host.
+    #[serde(default)]
+    pub known_hosts: Option<String>,
+    /// Whether to trust an unknown host key on first connection.
+    #[serde(default)]
+    pub accept_new_host_key: bool,
+}
+
+/// Network access policy applied by a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NetworkPolicy {
+    /// Disable all network access.
+    #[default]
+    Denied,
+    /// Permit outbound connections without publishing inbound ports.
+    Egress,
+    /// Permit unrestricted network access.
+    Open,
+}
+
+/// CPU, memory, process, and disk limits requested for a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    /// CPU allowance in thousandths of a core.
+    pub cpu_millis: u32,
+    /// Maximum resident memory in bytes.
+    pub memory_bytes: u64,
+    /// Maximum number of processes and threads.
+    pub pids_max: u32,
+    /// Maximum writable filesystem size in bytes.
+    pub disk_bytes: u64,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            cpu_millis: 2_000,
+            memory_bytes: 2 * 1024 * 1024 * 1024,
+            pids_max: 512,
+            disk_bytes: 8 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// A guest port published by the sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortMapping {
+    /// Port inside the sandbox.
+    pub guest: u16,
+    /// Requested host port, or `None` to let the sandbox choose one.
+    #[serde(default)]
+    pub host: Option<u16>,
+}
+
+/// A guest port and the effective host port assigned by the sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedPort {
+    /// Port inside the sandbox.
+    pub guest: u16,
+    /// Effective port on the selected host.
+    pub host: u16,
+}
+
 /// Allocate a local-host sandbox; the backend is always explicit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateRequest {
@@ -125,11 +216,38 @@ pub struct CreateRequest {
     pub resource: ResourceId,
     /// Requested backend, such as `docker`, `namespace`, or `passthrough`.
     pub backend: String,
+    /// Host on which the backend operates; defaults to the module machine.
+    #[serde(default)]
+    pub host: HostConfig,
     /// Workspace to materialize.
     pub workspace: Workspace,
+    /// Network policy enforced by the sandbox.
+    #[serde(default)]
+    pub network: NetworkPolicy,
+    /// Resource limits enforced by the sandbox.
+    #[serde(default)]
+    pub resources: ResourceLimits,
+    /// Guest ports published on the selected host.
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
     /// Variables inherited by commands.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+impl Default for CreateRequest {
+    fn default() -> Self {
+        Self {
+            resource: ResourceId(String::new()),
+            backend: String::new(),
+            host: HostConfig::default(),
+            workspace: Workspace::Directory(String::new()),
+            network: NetworkPolicy::default(),
+            resources: ResourceLimits::default(),
+            ports: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
 }
 
 /// A command inside an existing resource.
@@ -170,6 +288,41 @@ pub struct ResourceInfo {
     pub backend: String,
     /// Backend-reported lifecycle state.
     pub state: String,
+    /// Effective host ports assigned to requested guest ports.
+    #[serde(default)]
+    pub published_ports: Vec<PublishedPort>,
+}
+
+/// Open a gateway to a published guest port using a caller-known reservation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardRequest {
+    /// Resource whose host published the guest port.
+    pub resource: ResourceId,
+    /// Module-minted forward reservation.
+    pub forward: ResourceId,
+    /// Published guest port to reach.
+    pub guest_port: u16,
+}
+
+/// An open gateway endpoint; the module owns its tunnel until `CloseForward`,
+/// resource Close, or Shutdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardInfo {
+    /// Resource whose host published the guest port.
+    pub resource: ResourceId,
+    /// Caller-known opaque forwarding handle.
+    pub forward: ResourceId,
+    /// Local address accepting connections through this gateway.
+    pub local_address: String,
+}
+
+/// Close an opaque forward previously opened for a resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseForwardRequest {
+    /// Resource owning the forward.
+    pub resource: ResourceId,
+    /// Opaque forward handle returned by Reserve.
+    pub forward: ResourceId,
 }
 
 /// Start a detached process under a caller-known reservation identifier.

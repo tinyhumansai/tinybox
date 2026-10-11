@@ -20,16 +20,21 @@ const CONTAINER: SandboxCapabilities =
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
 #[test]
-fn backend_capabilities_do_not_advertise_native_docker_without_supervision() {
-    let windows = capabilities_for(Platform::Other);
-    assert_eq!(windows.create_backends, ["passthrough"]);
-    assert_eq!(windows.exec_backends, Vec::<String>::new());
-    assert_eq!(windows.spawn_backends, Vec::<String>::new());
+fn backend_capabilities_match_supervision_and_confinement_platforms() {
+    let other = capabilities_for(Platform::Other);
+    assert_eq!(other.create_backends, ["passthrough"]);
+    assert_eq!(other.exec_backends, Vec::<String>::new());
+    assert_eq!(other.spawn_backends, Vec::<String>::new());
 
     let macos = capabilities_for(Platform::Unix);
     assert_eq!(macos.create_backends, ["passthrough", "docker"]);
     assert_eq!(macos.exec_backends, ["passthrough", "docker"]);
     assert_eq!(macos.spawn_backends, ["passthrough", "docker"]);
+
+    let windows = capabilities_for(Platform::Windows);
+    assert_eq!(windows.create_backends, ["passthrough", "docker"]);
+    assert_eq!(windows.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(windows.spawn_backends, ["passthrough", "docker"]);
 
     let linux = capabilities_for(Platform::Linux);
     assert_eq!(
@@ -41,6 +46,31 @@ fn backend_capabilities_do_not_advertise_native_docker_without_supervision() {
 }
 
 #[test]
+fn windows_advertises_only_backends_with_native_supervision() {
+    assert!(super::supports_create_backend(
+        Platform::Windows,
+        "passthrough"
+    ));
+    assert!(super::supports_create_backend(Platform::Windows, "docker"));
+    assert!(!super::supports_create_backend(
+        Platform::Windows,
+        "namespace"
+    ));
+    assert!(super::resources::supports_execution(
+        Platform::Windows,
+        "passthrough"
+    ));
+    assert!(super::resources::supports_execution(
+        Platform::Windows,
+        "docker"
+    ));
+    assert!(!super::resources::supports_execution(
+        Platform::Windows,
+        "namespace"
+    ));
+}
+
+#[test]
 fn terminal_shutdown_is_an_explicit_module_operation() {
     assert!(
         BoxService::default()
@@ -48,6 +78,28 @@ fn terminal_shutdown_is_an_explicit_module_operation() {
             .iter()
             .any(|member| member.to_string() == "Shutdown")
     );
+}
+
+#[tokio::test]
+async fn forwarding_methods_dispatch_and_unknown_close_is_idempotent() -> tinybus::Result<()> {
+    let service = BoxService::default();
+    assert!(
+        service
+            .forward(tinybox_bus::ForwardRequest {
+                resource: tinybox_bus::ResourceId("missing-resource".into()),
+                forward: tinybox_bus::ResourceId("reserved-forward".into()),
+                guest_port: 8080,
+            })
+            .await
+            .is_err()
+    );
+    service
+        .close_forward(tinybox_bus::CloseForwardRequest {
+            resource: tinybox_bus::ResourceId("missing-resource".into()),
+            forward: tinybox_bus::ResourceId("reserved-forward".into()),
+        })
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -263,7 +315,8 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
                         .await?,
                     backend: backend.into(),
                     workspace: Workspace::Directory(".".into()),
-                    env: std::collections::BTreeMap::new()
+                    env: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 })
                 .await
                 .is_err()
@@ -277,7 +330,8 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
                     .await?,
                 backend: "passthrough".into(),
                 workspace: Workspace::Image("alpine".into()),
-                env: std::collections::BTreeMap::new()
+                env: std::collections::BTreeMap::new(),
+                ..Default::default()
             })
             .await
             .is_err()
@@ -307,6 +361,7 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
                 env: std::collections::BTreeMap::new(),
+                ..Default::default()
             },),
         )
         .await?;
@@ -404,6 +459,7 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
         backend: "passthrough".into(),
         workspace: Workspace::Directory(".".into()),
         env: std::collections::BTreeMap::new(),
+        ..Default::default()
     };
     service.close(resource.clone()).await?;
     assert!(service.create(request.clone()).await.is_err());
@@ -474,7 +530,8 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
                 resource: empty,
                 backend: "passthrough".into(),
                 workspace: Workspace::Directory(".".into()),
-                env: std::collections::BTreeMap::new()
+                env: std::collections::BTreeMap::new(),
+                ..Default::default()
             })
             .await
             .is_err()

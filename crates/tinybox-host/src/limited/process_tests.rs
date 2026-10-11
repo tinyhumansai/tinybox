@@ -1,5 +1,7 @@
 //! Owned detached handles acknowledge cleanup and reclaim native tasks.
 use super::*;
+#[cfg(windows)]
+use tinybox_core::Host;
 
 #[cfg(unix)]
 #[tokio::test]
@@ -81,6 +83,101 @@ async fn detached_stop_and_drop_join_supervised_children() -> Result<()> {
     assert!(
         host.spawn(&ExecRequest::new(["/nonexistent/tinybox-program"]))
             .is_err()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unowned_native_child_is_killed_and_reaped() -> Result<()> {
+    let mut command = Command::new("sleep");
+    command.arg("600");
+    prepare(&mut command)?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::io("spawn cleanup fixture", &error))?;
+    assert!(child.id().is_some());
+
+    kill_unowned(&mut child)
+        .await
+        .map_err(|error| Error::io("kill unowned fixture", &error))?;
+
+    assert!(child.id().is_none(), "cleanup must reap the unowned child");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn limited_host_runs_and_stops_a_windows_process_job() -> Result<()> {
+    let host = LimitedLocalHost::new(100);
+    let output = host
+        .run(&ExecRequest::new(["cmd.exe", "/C", "echo tinybox"]))
+        .await?;
+    assert_eq!(output.exit_code, 0);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("tinybox"));
+
+    let mut process = host.spawn(&ExecRequest::new([
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        "Start-Sleep -Seconds 600",
+    ]))?;
+    assert!(process.is_running());
+    process.stop().await?;
+    assert!(process.is_cleaned());
+    host.drain_checked().await?;
+    assert_eq!(host.state.active.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn stopping_a_windows_job_terminates_its_spawned_descendant() -> Result<()> {
+    let directory = tempfile::tempdir().map_err(|error| Error::io("tempdir", &error))?;
+    let pid_file = directory.path().join("descendant.pid");
+    let path = pid_file.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 600') -PassThru; [System.IO.File]::WriteAllText('{path}', [string]$child.Id); Start-Sleep -Seconds 600"
+    );
+    let host = LimitedLocalHost::new(100);
+    let mut process = host.spawn(&ExecRequest::new([
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        &script,
+    ]))?;
+    let pid = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = contents.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|error| Error::Backend {
+        sandbox: crate::LOCAL.into(),
+        operation: "await descendant readiness",
+        message: error.to_string(),
+    })?;
+
+    process.stop().await?;
+    host.drain_checked().await?;
+    let check = host
+        .run(&ExecRequest::new([
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 1 }} else {{ exit 0 }}"
+            ),
+        ]))
+        .await?;
+    assert_eq!(
+        check.exit_code, 0,
+        "descendant process {pid} is still alive"
     );
     Ok(())
 }

@@ -9,8 +9,8 @@ use tinybox_core::{IsolationLevel, SandboxCapabilities};
 use tinybus::{Connection, Result as TinyBusResult};
 
 use tinybox_bus::{
-    CreateRequest, ExecOutput, ExecRequest, INTERFACE, OBJECT_PATH, ProcessRef, ResourceId,
-    ResourceInfo, ShellAnalysis, SpawnRequest,
+    CloseForwardRequest, CreateRequest, ExecOutput, ExecRequest, ForwardInfo, ForwardRequest,
+    INTERFACE, OBJECT_PATH, ProcessRef, ResourceId, ResourceInfo, ShellAnalysis, SpawnRequest,
 };
 
 mod resources;
@@ -19,6 +19,7 @@ mod resources;
 enum Platform {
     Linux,
     Unix,
+    Windows,
     Other,
 }
 
@@ -28,6 +29,8 @@ impl Platform {
             Self::Linux
         } else if cfg!(unix) {
             Self::Unix
+        } else if cfg!(windows) {
+            Self::Windows
         } else {
             Self::Other
         }
@@ -46,6 +49,24 @@ impl BoxService {
     async fn shutdown(&self) -> TinyBusResult<()> {
         let resources = self.resources.clone();
         finish_operation(tokio::spawn(async move { resources.shutdown().await })).await
+    }
+
+    /// Open a module-owned gateway to one of a resource's published ports.
+    async fn forward(&self, request: ForwardRequest) -> TinyBusResult<ForwardInfo> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.forward(request).await },
+        ))
+        .await
+    }
+
+    /// Close a gateway opened by Forward; repeated calls are harmless.
+    async fn close_forward(&self, request: CloseForwardRequest) -> TinyBusResult<()> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(async move {
+            resources.close_forward(request).await
+        }))
+        .await
     }
     /// Report which operations own native cleanup on this platform.
     #[expect(
@@ -149,13 +170,19 @@ impl BoxService {
 }
 
 fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
-    let supervised: Vec<String> = if matches!(platform, Platform::Linux | Platform::Unix) {
+    let supervised: Vec<String> = if matches!(
+        platform,
+        Platform::Linux | Platform::Unix | Platform::Windows
+    ) {
         vec!["passthrough".into(), "docker".into()]
     } else {
         Vec::new()
     };
     let mut create_backends = vec!["passthrough".into()];
-    if matches!(platform, Platform::Linux | Platform::Unix) {
+    if matches!(
+        platform,
+        Platform::Linux | Platform::Unix | Platform::Windows
+    ) {
         create_backends.push("docker".into());
     }
     if platform == Platform::Linux {
@@ -174,7 +201,10 @@ fn supports_create_backend(platform: Platform, backend: &str) -> bool {
         // Passthrough only records the caller's workspace; execution remains
         // unadvertised on hosts where TinyBox cannot supervise native children.
         "passthrough" => true,
-        "docker" => matches!(platform, Platform::Linux | Platform::Unix),
+        "docker" => matches!(
+            platform,
+            Platform::Linux | Platform::Unix | Platform::Windows
+        ),
         "namespace" => platform == Platform::Linux,
         _ => false,
     }
@@ -271,7 +301,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward"],
     signals = [],
     requires = [],
     optional = [],

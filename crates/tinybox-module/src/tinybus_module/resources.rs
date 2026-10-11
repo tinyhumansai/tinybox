@@ -4,12 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tinybox_bus::{
-    CreateRequest, ExecOutput, ExecRequest, ProcessRef, ReserveRequest, ResourceId, ResourceInfo,
-    SpawnRequest, Workspace,
+    CloseForwardRequest, CreateRequest, ExecOutput, ExecRequest, ForwardInfo, ForwardRequest,
+    HostConfig, ProcessRef, ReserveRequest, ResourceId, ResourceInfo, SpawnRequest, Workspace,
 };
 use tinybox_core::clock::{Clock, SystemClock};
 use tinybox_core::{
-    BoxId, BoxSpec, HostRef, MemoryStore, Placement, ProcessId, Sandbox, SandboxRef,
+    BoxId, BoxSpec, Forward, Host, HostRef, MemoryStore, Placement, ProcessId, Sandbox, SandboxRef,
     WorkspaceSource,
 };
 
@@ -17,12 +17,26 @@ use tinybus::{Error, Result};
 use tokio::sync::Mutex;
 
 struct Resource {
+    host: Arc<dyn Host>,
+    native_host: bool,
     sandbox: Arc<dyn Sandbox>,
     id: BoxId,
     execution_supported: bool,
     processes: BTreeMap<ResourceId, OwnedProcess>,
     local_sandbox: Option<Arc<tinybox_core::PassthroughSandbox>>,
     collector: Option<Arc<tinybox_host::LimitedLocalHost>>,
+    forwards: BTreeMap<ResourceId, OwnedForward>,
+}
+
+struct OwnedForward {
+    guest_port: u16,
+    info: ForwardInfo,
+    _forward: Forward,
+}
+
+struct SandboxSelection {
+    sandbox: Arc<dyn Sandbox>,
+    local_sandbox: Option<Arc<tinybox_core::PassthroughSandbox>>,
 }
 
 enum OwnedProcess {
@@ -93,12 +107,12 @@ impl Resources {
                 "idle reservation limit reached",
             ));
         }
-        if let ReserveRequest::Process(resource) = &request
+        if let ReserveRequest::Process(resource) | ReserveRequest::Forward(resource) = &request
             && !state.entries.contains_key(resource)
         {
             return Err(failure(tinybox_bus::UNKNOWN_RESOURCE, "unknown resource"));
         }
-        if let ReserveRequest::Process(resource) = &request
+        if let ReserveRequest::Process(resource) | ReserveRequest::Forward(resource) = &request
             && self
                 .executions
                 .lock()
@@ -120,6 +134,17 @@ impl Resources {
     }
 
     fn consume(&self, state: &mut State, id: &ResourceId, expected: &ReserveRequest) -> Result<()> {
+        self.check_reservation(state, id, expected)?;
+        state.reservations.remove(id);
+        Ok(())
+    }
+
+    fn check_reservation(
+        &self,
+        state: &mut State,
+        id: &ResourceId,
+        expected: &ReserveRequest,
+    ) -> Result<()> {
         validate_id(id)?;
         if state.shutdown {
             return Err(failure(tinybox_bus::EXEC_CANCELLED, "module is shut down"));
@@ -143,24 +168,20 @@ impl Resources {
             .unwrap_or_default()
             .as_secs()
             >= tinybox_bus::RESERVATION_TTL_SECS;
-        state.reservations.remove(id);
         if expired {
+            state.reservations.remove(id);
             return Err(failure(tinybox_bus::DUPLICATE_ID, "reservation expired"));
         }
         Ok(())
     }
 
     pub(super) async fn create(&self, request: CreateRequest) -> Result<ResourceInfo> {
-        let host = Arc::new(tinybox_host::LimitedLocalHost::new(
+        let collector = Arc::new(tinybox_host::LimitedLocalHost::new(
             tinybox_bus::MAX_OUTPUT_BYTES,
         ));
-        self.create_with_platform(
-            request,
-            host.clone(),
-            Some(host),
-            super::Platform::current(),
-        )
-        .await
+        let host = configured_host(&request.host, collector.clone())?;
+        self.create_with_platform(request, host, Some(collector), super::Platform::current())
+            .await
     }
 
     #[cfg(test)]
@@ -218,34 +239,14 @@ impl Resources {
             {
                 return Err(failure(tinybox_bus::EXEC_CANCELLED, "resource is closing"));
             }
+            let resource_host = host.clone();
+            let native_host = host.name() == tinybox_host::LOCAL;
             let store = Arc::new(MemoryStore::new());
-            let mut local_sandbox = None;
-            let sandbox: Arc<dyn Sandbox> = match request.backend.as_str() {
-                "passthrough" => {
-                    let sandbox =
-                        Arc::new(tinybox_core::PassthroughSandbox::new(host, store.clone()));
-                    local_sandbox = Some(sandbox.clone());
-                    sandbox
-                }
-                "docker" => Arc::new(tinybox_docker::DockerSandbox::new(host, store.clone())),
-                "namespace" => Arc::new(tinybox_linux::NamespaceSandbox::new(host, store.clone())),
-                _ => {
-                    return Err(failure(
-                        tinybox_bus::UNSUPPORTED_BACKEND,
-                        "unsupported sandbox backend",
-                    ));
-                }
-            };
-            let source = match request.workspace {
-                Workspace::Directory(path) => WorkspaceSource::LocalDir(path.into()),
-                Workspace::Image(image) => WorkspaceSource::OciImage(image),
-            };
-            let placement = Placement::new(
-                HostRef::new("local").map_err(|error| backend_error(&error))?,
-                SandboxRef::new(&request.backend).map_err(|error| backend_error(&error))?,
-            );
-            let mut spec = BoxSpec::new(placement, source);
-            spec.env = request.env;
+            let SandboxSelection {
+                sandbox,
+                local_sandbox,
+            } = make_sandbox(&request.backend, host.clone(), store.clone())?;
+            let spec = make_spec(&request, host.name())?;
             let info = match sandbox.create(&spec).await {
                 Ok(info) => info,
                 Err(error) => {
@@ -258,31 +259,39 @@ impl Resources {
                         && let Some(info) = records.into_iter().next()
                     {
                         *slot_guard = Some(Resource {
+                            host: resource_host,
+                            native_host,
                             sandbox,
                             id: info.id,
                             execution_supported: supports_execution(platform, &request.backend),
                             processes: BTreeMap::new(),
                             collector,
                             local_sandbox,
+                            forwards: BTreeMap::new(),
                         });
                     }
                     return Err(backend_error(&error));
                 }
             };
             let execution_supported = supports_execution(platform, &request.backend);
-            let result = ResourceInfo {
-                resource: request.resource.clone(),
-                backend: request.backend,
-                state: info.state.to_string(),
-            };
             *slot_guard = Some(Resource {
-                sandbox,
-                id: info.id,
+                host: resource_host,
+                native_host,
+                sandbox: sandbox.clone(),
+                id: info.id.clone(),
                 execution_supported,
                 processes: BTreeMap::new(),
                 collector,
                 local_sandbox,
+                forwards: BTreeMap::new(),
             });
+            let published_ports = published_port_facts(sandbox.as_ref(), &info.id, &info).await?;
+            let result = ResourceInfo {
+                resource: request.resource.clone(),
+                backend: request.backend.clone(),
+                state: info.state.to_string(),
+                published_ports,
+            };
             if self.state.lock().await.shutdown {
                 return Err(failure(
                     tinybox_bus::EXEC_CANCELLED,
@@ -323,7 +332,148 @@ impl Resources {
             resource: resource.clone(),
             backend: entry.sandbox.name().to_owned(),
             state: info.state.to_string(),
+            published_ports: published_port_facts(entry.sandbox.as_ref(), &entry.id, &info).await?,
         })
+    }
+
+    pub(super) async fn forward(&self, request: ForwardRequest) -> Result<ForwardInfo> {
+        validate_id(&request.forward)?;
+        let slot = self.slot(&request.resource).await?;
+        let mut slot = slot.lock().await;
+        let entry = slot
+            .as_mut()
+            .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            if let Some(existing) = entry.forwards.get(&request.forward) {
+                return if existing.guest_port == request.guest_port {
+                    Ok(existing.info.clone())
+                } else {
+                    Err(failure(
+                        tinybox_bus::INVALID_ID,
+                        "forward handle belongs to another guest port",
+                    ))
+                };
+            }
+            self.check_reservation(
+                &mut state,
+                &request.forward,
+                &ReserveRequest::Forward(request.resource.clone()),
+            )?;
+        }
+        if entry.forwards.len() >= tinybox_bus::MAX_FORWARDS_PER_RESOURCE {
+            return Err(failure(
+                tinybox_bus::RESOURCE_LIMIT,
+                "forward limit reached",
+            ));
+        }
+        self.open_forward(entry, &request).await
+    }
+
+    async fn open_forward(
+        &self,
+        entry: &mut Resource,
+        request: &ForwardRequest,
+    ) -> Result<ForwardInfo> {
+        let published = entry
+            .sandbox
+            .published_ports(&entry.id)
+            .await
+            .map_err(|error| backend_error(&error))?
+            .into_iter()
+            .find(|port| port.guest == request.guest_port && port.host.is_some())
+            .ok_or_else(|| {
+                failure(
+                    tinybox_bus::UNSUPPORTED_OPERATION,
+                    "guest port is not published on this resource",
+                )
+            })?;
+        let Some(port) = published.host else {
+            return Err(failure(
+                tinybox_bus::UNSUPPORTED_OPERATION,
+                "published host port is unavailable",
+            ));
+        };
+        let remote = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            self.check_reservation(
+                &mut state,
+                &request.forward,
+                &ReserveRequest::Forward(request.resource.clone()),
+            )?;
+        }
+        let forward = entry
+            .host
+            .forward(remote)
+            .await
+            .map_err(|error| backend_error(&error))?;
+        let info = ForwardInfo {
+            resource: request.resource.clone(),
+            forward: request.forward.clone(),
+            local_address: forward.local_addr().to_string(),
+        };
+        {
+            let mut state = self.state.lock().await;
+            let executions = self
+                .executions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_resource_open(&state, &executions, &request.resource)?;
+            self.consume(
+                &mut state,
+                &request.forward,
+                &ReserveRequest::Forward(request.resource.clone()),
+            )?;
+            // Publish while holding the same state -> executions admission
+            // barrier used by Close and Shutdown. If either has marked this
+            // resource, the local `forward` drops here and closes the tunnel.
+            entry.forwards.insert(
+                request.forward.clone(),
+                OwnedForward {
+                    guest_port: request.guest_port,
+                    info: info.clone(),
+                    _forward: forward,
+                },
+            );
+        }
+        Ok(info)
+    }
+
+    pub(super) async fn close_forward(&self, request: CloseForwardRequest) -> Result<()> {
+        validate_id(&request.resource)?;
+        validate_id(&request.forward)?;
+        let slot = {
+            let mut state = self.state.lock().await;
+            if let Some((kind, _)) = state.reservations.get(&request.forward) {
+                if kind != &ReserveRequest::Forward(request.resource.clone()) {
+                    return Err(failure(
+                        tinybox_bus::INVALID_ID,
+                        "forward reservation belongs to another resource",
+                    ));
+                }
+                state.reservations.remove(&request.forward);
+            }
+            state.entries.get(&request.resource).cloned()
+        };
+        let Some(slot) = slot else {
+            return Ok(());
+        };
+        let mut slot = slot.lock().await;
+        if let Some(entry) = slot.as_mut() {
+            entry.forwards.remove(&request.forward);
+        }
+        Ok(())
     }
 
     pub(super) async fn exec(&self, request: ExecRequest) -> Result<ExecOutput> {
@@ -460,7 +610,9 @@ impl Resources {
             ));
         }
         let resource = request.command.resource.clone();
-        if let Some(local) = entry.local_sandbox.as_ref() {
+        if let Some(local) = entry.local_sandbox.as_ref()
+            && entry.native_host
+        {
             let collector = entry.collector.as_ref().ok_or_else(|| {
                 failure(
                     tinybox_bus::UNSUPPORTED_OPERATION,
@@ -518,6 +670,8 @@ impl Resources {
                 }
                 startup?;
             }
+        } else if entry.host.name() == tinybox_ssh::NAME {
+            spawn_remote_process(entry, &request).await?;
         } else {
             return Err(failure(
                 tinybox_bus::UNSUPPORTED_OPERATION,
@@ -614,9 +768,10 @@ impl Resources {
             let Some(slot) = state.entries.get(resource).cloned() else {
                 return Ok(());
             };
-            state
-                .reservations
-                .retain(|_, (kind, _)| kind != &ReserveRequest::Process(resource.clone()));
+            state.reservations.retain(|_, (kind, _)| {
+                kind != &ReserveRequest::Process(resource.clone())
+                    && kind != &ReserveRequest::Forward(resource.clone())
+            });
             let mut executions = self
                 .executions
                 .lock()
@@ -630,6 +785,10 @@ impl Resources {
         let mut slot = slot.lock().await;
         let mut failure = None;
         if let Some(entry) = slot.as_mut() {
+            // Stop tunnel admission before touching the sandbox. Even when a
+            // process or container cleanup must be retried, the closed
+            // resource no longer accepts new forwarded connections.
+            entry.forwards.clear();
             let sandbox = entry.sandbox.clone();
             let id = entry.id.clone();
             for process in entry.processes.values_mut() {
@@ -715,6 +874,116 @@ impl Resources {
     }
 }
 
+fn check_resource_open(
+    state: &State,
+    executions: &Executions,
+    resource: &ResourceId,
+) -> Result<()> {
+    if state.shutdown {
+        return Err(failure(tinybox_bus::EXEC_CANCELLED, "module is shut down"));
+    }
+    if executions.closing.contains(resource) {
+        return Err(failure(tinybox_bus::EXEC_CANCELLED, "resource is closing"));
+    }
+    Ok(())
+}
+
+fn make_sandbox(
+    backend: &str,
+    host: Arc<dyn Host>,
+    store: Arc<MemoryStore>,
+) -> Result<SandboxSelection> {
+    match backend {
+        "passthrough" => {
+            let sandbox = Arc::new(tinybox_core::PassthroughSandbox::new(host, store));
+            Ok(SandboxSelection {
+                sandbox: sandbox.clone(),
+                local_sandbox: Some(sandbox),
+            })
+        }
+        "docker" => Ok(SandboxSelection {
+            sandbox: Arc::new(tinybox_docker::DockerSandbox::new(host, store)),
+            local_sandbox: None,
+        }),
+        "namespace" => Ok(SandboxSelection {
+            sandbox: Arc::new(tinybox_linux::NamespaceSandbox::new(host, store)),
+            local_sandbox: None,
+        }),
+        _ => Err(failure(
+            tinybox_bus::UNSUPPORTED_BACKEND,
+            "unsupported sandbox backend",
+        )),
+    }
+}
+
+async fn published_port_facts(
+    sandbox: &dyn Sandbox,
+    id: &BoxId,
+    info: &tinybox_core::BoxInfo,
+) -> Result<Vec<tinybox_bus::PublishedPort>> {
+    if info.spec.ports.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sandbox
+        .published_ports(id)
+        .await
+        .map_err(|error| backend_error(&error))?
+        .into_iter()
+        .filter_map(|port| {
+            port.host.map(|host| tinybox_bus::PublishedPort {
+                guest: port.guest,
+                host,
+            })
+        })
+        .collect())
+}
+
+fn make_spec(request: &CreateRequest, host: &str) -> Result<BoxSpec> {
+    let source = match &request.workspace {
+        Workspace::Directory(path) => WorkspaceSource::LocalDir(path.into()),
+        Workspace::Image(image) => WorkspaceSource::OciImage(image.clone()),
+    };
+    let placement = Placement::new(
+        HostRef::new(host).map_err(|error| backend_error(&error))?,
+        SandboxRef::new(&request.backend).map_err(|error| backend_error(&error))?,
+    );
+    let mut spec = BoxSpec::new(placement, source);
+    spec.env = request.env.clone();
+    spec.network = match request.network {
+        tinybox_bus::NetworkPolicy::Denied => tinybox_core::NetworkPolicy::Denied,
+        tinybox_bus::NetworkPolicy::Egress => tinybox_core::NetworkPolicy::Egress,
+        tinybox_bus::NetworkPolicy::Open => tinybox_core::NetworkPolicy::Open,
+    };
+    spec.resources = tinybox_core::Resources {
+        cpu_millis: request.resources.cpu_millis,
+        memory_bytes: request.resources.memory_bytes,
+        pids_max: request.resources.pids_max,
+        disk_bytes: request.resources.disk_bytes,
+    };
+    spec.ports
+        .extend(request.ports.iter().map(|port| tinybox_core::PortMapping {
+            guest: port.guest,
+            host: port.host,
+        }));
+    Ok(spec)
+}
+
+async fn spawn_remote_process(entry: &mut Resource, request: &SpawnRequest) -> Result<()> {
+    let process_id = entry
+        .sandbox
+        .spawn(&entry.id, &command(request.command.clone()))
+        .await
+        .map_err(|error| backend_error(&error))?;
+    entry.processes.insert(
+        request.process.clone(),
+        OwnedProcess::Sandbox {
+            id: process_id,
+            stopped: false,
+        },
+    );
+    Ok(())
+}
+
 fn command(request: ExecRequest) -> tinybox_core::ExecRequest {
     let mut command = tinybox_core::ExecRequest::new(request.argv);
     command.cwd = request.cwd.map(Into::into);
@@ -734,9 +1003,11 @@ fn validate_platform_backend(platform: super::Platform, backend: &str) -> Result
     }
 }
 
-fn supports_execution(platform: super::Platform, backend: &str) -> bool {
-    matches!(platform, super::Platform::Linux | super::Platform::Unix)
-        && matches!(backend, "passthrough" | "docker")
+pub(super) fn supports_execution(platform: super::Platform, backend: &str) -> bool {
+    matches!(
+        platform,
+        super::Platform::Linux | super::Platform::Unix | super::Platform::Windows
+    ) && matches!(backend, "passthrough" | "docker")
 }
 
 async fn stop_process(
@@ -753,6 +1024,29 @@ async fn stop_process(
                 .map_err(|error| backend_error(&error))?;
             *stopped = true;
             Ok(())
+        }
+    }
+}
+
+fn configured_host(config: &HostConfig, local: Arc<dyn Host>) -> Result<Arc<dyn Host>> {
+    match config {
+        HostConfig::Local => Ok(local),
+        HostConfig::Ssh(config) => {
+            let mut target = tinybox_ssh::SshTarget::new(config.destination.clone())
+                .map_err(|error| backend_error(&error))?;
+            if let Some(port) = config.port {
+                target = target.with_port(port);
+            }
+            if let Some(identity) = &config.identity {
+                target = target.with_identity(identity);
+            }
+            if let Some(known_hosts) = &config.known_hosts {
+                target = target.with_known_hosts(known_hosts);
+            }
+            if config.accept_new_host_key {
+                target = target.accepting_new_host_key();
+            }
+            Ok(Arc::new(tinybox_ssh::SshHost::new(local, target)))
         }
     }
 }

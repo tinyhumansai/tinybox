@@ -17,6 +17,14 @@ use crate::error::{Error, Result};
 use crate::identity::{BoxId, HostRef, SandboxRef, SnapshotId};
 use crate::spec::{BoxSpec, Lifecycle, Placement, WorkspaceSource};
 
+#[tokio::test]
+async fn backends_without_published_ports_report_an_empty_fact_list() -> Result<()> {
+    let sandbox = FakeSandbox::new(SandboxCapabilities::PASSTHROUGH);
+    let ports = sandbox.published_ports(&BoxId::new("box-0")?).await?;
+    assert_eq!(ports, Vec::new());
+    Ok(())
+}
+
 /// An in-memory sandbox whose capabilities are set per test.
 #[derive(Debug)]
 struct FakeSandbox {

@@ -7,7 +7,7 @@
 //! testable without a daemon.
 
 use tinybox_core::{
-    BoxId, BoxSpec, Error, ExecRequest, NetworkPolicy, Resources, Result, SnapshotId,
+    BoxId, BoxSpec, Error, ExecRequest, NetworkPolicy, PortMapping, Resources, Result, SnapshotId,
     WorkspaceSource,
 };
 
@@ -234,6 +234,59 @@ pub(super) fn inspect(namespace: &str, id: &BoxId) -> Vec<String> {
         "{{.State.Status}}".to_owned(),
         container_name(namespace, id),
     ]
+}
+
+/// The Docker-assigned host ports for one container.
+pub(super) fn published_ports(namespace: &str, id: &BoxId) -> Vec<String> {
+    vec![
+        "docker".to_owned(),
+        "inspect".to_owned(),
+        "--format".to_owned(),
+        "{{json .NetworkSettings.Ports}}".to_owned(),
+        container_name(namespace, id),
+    ]
+}
+
+/// Parse effective host ports from Docker's `NetworkSettings.Ports` JSON.
+///
+/// # Errors
+/// Returns a backend error if Docker returns malformed bindings or a port
+/// outside the TCP/UDP port range.
+pub(super) fn parse_published_ports(json: &str) -> Result<Vec<PortMapping>> {
+    let bindings: std::collections::BTreeMap<
+        String,
+        Option<Vec<std::collections::BTreeMap<String, String>>>,
+    > = serde_json::from_str(json).map_err(|error| Error::Backend {
+        sandbox: NAME.to_owned(),
+        operation: "parse published container ports",
+        message: error.to_string(),
+    })?;
+    let mut ports = std::collections::BTreeSet::new();
+    for (container_port, host_bindings) in bindings {
+        let guest = container_port
+            .split_once('/')
+            .and_then(|(port, _)| port.parse::<u16>().ok())
+            .ok_or_else(|| Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "parse published container ports",
+                message: "Docker returned an invalid container port".to_owned(),
+            })?;
+        for binding in host_bindings.unwrap_or_default() {
+            let host = binding
+                .get("HostPort")
+                .and_then(|port| port.parse::<u16>().ok())
+                .ok_or_else(|| Error::Backend {
+                    sandbox: NAME.to_owned(),
+                    operation: "parse published container ports",
+                    message: "Docker returned an invalid host port".to_owned(),
+                })?;
+            ports.insert(PortMapping {
+                guest,
+                host: Some(host),
+            });
+        }
+    }
+    Ok(ports.into_iter().collect())
 }
 
 /// Read a container's per-create ownership token before reconciling an

@@ -24,6 +24,10 @@ tokio = { workspace = true, features = ["process", "io-util", "sync"] }
 # Safe process-group signalling keeps shell descendants within supervised cleanup.
 nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
 
+[target.'cfg(windows)'.dependencies]
+# Job Objects keep supervised Windows descendants inside one killable process tree.
+command-group = { version = "5", features = ["with-tokio"] }
+
 [dev-dependencies]
 # Command tests run against real temporary directories rather than the CWD.
 tempfile = "3"

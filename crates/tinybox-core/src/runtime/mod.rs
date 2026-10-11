@@ -178,6 +178,16 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     /// not resolve.
     async fn inspect(&self, id: &BoxId) -> Result<BoxInfo>;
 
+    /// Effective host ports assigned to the box's published guest ports.
+    ///
+    /// Backends without host-published ports return an empty list. A backend
+    /// that assigns host ports dynamically reports the concrete values here so
+    /// a caller can connect or establish a host-level gateway.
+    async fn published_ports(&self, id: &BoxId) -> Result<Vec<crate::PortMapping>> {
+        let _ = id;
+        Ok(Vec::new())
+    }
+
     /// Destroy a box and release everything it holds.
     ///
     /// # Errors
