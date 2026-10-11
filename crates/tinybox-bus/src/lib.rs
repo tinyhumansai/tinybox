@@ -31,8 +31,8 @@ pub use files::{
 /// 1.2 adds host selection, container networking/ports, and owned forwards.
 /// 1.3 adds native jail discovery.
 /// 1.4 adds detailed shell facts for host execution policy. 1.5 adds bounded
-/// file transfer for mounted workspaces.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 5);
+/// file transfer for mounted workspaces. 1.6 adds bounded live native output.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 6);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -95,6 +95,9 @@ pub const METHODS: &[&str] = &[
     "WriteFileChunk",
     "FinishFileWrite",
     "AbortFileWrite",
+    "StartExec",
+    "ReadOutput",
+    "ReleaseOutput",
 ];
 
 /// Facts about the detected native directory-jail backend.
@@ -422,3 +425,6 @@ pub struct ShellAnalysis {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+mod output;
+pub use output::{ExecutionFailure, ExecutionState, OutputBatch, OutputChunk, OutputStream};

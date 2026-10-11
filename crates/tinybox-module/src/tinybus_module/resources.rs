@@ -20,6 +20,9 @@ use tinybox_core::{
 use tinybus::{Error, Result};
 use tokio::sync::Mutex;
 
+#[path = "resources_stream.rs"]
+mod stream;
+
 struct Resource {
     host: Arc<dyn Host>,
     native_host: bool,
@@ -88,6 +91,7 @@ pub(super) struct Resources {
     finished: tokio::sync::Notify,
     state: Mutex<State>,
     executions: std::sync::Mutex<Executions>,
+    streams: std::sync::Mutex<BTreeMap<ResourceId, Arc<stream::StreamExecution>>>,
 }
 
 #[derive(Default)]
@@ -113,6 +117,7 @@ impl Default for Resources {
             finished: tokio::sync::Notify::new(),
             state: Mutex::default(),
             executions: std::sync::Mutex::default(),
+            streams: std::sync::Mutex::default(),
         }
     }
 }
@@ -994,7 +999,7 @@ impl Resources {
             .as_mut()
             .ok_or_else(|| failure(tinybox_bus::UNKNOWN_RESOURCE, "closed resource"))?;
         self.ensure_not_closing(&request.command.resource)?;
-        if entry.processes.len() >= tinybox_bus::MAX_PROCESSES_PER_RESOURCE {
+        if self.at_process_limit(entry, &request.command.resource) {
             return Err(failure(
                 tinybox_bus::RESOURCE_LIMIT,
                 "process reservation limit reached",
@@ -1088,6 +1093,9 @@ impl Resources {
     }
 
     pub(super) async fn is_running(&self, process: &ProcessRef) -> Result<bool> {
+        if let Some(stream) = self.stream(process)? {
+            return Ok(stream.running());
+        }
         let slot = self.slot(&process.resource).await?;
         let mut slot = slot.lock().await;
         let entry = slot
@@ -1137,6 +1145,9 @@ impl Resources {
                 }
                 cancelled.store(true, Ordering::SeqCst);
             }
+        }
+        if let Some(stream) = self.stream(process)? {
+            return stream.stop().await;
         }
         let Ok(slot) = self.slot(&process.resource).await else {
             return Ok(());
@@ -1188,7 +1199,7 @@ impl Resources {
             slot
         };
         let mut slot = slot.lock().await;
-        let mut failure = None;
+        let mut failure = self.close_streams(resource).await.err();
         if let Some(entry) = slot.as_mut() {
             // Stop tunnel admission before touching the sandbox. Even when a
             // process or container cleanup must be retried, the closed
@@ -1230,6 +1241,10 @@ impl Resources {
                     || Err(Error::failed("staged file cleanup remains pending")),
                     Err,
                 );
+            }
+            if self.stream_cleanup_pending(resource) {
+                return failure
+                    .map_or_else(|| Err(Error::failed("stream cleanup remains pending")), Err);
             }
             entry
                 .sandbox

@@ -39,6 +39,13 @@ pub enum Error {
         capability: Capability,
     },
 
+    /// The provider cannot produce live bounded output observations.
+    #[error("provider {provider} does not support live output observation")]
+    UnsupportedStreaming {
+        /// Provider that explicitly refused the operation.
+        provider: String,
+    },
+
     /// A host cannot safely access files in the workspace mounted for a box.
     #[error("host {host} does not support workspace file transfer")]
     UnsupportedHostFileTransfer {

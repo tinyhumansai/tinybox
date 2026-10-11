@@ -14,6 +14,7 @@ publish = false
 
 [dependencies]
 tinybox-core.workspace = true
+tinybox-jail.workspace = true
 async-trait.workspace = true
 # `Dir` keeps workspace file handles beneath the approved root without
 # resolving untrusted paths through ambient filesystem APIs.

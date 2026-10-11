@@ -743,3 +743,80 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn bounded_live_output_roundtrips_through_the_bus_codec() -> tinybus::Result<()> {
+    use tinybox_bus::{
+        CreateRequest, ExecRequest, ExecutionState, OutputBatch, ProcessRef, ReserveRequest,
+        ResourceId, SpawnRequest, Workspace,
+    };
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await?).await?;
+    setup(service.clone()).await?;
+    let client = Connection::connect(bus.connect().await?).await?;
+    let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
+    let resource: ResourceId = proxy.call("Reserve", (ReserveRequest::Resource,)).await?;
+    proxy
+        .call::<tinybox_bus::ResourceInfo>(
+            "Create",
+            (CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },),
+        )
+        .await?;
+    let process: ResourceId = proxy
+        .call("Reserve", (ReserveRequest::Process(resource.clone()),))
+        .await?;
+    #[cfg(windows)]
+    let argv = vec!["cmd".into(), "/C".into(), "echo live & exit 7".into()];
+    #[cfg(not(windows))]
+    let argv = vec!["/bin/sh".into(), "-c".into(), "printf live; exit 7".into()];
+    let process: ProcessRef = proxy
+        .call(
+            "StartExec",
+            (SpawnRequest {
+                process,
+                command: ExecRequest {
+                    resource: resource.clone(),
+                    argv,
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    stdin: None,
+                },
+            },),
+        )
+        .await?;
+    let output: OutputBatch = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let output: OutputBatch = proxy.call("ReadOutput", (process.clone(), 0_u64)).await?;
+            if output.state != ExecutionState::Running {
+                return Ok::<_, tinybus::Error>(output);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| tinybus::Error::failed("live output fixture timed out"))??;
+    assert_eq!(output.state, ExecutionState::Exited { exit_code: 7 });
+    let bytes: Vec<u8> = output
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.bytes.iter().copied())
+        .collect();
+    assert_eq!(String::from_utf8_lossy(&bytes).trim(), "live");
+    proxy
+        .call::<()>("ReleaseOutput", (process.clone(),))
+        .await?;
+    assert!(
+        proxy
+            .call::<OutputBatch>("ReadOutput", (process, 0_u64))
+            .await
+            .is_err()
+    );
+    proxy.call::<()>("Close", (resource,)).await?;
+    Ok(())
+}

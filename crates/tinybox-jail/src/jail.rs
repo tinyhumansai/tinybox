@@ -185,6 +185,17 @@ pub trait JailBackend: Send + Sync {
     ///
     /// Returns an error if the backend cannot apply the jail or spawn command.
     fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child>;
+
+    /// Spawn with module-owned stdin, stdout, and stderr pipes.
+    /// Wrapping providers must apply these pipes to their actual launcher.
+    /// # Errors
+    /// Returns the provider's confinement or native startup error.
+    fn spawn_captured(&self, jail: &Jail, mut cmd: Command) -> std::io::Result<Child> {
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        self.spawn(jail, cmd)
+    }
 }
 
 #[cfg(test)]
