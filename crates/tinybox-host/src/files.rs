@@ -1,6 +1,6 @@
 //! Safe, bounded file handles rooted in a local workspace.
 
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use cap_std::ambient_authority;
@@ -8,6 +8,16 @@ use cap_std::fs::{Dir, File, OpenOptions};
 use tinybox_core::{Error, Result, WorkspaceFileReader, WorkspaceFileWriter};
 
 const MAX_PATH_BYTES: usize = 4096;
+
+trait StagedFile: std::io::Write + std::fmt::Debug + Send + Sync {
+    fn sync_all(&self) -> std::io::Result<()>;
+}
+
+impl StagedFile for File {
+    fn sync_all(&self) -> std::io::Result<()> {
+        File::sync_all(self)
+    }
+}
 
 pub(super) fn open_reader(root: &Path, relative: &Path) -> Result<Box<dyn WorkspaceFileReader>> {
     let relative = validate_relative(relative)?;
@@ -67,6 +77,7 @@ pub(super) fn begin_writer(
         file: Some(file),
         next_offset: 0,
         finished: false,
+        poisoned: false,
     }))
 }
 
@@ -135,19 +146,20 @@ impl WorkspaceFileReader for LocalFileReader {
 }
 
 #[derive(Debug)]
-struct LocalFileWriter {
+struct LocalFileWriter<W = File> {
     dir: Dir,
     temporary: PathBuf,
     destination: PathBuf,
-    file: Option<File>,
+    file: Option<W>,
     next_offset: u64,
     finished: bool,
+    poisoned: bool,
 }
 
 #[async_trait::async_trait]
-impl WorkspaceFileWriter for LocalFileWriter {
+impl<W: StagedFile + 'static> WorkspaceFileWriter for LocalFileWriter<W> {
     async fn write_chunk(&mut self, offset: u64, bytes: &[u8]) -> Result<u64> {
-        if self.finished || offset != self.next_offset || bytes.is_empty() {
+        if self.poisoned || self.finished || offset != self.next_offset || bytes.is_empty() {
             return Err(Error::InvalidFileTransfer {
                 reason: "write offset or state is invalid",
             });
@@ -164,8 +176,10 @@ impl WorkspaceFileWriter for LocalFileWriter {
                 &std::io::Error::from(std::io::ErrorKind::BrokenPipe),
             )
         })?;
-        file.write_all(bytes)
-            .map_err(|error| Error::io("write staged workspace file", &error))?;
+        if let Err(error) = file.write_all(bytes) {
+            self.poisoned = true;
+            return Err(Error::io("write staged workspace file", &error));
+        }
         self.next_offset = next_offset;
         Ok(next_offset)
     }
@@ -173,6 +187,11 @@ impl WorkspaceFileWriter for LocalFileWriter {
     async fn finish(&mut self) -> Result<u64> {
         if self.finished {
             return Ok(self.next_offset);
+        }
+        if self.poisoned {
+            return Err(Error::InvalidFileTransfer {
+                reason: "writer is poisoned after a partial write failure",
+            });
         }
         if let Some(file) = self.file.as_mut() {
             file.flush()
@@ -207,7 +226,7 @@ impl WorkspaceFileWriter for LocalFileWriter {
     }
 }
 
-impl Drop for LocalFileWriter {
+impl<W> Drop for LocalFileWriter<W> {
     fn drop(&mut self) {
         if self.finished {
             return;

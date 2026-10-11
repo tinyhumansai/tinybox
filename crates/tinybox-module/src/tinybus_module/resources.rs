@@ -588,8 +588,7 @@ impl Resources {
             })
         };
         if let Err(error) = admission {
-            let mut writer = writer;
-            let _ = writer.abort().await;
+            retain_writer_if_abort_fails(entry, request.transfer, request.path, writer).await;
             return Err(error);
         }
         entry.writers.insert(
@@ -695,6 +694,12 @@ impl Resources {
             .finish()
             .await
             .map_err(|error| file_error(&error))?;
+        if next_offset != writer.next_offset {
+            return Err(failure(
+                tinybox_bus::BACKEND_ERROR,
+                "workspace writer returned an invalid finish offset",
+            ));
+        }
         let completed = CompletedWrite {
             path: writer.path.clone(),
             next_offset,
@@ -1189,7 +1194,7 @@ impl Resources {
             // process or container cleanup must be retried, the closed
             // resource no longer accepts new forwarded connections.
             entry.forwards.clear();
-            abort_writers(entry, &mut failure).await?;
+            abort_writers(entry, &mut failure).await;
             let sandbox = entry.sandbox.clone();
             let id = entry.id.clone();
             for process in entry.processes.values_mut() {
@@ -1217,6 +1222,12 @@ impl Resources {
             {
                 return failure.map_or_else(
                     || Err(Error::failed("collector cleanup remains pending")),
+                    Err,
+                );
+            }
+            if !entry.writers.is_empty() {
+                return failure.map_or_else(
+                    || Err(Error::failed("staged file cleanup remains pending")),
                     Err,
                 );
             }
@@ -1275,7 +1286,7 @@ impl Resources {
     }
 }
 
-async fn abort_writers(entry: &mut Resource, failure: &mut Option<Error>) -> Result<()> {
+async fn abort_writers(entry: &mut Resource, failure: &mut Option<Error>) {
     let writer_ids: Vec<_> = entry.writers.keys().cloned().collect();
     for transfer in writer_ids {
         let result = match entry.writers.get_mut(&transfer) {
@@ -1295,13 +1306,30 @@ async fn abort_writers(entry: &mut Resource, failure: &mut Option<Error>) -> Res
             }
         }
     }
-    if entry.writers.is_empty() {
-        Ok(())
-    } else {
-        failure.take().map_or_else(
-            || Err(Error::failed("staged file cleanup remains pending")),
-            Err,
-        )
+    if !entry.writers.is_empty() {
+        failure.get_or_insert_with(|| Error::failed("staged file cleanup remains pending"));
+    }
+}
+
+async fn retain_writer_if_abort_fails(
+    entry: &mut Resource,
+    transfer: ResourceId,
+    path: String,
+    mut writer: Box<dyn tinybox_core::WorkspaceFileWriter>,
+) {
+    if writer.abort().await.is_err() {
+        // The reservation may have been revoked by concurrent Close after the
+        // provider allocated staging. Keep its sole cleanup handle in the slot
+        // so Close/Shutdown can retry it.
+        entry.writers.insert(
+            transfer,
+            OwnedWriter {
+                path,
+                writer,
+                next_offset: 0,
+                last_chunk: None,
+            },
+        );
     }
 }
 

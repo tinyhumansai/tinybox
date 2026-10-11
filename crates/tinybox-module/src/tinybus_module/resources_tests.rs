@@ -499,6 +499,190 @@ async fn remote_file_transfer_refuses_without_an_exec_fallback() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn close_stops_processes_even_when_staged_file_abort_needs_retry() -> Result<()> {
+    let host = Arc::new(FileCleanupProcessHost::default());
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },
+            host.clone(),
+        )
+        .await?;
+
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer,
+            path: "retry.txt".into(),
+        })
+        .await?;
+    let process = resources
+        .spawn(SpawnRequest {
+            process: resources
+                .reserve(ReserveRequest::Process(resource.clone()))
+                .await?,
+            command: ExecRequest {
+                resource: resource.clone(),
+                argv: vec!["sleep".into(), "30".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+            },
+        })
+        .await?;
+    assert_eq!(process.resource, resource);
+
+    assert!(resources.close(&resource).await.is_err());
+    assert!(
+        host.remote.stopped.load(Ordering::SeqCst),
+        "Close must stop the process even though staged-file cleanup failed"
+    );
+    let slot = resources.slot(&resource).await?;
+    let slot = slot.lock().await;
+    assert!(
+        slot.as_ref()
+            .is_some_and(|entry| entry.processes.is_empty())
+    );
+    assert_eq!(host.abort_attempts.load(Ordering::SeqCst), 1);
+    drop(slot);
+
+    resources.close(&resource).await?;
+    assert_eq!(host.abort_attempts.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_post_allocation_admission_retains_writer_for_close_retry() -> Result<()> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let host = Arc::new(FileCleanupProcessHost {
+        begin_release: std::sync::Mutex::new(Some(wait)),
+        ..Default::default()
+    });
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },
+            host.clone(),
+        )
+        .await?;
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    let host_started = host.begin_started.notified();
+    tokio::pin!(host_started);
+    host_started.as_mut().enable();
+    let mut begin = Box::pin(resources.begin_file_write(BeginFileWriteRequest {
+        resource: resource.clone(),
+        transfer,
+        path: "retry.txt".into(),
+    }));
+    poll_fn(|cx| {
+        assert!(begin.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    host_started.await;
+
+    let mut close = Box::pin(resources.close(&resource));
+    poll_fn(|cx| {
+        assert!(close.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    release
+        .send(())
+        .map_err(|()| Error::failed("file allocation was not waiting"))?;
+
+    assert!(begin.await.is_err());
+    close.await?;
+    assert_eq!(
+        host.abort_attempts.load(Ordering::SeqCst),
+        2,
+        "failed admission cleanup remains owned until Close retries it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn finish_rejects_provider_offset_beyond_acknowledged_chunks() -> Result<()> {
+    let host = Arc::new(FileCleanupProcessHost {
+        finish_offset: Some(99),
+        ..Default::default()
+    });
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },
+            host,
+        )
+        .await?;
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            path: "offset.txt".into(),
+        })
+        .await?;
+    resources
+        .write_file_chunk(WriteFileChunkRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            offset: 0,
+            bytes: b"ack".to_vec(),
+        })
+        .await?;
+
+    let result = resources
+        .finish_file_write(FinishFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+        })
+        .await;
+    assert_eq!(
+        error_name(result.err()).as_deref(),
+        Some(tinybox_bus::BACKEND_ERROR)
+    );
+    let slot = resources.slot(&resource).await?;
+    let slot = slot.lock().await;
+    let entry = slot
+        .as_ref()
+        .ok_or_else(|| Error::failed("resource unexpectedly closed"))?;
+    assert!(entry.writers.contains_key(&transfer));
+    assert!(!entry.completed_writes.contains_key(&transfer));
+    drop(slot);
+    assert!(resources.close(&resource).await.is_err());
+    resources.close(&resource).await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ForwardingDockerHost {
     opens: Arc<std::sync::atomic::AtomicUsize>,
@@ -602,6 +786,99 @@ impl Host for RemoteProcessHost {
             Vec::new()
         };
         Ok(NativeOutput::new(0, stdout, Vec::new()))
+    }
+}
+
+#[derive(Debug)]
+struct FileCleanupProcessHost {
+    remote: RemoteProcessHost,
+    abort_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    begin_started: tokio::sync::Notify,
+    begin_release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    finish_offset: Option<u64>,
+}
+
+impl Default for FileCleanupProcessHost {
+    fn default() -> Self {
+        Self {
+            remote: RemoteProcessHost::default(),
+            abort_attempts: std::sync::Arc::default(),
+            begin_started: tokio::sync::Notify::new(),
+            begin_release: std::sync::Mutex::new(None),
+            finish_offset: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RetryAbortWriter {
+    abort_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    next_offset: u64,
+    finished: bool,
+    finish_offset: Option<u64>,
+}
+
+#[async_trait::async_trait]
+impl tinybox_core::WorkspaceFileWriter for RetryAbortWriter {
+    async fn write_chunk(&mut self, offset: u64, bytes: &[u8]) -> tinybox_core::Result<u64> {
+        if offset != self.next_offset || bytes.is_empty() {
+            return Err(tinybox_core::Error::InvalidFileTransfer {
+                reason: "invalid test writer offset",
+            });
+        }
+        self.next_offset += bytes.len() as u64;
+        Ok(self.next_offset)
+    }
+
+    async fn finish(&mut self) -> tinybox_core::Result<u64> {
+        self.finished = true;
+        Ok(self.finish_offset.unwrap_or(self.next_offset))
+    }
+
+    async fn abort(&mut self) -> tinybox_core::Result<()> {
+        if self.abort_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(tinybox_core::Error::io(
+                "remove test staging file",
+                &std::io::Error::other("transient cleanup failure"),
+            ));
+        }
+        self.finished = true;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Host for FileCleanupProcessHost {
+    fn name(&self) -> &'static str {
+        tinybox_ssh::NAME
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        self.remote.run(request).await
+    }
+
+    async fn begin_workspace_file_write(
+        &self,
+        _root: &std::path::Path,
+        _relative: &std::path::Path,
+        _transfer_id: &str,
+    ) -> tinybox_core::Result<Box<dyn tinybox_core::WorkspaceFileWriter>> {
+        self.begin_started.notify_one();
+        let wait = {
+            self.begin_release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
+        if let Some(wait) = wait {
+            let _ = wait.await;
+        }
+        Ok(Box::new(RetryAbortWriter {
+            abort_attempts: self.abort_attempts.clone(),
+            next_offset: 0,
+            finished: false,
+            finish_offset: self.finish_offset,
+        }))
     }
 }
 

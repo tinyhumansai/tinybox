@@ -1,7 +1,7 @@
 //! Tests for confined workspace file handles.
 
 use super::{LocalFileWriter, begin_writer, open_reader, open_root};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use tinybox_core::{Error, Result, WorkspaceFileWriter};
 
@@ -153,17 +153,85 @@ async fn publish_failure_preserves_the_target_and_drop_reclaims_staging() -> Res
 #[tokio::test]
 async fn writer_handles_a_missing_staging_handle_without_panicking() -> Result<()> {
     let directory = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
-    let mut writer = LocalFileWriter {
+    let mut writer: LocalFileWriter<cap_std::fs::File> = LocalFileWriter {
         dir: open_root(directory.path())?,
         temporary: PathBuf::from("missing.tmp"),
         destination: PathBuf::from("result.bin"),
         file: None,
         next_offset: 0,
         finished: false,
+        poisoned: false,
     };
     assert!(writer.write_chunk(0, b"data").await.is_err());
     writer.abort().await?;
     assert!(writer.write_chunk(0, b"data").await.is_err());
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PartialThenFailFile {
+    inner: cap_std::fs::File,
+    bytes_before_error: Option<usize>,
+}
+
+impl Write for PartialThenFailFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(remaining) = self.bytes_before_error {
+            if remaining == 0 {
+                self.bytes_before_error = None;
+                return Err(std::io::Error::other("injected partial write failure"));
+            }
+            let written = self.inner.write(&bytes[..remaining.min(bytes.len())])?;
+            self.bytes_before_error = Some(remaining - written);
+            return Ok(written);
+        }
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl super::StagedFile for PartialThenFailFile {
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.inner.sync_all()
+    }
+}
+
+#[tokio::test]
+async fn partial_write_failure_cannot_publish_unacknowledged_staged_bytes() -> Result<()> {
+    let root = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
+    let dir = open_root(root.path())?;
+    let temporary = PathBuf::from(".published.bin.tinybox-transfer.tmp");
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let inner = dir
+        .open_with(&temporary, &options)
+        .map_err(|error| Error::io("create staged fixture", &error))?;
+    let mut writer = LocalFileWriter {
+        dir,
+        temporary: temporary.clone(),
+        destination: PathBuf::from("published.bin"),
+        file: Some(PartialThenFailFile {
+            inner,
+            bytes_before_error: Some(3),
+        }),
+        next_offset: 0,
+        finished: false,
+        poisoned: false,
+    };
+
+    assert!(writer.write_chunk(0, b"payload").await.is_err());
+    assert_eq!(
+        std::fs::read(root.path().join(&temporary))
+            .map_err(|error| Error::io("inspect partial fixture", &error))?,
+        b"pay"
+    );
+    assert!(writer.write_chunk(0, b"payload").await.is_err());
+    assert!(writer.finish().await.is_err());
+    writer.abort().await?;
+    assert!(!root.path().join("published.bin").exists());
     Ok(())
 }
 
