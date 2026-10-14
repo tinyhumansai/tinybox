@@ -1,5 +1,18 @@
 //! Validation and environment behavior before process admission.
 use super::*;
+trait EnvironmentText {
+    fn environment_text(&self) -> Option<&str>;
+}
+impl EnvironmentText for String {
+    fn environment_text(&self) -> Option<&str> {
+        Some(self.as_str())
+    }
+}
+impl EnvironmentText for std::ffi::OsString {
+    fn environment_text(&self) -> Option<&str> {
+        self.to_str()
+    }
+}
 fn request(state: &Path) -> ShellExecRequest {
     ShellExecRequest {
         process: tinybox_bus::ResourceId("p".into()),
@@ -64,7 +77,10 @@ fn approved_environment_overrides_preserve_custom_temporary_directory_and_remove
         .insert("SHELLOPTS".into(), "errexit".into());
     let shell = ShellContext::prepare(request, state.path(), &resolved)?;
     assert_eq!(
-        shell.environment.get("TMPDIR").map(String::as_str),
+        shell
+            .environment
+            .get("TMPDIR")
+            .and_then(EnvironmentText::environment_text),
         Some("approved-temporary-location")
     );
     #[cfg(unix)]
@@ -125,6 +141,7 @@ async fn native_shell_jail_adds_owned_scratch_and_refuses_unsupported_constraint
     request.jail = Some(tinybox_bus::NativeJailConfig {
         read_only: vec![],
         read_write: vec![],
+        unix_paths: tinybox_bus::UnixPathGrants::default(),
         allow_net: false,
         allow_subprocess: false,
         enforcement: tinybox_bus::JailEnforcement::Enforced,
@@ -256,20 +273,139 @@ fn native_shell_preserves_resource_environment_and_request_overrides()
         .insert("OVERRIDE".into(), "request".into());
     let shell = ShellContext::prepare(request, state.path(), &resolved)?;
     assert_eq!(
-        shell.environment.get("RESOURCE_CONFIG").map(String::as_str),
+        shell
+            .environment
+            .get("RESOURCE_CONFIG")
+            .and_then(EnvironmentText::environment_text),
         Some("preserved")
     );
     assert_eq!(
-        shell.environment.get("TMPDIR").map(String::as_str),
+        shell
+            .environment
+            .get("TMPDIR")
+            .and_then(EnvironmentText::environment_text),
         Some("resource-temp")
     );
     assert_eq!(
-        shell.environment.get("OVERRIDE").map(String::as_str),
+        shell
+            .environment
+            .get("OVERRIDE")
+            .and_then(EnvironmentText::environment_text),
         Some("request")
     );
     Ok(())
 }
 
+#[cfg(unix)]
+fn toolchain_environment_child(
+    mode: &str,
+    rustup: std::ffi::OsString,
+    cargo: std::ffi::OsString,
+) -> std::io::Result<std::process::Output> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args([
+            "unix_toolchain_environment_is_preserved_for_the_shell_child",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("TINYBOX_NATIVE_ENV_TEST", mode)
+        .env("TINYBOX_UNAPPROVED", "ambient-secret")
+        .env("RUSTUP_HOME", rustup)
+        .env("CARGO_HOME", cargo);
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
+    command.output()
+}
+#[cfg(unix)]
+#[test]
+fn unix_toolchain_environment_is_preserved_for_the_shell_child()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    if let Some(mode) = std::env::var_os("TINYBOX_NATIVE_ENV_TEST") {
+        let state = tempfile::tempdir()?;
+        let mut request = request(state.path());
+        request.shell.command = "printf '%s|%s|%s' \"${RUSTUP_HOME-unset}\" \"${CARGO_HOME-unset}\" \"${TINYBOX_UNAPPROVED-unset}\"".into();
+        let mut resolved = tinybox_core::ExecRequest::new(["unused"]);
+        let expected = match mode.to_str() {
+            Some("raw") => {
+                let rustup = std::env::var_os("RUSTUP_HOME")
+                    .ok_or_else(|| std::io::Error::other("child fixture is missing RUSTUP_HOME"))?;
+                let cargo = std::env::var_os("CARGO_HOME")
+                    .ok_or_else(|| std::io::Error::other("child fixture is missing CARGO_HOME"))?;
+                [rustup.as_bytes(), b"|", cargo.as_bytes(), b"|unset"].concat()
+            }
+            Some("overrides") => {
+                resolved
+                    .env
+                    .insert("RUSTUP_HOME".into(), "resource-rustup".into());
+                resolved
+                    .env
+                    .insert("CARGO_HOME".into(), "resource-cargo".into());
+                request
+                    .extra_env
+                    .insert("RUSTUP_HOME".into(), "request-rustup".into());
+                request
+                    .extra_env
+                    .insert("CARGO_HOME".into(), "request-cargo".into());
+                b"request-rustup|request-cargo|unset".to_vec()
+            }
+            Some("empty") => b"unset|unset|unset".to_vec(),
+            _ => return Err("unknown native shell child fixture mode".into()),
+        };
+        assert!(!request.extra_env.contains_key("TINYBOX_UNAPPROVED"));
+        assert!(std::env::var_os("TINYBOX_UNAPPROVED").is_some());
+        let shell = ShellContext::prepare(request, state.path(), &resolved)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let output = runtime.block_on(async {
+            let output = shell
+                .run(
+                    &resolved,
+                    Arc::new(super::super::output::OutputJournal::default()),
+                )
+                .await?;
+            shell.drain().await?;
+            Ok::<_, tinybox_core::Error>(output)
+        })?;
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, expected);
+        return Ok(());
+    }
+
+    for (mode, rustup, cargo) in [
+        (
+            "raw",
+            std::ffi::OsString::from_vec(b"/tmp/rustup-\xff".to_vec()),
+            std::ffi::OsString::from_vec(b"/tmp/cargo-\xfe".to_vec()),
+        ),
+        (
+            "overrides",
+            "/tmp/default-rustup".into(),
+            "/tmp/default-cargo".into(),
+        ),
+        ("empty", "".into(), "".into()),
+    ] {
+        let output = toolchain_environment_child(mode, rustup, cargo)?;
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "native shell child fixture {mode} did not run exactly one matching test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.status.success(),
+            "native shell child fixture {mode} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
 #[test]
 fn python_utf8_defaults_apply_only_when_requested_and_yield_to_approved_overrides()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -288,7 +424,7 @@ fn python_utf8_defaults_apply_only_when_requested_and_yield_to_approved_override
         shell
             .environment
             .get("PYTHONIOENCODING")
-            .map(String::as_str),
+            .and_then(EnvironmentText::environment_text),
         Some("latin-1")
     );
     Ok(())

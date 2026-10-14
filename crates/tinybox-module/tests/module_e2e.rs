@@ -666,6 +666,7 @@ async fn verify_native_jail(
             .map(str::to_owned)
             .collect(),
         read_write: vec![],
+        unix_paths: tinybox_bus::UnixPathGrants::default(),
         allow_net: true,
         allow_subprocess: true,
         enforcement: JailEnforcement::Enforced,
@@ -802,6 +803,7 @@ async fn verify_docker_rejects_local_jail(
                 NativeJailConfig {
                     read_only: Vec::new(),
                     read_write: Vec::new(),
+                    unix_paths: tinybox_bus::UnixPathGrants::default(),
                     allow_net: true,
                     allow_subprocess: true,
                     enforcement: JailEnforcement::Declared,

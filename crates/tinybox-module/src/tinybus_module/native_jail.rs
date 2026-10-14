@@ -19,7 +19,12 @@ pub(super) fn prepare(
     if config.require_process_isolation && !backend.is_suitable_for_untrusted_code() {
         return Err(unavailable());
     }
-    if config.read_only.len() + config.read_write.len() > tinybox_bus::MAX_NATIVE_JAIL_GRANTS {
+    if config.read_only.len()
+        + config.read_write.len()
+        + config.unix_paths.read_only.len()
+        + config.unix_paths.read_write.len()
+        > tinybox_bus::MAX_NATIVE_JAIL_GRANTS
+    {
         return Err(invalid());
     }
     let root = root.canonicalize().map_err(|_| invalid())?;
@@ -39,6 +44,10 @@ pub(super) fn prepare(
     jail.allow_subprocess = config.allow_subprocess;
     jail.read_only = grants(&config.read_only)?;
     jail.read_write = grants(&config.read_write)?;
+    jail.read_only
+        .extend(unix_grants(&config.unix_paths.read_only)?);
+    jail.read_write
+        .extend(unix_grants(&config.unix_paths.read_write)?);
     match config.enforcement {
         JailEnforcement::Enforced => backend.require(&jail).map_err(|_| unavailable())?,
         JailEnforcement::Declared => {
@@ -53,6 +62,36 @@ pub(super) fn prepare(
         }
     }
     Ok(jail)
+}
+
+fn unix_grants(paths: &[Vec<u8>]) -> Result<Vec<std::path::PathBuf>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        paths
+            .iter()
+            .map(|bytes| {
+                let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(bytes.clone()));
+                if bytes.len() > tinybox_bus::MAX_FILE_PATH_BYTES
+                    || bytes.contains(&0)
+                    || !path.is_absolute()
+                    || path
+                        .components()
+                        .any(|part| matches!(part, Component::ParentDir))
+                {
+                    return Err(invalid());
+                }
+                path.canonicalize().map_err(|_| invalid())
+            })
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        Err(unavailable())
+    }
 }
 fn grants(paths: &[String]) -> Result<Vec<std::path::PathBuf>> {
     paths

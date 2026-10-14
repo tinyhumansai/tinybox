@@ -242,6 +242,7 @@ async fn new_module_operations_dispatch_and_preserve_validation_errors() -> tiny
             tinybox_bus::NativeJailConfig {
                 read_only: Vec::new(),
                 read_write: Vec::new(),
+                unix_paths: tinybox_bus::UnixPathGrants::default(),
                 allow_net: false,
                 allow_subprocess: false,
                 enforcement: tinybox_bus::JailEnforcement::Declared,
@@ -923,6 +924,7 @@ async fn local_grant_discovery_refuses_home_ancestors_of_credentials()
                 ],
                 ..tinybox_bus::ProtectedPaths::default()
             },
+            allow_unix_paths: false,
         })
         .await?;
     assert_eq!(
@@ -949,6 +951,7 @@ async fn local_grant_discovery_rejects_excessive_requested_grants() {
                 ..tinybox_bus::LocalGrantConfig::default()
             },
             protected: tinybox_bus::ProtectedPaths::default(),
+            allow_unix_paths: false,
         })
         .await;
     assert!(result.is_err());
@@ -962,10 +965,22 @@ fn local_grant_discovery_rejects_non_utf8_canonical_targets()
     // APFS refuses invalid UTF-8 filenames. Supply the canonical path directly
     // at the serialization boundary instead of depending on filesystem encoding.
     let target = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'd', 0xff]));
-    let error = super::grant_paths_to_wire(vec!["/valid".into(), target])
+    let error = super::grant_paths_to_wire(vec!["/valid".into(), target], false)
         .err()
         .ok_or("non-UTF8 grant must be rejected")?;
     assert_eq!(error.wire_name(), tinybox_bus::INVALID_FILE_PATH);
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn opted_in_local_grants_keep_non_utf8_paths_as_raw_bytes() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::ffi::OsStringExt;
+    let target = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'd', 0xff]));
+    let (utf8, unix) = super::grant_paths_to_wire(vec!["/valid".into(), target], true)?;
+    assert_eq!(utf8, vec!["/valid"]);
+    assert_eq!(unix, vec![vec![b'/', b'd', 0xff]]);
     Ok(())
 }
 
@@ -988,6 +1003,7 @@ async fn local_grant_discovery_bounds_final_toolchain_and_extra_grants()
                 ..tinybox_bus::LocalGrantConfig::default()
             },
             protected: tinybox_bus::ProtectedPaths::default(),
+            allow_unix_paths: false,
         })
         .await;
     assert!(
@@ -1015,6 +1031,7 @@ async fn local_grant_discovery_accepts_exactly_the_final_limit()
                 ..tinybox_bus::LocalGrantConfig::default()
             },
             protected: tinybox_bus::ProtectedPaths::default(),
+            allow_unix_paths: false,
         })
         .await?;
     assert_eq!(result.read_only.len(), tinybox_bus::MAX_NATIVE_JAIL_GRANTS);
@@ -1036,6 +1053,7 @@ async fn unsupported_git_include_expansions_refuse_the_whole_discovery()
                 home: Some(home.path().to_str().ok_or("non-UTF8 fixture")?.into()),
                 config: tinybox_bus::LocalGrantConfig::default(),
                 protected: tinybox_bus::ProtectedPaths::default(),
+                allow_unix_paths: false,
             })
             .await;
         assert!(

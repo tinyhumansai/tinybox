@@ -51,7 +51,7 @@ fn docker_run_vocabulary_is_typed_bounded_and_additive() -> Result<(), serde_jso
     assert_eq!(METHODS[29], "CleanupDocker");
     assert_eq!(METHODS[30], "RunDockerWithoutWorkspace");
     assert_eq!(METHODS[34], "StartNativeShellExec");
-    assert_eq!(CONTRACT_VERSION, (1, 19));
+    assert_eq!(CONTRACT_VERSION, (1, 20));
     assert_eq!(MAX_DOCKER_RUN_TIMEOUT_MS, 86_400_000);
     let serialized = serde_json::to_value(&request)?;
     assert_eq!(serialized["read_only_rootfs"], false);
@@ -129,8 +129,10 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (1, 19));
+    assert_eq!(CONTRACT_VERSION, (1, 20));
     assert!(is_compatible(CONTRACT_VERSION));
+    assert!(!is_compatible((1, 19)));
+    assert!(!is_compatible((1, 18)));
     assert!(!is_compatible((1, 8)));
     assert!(!is_compatible((1, 7)));
     assert!(!is_compatible((1, 6)));
@@ -147,7 +149,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[1,19],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[1,20],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
@@ -166,7 +168,7 @@ fn no_workspace_docker_operation_is_present_in_the_contract() {
             .count(),
         1
     );
-    assert_eq!(CONTRACT_VERSION, (1, 19));
+    assert_eq!(CONTRACT_VERSION, (1, 20));
 }
 
 #[test]
@@ -265,11 +267,14 @@ fn local_grant_configuration_defaults_and_floor_round_trip() -> Result<(), serde
             prefixes: vec!["/etc".into()],
             credential_roots: vec!["/operator/.ssh".into()],
         },
+        allow_unix_paths: false,
     };
     assert_eq!(
         serde_json::from_value::<ResolveLocalGrantsRequest>(serde_json::to_value(&request)?)?,
         request
     );
+    let wire = serde_json::to_value(&request)?;
+    assert_eq!(wire.get("allow_unix_paths"), None);
     Ok(())
 }
 

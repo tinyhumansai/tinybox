@@ -32,3 +32,4 @@ before scheduling blocking work. Pending preparations and retained journals
 share the module admission budget. Close fences the resource and stops owned
 work before reporting failed scratch deletion. The sanitized child environment
 includes resource variables, with explicit shell-request overrides applied last.
+On Unix, nonempty RUSTUP_HOME and CARGO_HOME values are snapshotted as OS values, preserving non-UTF-8 path bytes. Empty values are treated as unset. Explicit resource and shell-request overrides retain their existing precedence. The snapshot carries only these two names as additional host values.

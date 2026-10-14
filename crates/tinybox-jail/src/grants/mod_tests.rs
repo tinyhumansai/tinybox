@@ -1121,3 +1121,281 @@ fn missing_git_include_locations_cannot_be_created_from_writable_grants()
     assert!(!has(&grants.read_only, &home.path().join("future/config")));
     Ok(())
 }
+fn resolve_with_homes(
+    home: Option<&Path>,
+    rustup_home: Option<&std::ffi::OsStr>,
+    cargo_home: Option<&std::ffi::OsStr>,
+    cfg: &LocalGrantConfig,
+    protected: &ProtectedPaths,
+) -> tinybox_core::Result<JailGrants> {
+    resolve_local_jail_grants_with_homes(home, None, rustup_home, cargo_home, cfg, protected)
+}
+
+#[test]
+fn invalid_custom_toolchain_environment_roots_are_skipped() -> Result<(), Box<dyn std::error::Error>>
+{
+    let home = fake_home()?;
+    fs::create_dir_all(home.path().join(".cargo/bin"))?;
+    fs::write(home.path().join(".cargo/config.toml"), "")?;
+    let relative_rustup = std::ffi::OsStr::new("relative-rustup");
+    let missing_cargo = home.path().join("missing-cargo");
+    let file_root = home.path().join("file-root");
+    fs::write(&file_root, "fixture")?;
+    for (rustup, cargo) in [
+        (
+            Some(std::ffi::OsStr::new("")),
+            Some(std::ffi::OsStr::new("")),
+        ),
+        (Some(relative_rustup), Some(relative_rustup)),
+        (Some(file_root.as_os_str()), Some(file_root.as_os_str())),
+        (
+            Some(missing_cargo.as_os_str()),
+            Some(missing_cargo.as_os_str()),
+        ),
+    ] {
+        let grants = resolve_with_homes(
+            Some(home.path()),
+            rustup,
+            cargo,
+            &LocalGrantConfig::default(),
+            &ProtectedPaths::default(),
+        )?;
+        let canonical_home = home.path().canonicalize()?;
+        assert!(
+            has(&grants.read_only, &canonical_home.join(".rustup")),
+            "default Rustup home disappeared: {grants:?}"
+        );
+        assert!(
+            has(&grants.read_only, &canonical_home.join(".cargo/bin")),
+            "default Cargo bin disappeared: {grants:?}"
+        );
+        assert!(
+            has(
+                &grants.read_only,
+                &canonical_home.join(".cargo/config.toml")
+            ),
+            "default Cargo config disappeared: {grants:?}"
+        );
+        assert!(
+            !grants
+                .read_only
+                .iter()
+                .any(|path| path.ends_with("relative-rustup")),
+            "relative root was admitted: {grants:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn custom_cargo_credentials_are_excluded_by_the_protected_floor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let rustup = home.path().join("custom-rustup");
+    let cargo = home.path().join("custom-cargo");
+    fs::create_dir(&rustup)?;
+    fs::create_dir_all(cargo.join("bin"))?;
+    fs::create_dir_all(cargo.join("registry"))?;
+    fs::create_dir_all(cargo.join("git"))?;
+    fs::write(cargo.join("registry/credentials.toml"), "secret")?;
+    let protected = ProtectedPaths {
+        components: vec!["credentials.toml".into()],
+        ..ProtectedPaths::default()
+    };
+    let grants = resolve_with_homes(
+        Some(home.path()),
+        Some(rustup.as_os_str()),
+        Some(cargo.as_os_str()),
+        &LocalGrantConfig::default(),
+        &protected,
+    )?;
+    let cargo = cargo.canonicalize()?;
+    assert!(
+        !has(&grants.read_only, &cargo.join("registry")),
+        "Cargo subtree containing credentials was admitted: {grants:?}"
+    );
+    assert!(
+        !grants
+            .read_only
+            .iter()
+            .any(|path| path.ends_with("credentials.toml")),
+        "credential file was granted: {grants:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn writable_extras_cannot_promote_custom_toolchain_roots_or_selected_cargo_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let rustup = home.path().join("custom-rustup");
+    let cargo = home.path().join("custom-cargo");
+    fs::create_dir_all(rustup.join("toolchains/stable"))?;
+    fs::create_dir_all(cargo.join("bin"))?;
+    fs::create_dir_all(cargo.join("registry/src"))?;
+    fs::create_dir_all(cargo.join("git"))?;
+    let config = LocalGrantConfig {
+        extra_read_only: vec![cargo.to_string_lossy().into_owned()],
+        extra_read_write: vec![
+            home.path().to_string_lossy().into_owned(),
+            rustup.to_string_lossy().into_owned(),
+            rustup.join("toolchains").to_string_lossy().into_owned(),
+            cargo.to_string_lossy().into_owned(),
+            cargo.join("bin").to_string_lossy().into_owned(),
+            cargo.join("registry").to_string_lossy().into_owned(),
+            cargo.join("registry/src").to_string_lossy().into_owned(),
+            cargo.join("git").to_string_lossy().into_owned(),
+        ],
+        ..LocalGrantConfig::default()
+    };
+    let grants = resolve_with_homes(
+        Some(home.path()),
+        Some(rustup.as_os_str()),
+        Some(cargo.as_os_str()),
+        &config,
+        &ProtectedPaths::default(),
+    )?;
+    assert!(
+        !has(&grants.read_only, &cargo.canonicalize()?),
+        "whole Cargo root was granted by an extra: {grants:?}"
+    );
+    assert!(
+        grants.read_write.is_empty(),
+        "writable extras promoted fixed toolchain state: {grants:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn safe_explicit_cargo_children_keep_their_requested_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let cargo = home.path().join("custom-cargo");
+    let read_only = cargo.join("private-extension/read-only");
+    let read_write = cargo.join("private-extension/read-write");
+    fs::create_dir_all(cargo.join("bin"))?;
+    fs::create_dir_all(&read_only)?;
+    fs::create_dir_all(&read_write)?;
+    let config = LocalGrantConfig {
+        extra_read_only: vec![read_only.to_string_lossy().into_owned()],
+        extra_read_write: vec![read_write.to_string_lossy().into_owned()],
+        ..LocalGrantConfig::default()
+    };
+    let grants = resolve_with_homes(
+        Some(home.path()),
+        None,
+        Some(cargo.as_os_str()),
+        &config,
+        &ProtectedPaths::default(),
+    )?;
+    assert!(
+        has(&grants.read_only, &read_only.canonicalize()?),
+        "safe Cargo child read-only extra was refused: {grants:?}"
+    );
+    assert!(
+        has(&grants.read_write, &read_write.canonicalize()?),
+        "safe Cargo child writable extra was refused: {grants:?}"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn extra_read_only_symlink_to_whole_cargo_root_is_refused() -> Result<(), Box<dyn std::error::Error>>
+{
+    let home = tempfile::tempdir()?;
+    let cargo = home.path().join("custom-cargo");
+    let alias = home.path().join("unregistered-cargo-root-alias");
+    fs::create_dir_all(cargo.join("bin"))?;
+    std::os::unix::fs::symlink(&cargo, &alias)?;
+    let config = LocalGrantConfig {
+        extra_read_only: vec![alias.to_string_lossy().into_owned()],
+        ..LocalGrantConfig::default()
+    };
+    let grants = resolve_with_homes(
+        Some(home.path()),
+        None,
+        Some(cargo.as_os_str()),
+        &config,
+        &ProtectedPaths::default(),
+    )?;
+    assert!(
+        !has(&grants.read_only, &cargo.canonicalize()?),
+        "symlink extra exposed whole Cargo root: {grants:?}"
+    );
+    assert!(
+        has(&grants.read_only, &cargo.join("bin").canonicalize()?),
+        "fixed Cargo bin grant was lost: {grants:?}"
+    );
+    Ok(())
+}
+#[test]
+#[cfg(unix)]
+fn custom_toolchain_symlink_aliases_cannot_be_promoted_to_writable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let rustup = home.path().join("custom-rustup");
+    let cargo = home.path().join("custom-cargo");
+    fs::create_dir_all(rustup.join("toolchains/stable"))?;
+    fs::create_dir_all(cargo.join("bin"))?;
+    std::os::unix::fs::symlink(&rustup, home.path().join("rustup-alias"))?;
+    std::os::unix::fs::symlink(&cargo, home.path().join("cargo-alias"))?;
+    let config = LocalGrantConfig {
+        extra_read_write: vec![
+            home.path()
+                .join("rustup-alias/toolchains")
+                .to_string_lossy()
+                .into_owned(),
+            home.path()
+                .join("cargo-alias/bin")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        ..LocalGrantConfig::default()
+    };
+    let grants = resolve_with_homes(
+        Some(home.path()),
+        Some(home.path().join("rustup-alias").as_os_str()),
+        Some(home.path().join("cargo-alias").as_os_str()),
+        &config,
+        &ProtectedPaths::default(),
+    )?;
+    assert!(
+        grants.read_write.is_empty(),
+        "symlink alias promoted fixed toolchain state: {grants:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rejected_custom_rustup_root_still_blocks_writable_descendants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = tempfile::tempdir()?;
+    let rustup = home.path().join("custom-rustup");
+    fs::create_dir_all(rustup.join("toolchains/stable"))?;
+    fs::write(rustup.join(".private-marker"), "protected")?;
+    let config = LocalGrantConfig {
+        extra_read_write: vec![rustup.join("toolchains").to_string_lossy().into_owned()],
+        ..LocalGrantConfig::default()
+    };
+    let protected = ProtectedPaths {
+        components: vec![".private-marker".into()],
+        ..ProtectedPaths::default()
+    };
+    let grants = resolve_with_homes(
+        Some(home.path()),
+        Some(rustup.as_os_str()),
+        None,
+        &config,
+        &protected,
+    )?;
+    assert!(
+        !has(&grants.read_only, &rustup.canonicalize()?),
+        "protected Rustup root was granted: {grants:?}"
+    );
+    assert!(
+        grants.read_write.is_empty(),
+        "writable extra promoted a descendant of the rejected Rustup root: {grants:?}"
+    );
+    Ok(())
+}

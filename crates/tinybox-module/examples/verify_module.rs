@@ -163,6 +163,7 @@ async fn verify_local_grants(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::
             ..LocalGrantConfig::default()
         },
         protected: ProtectedPaths::default(),
+        allow_unix_paths: false,
     };
     let grants: LocalGrants = proxy.call("ResolveLocalGrants", (request,)).await?;
     if grants.read_only != [allowed] || !grants.read_write.is_empty() {

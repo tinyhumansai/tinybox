@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod grants;
-pub use grants::{LocalGrantConfig, LocalGrants, ProtectedPaths, ResolveLocalGrantsRequest};
+pub use grants::{
+    LocalGrantConfig, LocalGrants, ProtectedPaths, ResolveLocalGrantsRequest, UnixPathGrants,
+};
 
 mod jail;
 pub use jail::{JailEnforcement, NativeJailConfig};
@@ -66,7 +68,8 @@ pub use files::{
 /// suppression for a native shell child; ignored elsewhere).
 /// 1.19 adds `NetworkPolicy::Allowlist` and the observational
 /// [`SandboxEvent`] vocabulary (`Started`, `Denied`, `LimitHit`, `Exited`).
-pub const CONTRACT_VERSION: (u32, u32) = (1, 19);
+/// 1.20 adds opted-in byte-preserving Unix grant transport.
+pub const CONTRACT_VERSION: (u32, u32) = (1, 20);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.

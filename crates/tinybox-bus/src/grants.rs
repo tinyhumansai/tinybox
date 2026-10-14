@@ -49,6 +49,9 @@ pub struct ResolveLocalGrantsRequest {
     pub config: LocalGrantConfig,
     /// Host's unconditional protected-path floor.
     pub protected: ProtectedPaths,
+    /// Permit canonical non-UTF-8 Unix grant paths in `unix_paths`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_unix_paths: bool,
 }
 
 /// Canonical existing filesystem grants beyond a workload's writable root.
@@ -58,4 +61,24 @@ pub struct LocalGrants {
     pub read_only: Vec<String>,
     /// Read, executable, and writable paths.
     pub read_write: Vec<String>,
+    /// Canonical Unix paths whose OS bytes are not UTF-8.
+    #[serde(default, skip_serializing_if = "UnixPathGrants::is_empty")]
+    pub unix_paths: UnixPathGrants,
+}
+
+/// Non-UTF-8 Unix grant paths transported as their original OS bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixPathGrants {
+    /// Read and executable paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only: Vec<Vec<u8>>,
+    /// Read, executable, and writable paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_write: Vec<Vec<u8>>,
+}
+
+impl UnixPathGrants {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.read_only.is_empty() && self.read_write.is_empty()
+    }
 }

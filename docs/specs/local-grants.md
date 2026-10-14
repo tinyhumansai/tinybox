@@ -29,7 +29,8 @@ supported escapes and unquoted comments preserve Git pathname semantics.
 ~user/ and %(prefix)/ expansions are unsupported: the complete request returns
 UnsupportedOperation instead of incomplete grants.
 
-The bus rejects non-UTF-8 targets and more than 64 input or final grants.
+The default bus request rejects non-UTF-8 targets. Contract 1.20 callers can
+opt into raw Unix path grants. The combined grant limit remains 64.
 Missing/protected individual paths are omitted. Discovery is a snapshot; hosts
 must prevent later protected entries or concurrent tree mutation. No kernel deny
 rule for future credential filenames is claimed.
@@ -38,3 +39,9 @@ Acceptance: behavioral regressions cover every floor and include correction;
 the actual dynamic artifact passes production manifest admission and discovery,
 including explicit refusal of unsupported include expansions. No implementation
 crate is needed by a host. Execution and host adapters remain separate work.
+
+## Custom Rust homes and Unix grant transport (contract 1.20)
+
+Existing absolute nonempty RUSTUP_HOME and CARGO_HOME paths are discovered on the module machine as OS paths. Defaults remain admitted by current toolchain policy. Rustup and selected Cargo bin/config/env/registry/git entries are read-only; credential floors and fixed-state alias protections apply to every selected root. Missing or invalid configured roots are skipped; discovery creates no directories.
+
+Callers opt into allow_unix_paths to receive non-UTF8 canonical Unix paths in an additive unix_paths grant group (raw byte vectors). UTF8 grants retain their established string representation. The same group can be supplied in native jail configuration after host approval. Empty optional groups preserve previous wire payloads. Module decoding rejects NUL, relative paths, parent traversal, oversized paths, unsupported platforms and combined grant counts above the established limit. Hosts require the new contract before sending byte grants and retain protected-path admission.

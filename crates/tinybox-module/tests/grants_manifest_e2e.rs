@@ -79,6 +79,7 @@ async fn verify_discovery(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
                     ..tinybox_bus::LocalGrantConfig::default()
                 },
                 protected: tinybox_bus::ProtectedPaths::default(),
+                allow_unix_paths: false,
             },),
         )
         .await?;
@@ -146,6 +147,7 @@ async fn verify_discovery(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
                     home: Some(home.path().to_str().ok_or("home is not UTF-8")?.into()),
                     config: tinybox_bus::LocalGrantConfig::default(),
                     protected: tinybox_bus::ProtectedPaths::default(),
+                    allow_unix_paths: false,
                 },),
             )
             .await;

@@ -61,16 +61,43 @@ impl BoxService {
     }
 }
 
-/// Serialize resolved grant paths without replacing invalid UTF-8 bytes.
-fn grant_paths_to_wire(paths: Vec<std::path::PathBuf>) -> TinyBusResult<Vec<String>> {
-    paths
-        .into_iter()
-        .map(|path| {
-            path.into_os_string().into_string().map_err(|_| {
-                resources::failure(tinybox_bus::INVALID_FILE_PATH, "grant path is not UTF-8")
-            })
-        })
-        .collect()
+/// Split resolved paths while preserving the legacy UTF-8 refusal by default.
+fn grant_paths_to_wire(
+    paths: Vec<std::path::PathBuf>,
+    allow_unix_paths: bool,
+) -> TinyBusResult<(Vec<String>, Vec<Vec<u8>>)> {
+    let mut utf8 = Vec::with_capacity(paths.len());
+    #[cfg(unix)]
+    let mut unix = Vec::new();
+    #[cfg(not(unix))]
+    let unix = Vec::new();
+    for path in paths {
+        match path.into_os_string().into_string() {
+            Ok(path) => utf8.push(path),
+            Err(path) if allow_unix_paths => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStringExt;
+                    unix.push(path.into_vec());
+                }
+                #[cfg(not(unix))]
+                {
+                    drop(path);
+                    return Err(resources::failure(
+                        tinybox_bus::INVALID_FILE_PATH,
+                        "non-UTF-8 grant paths require Unix",
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(resources::failure(
+                    tinybox_bus::INVALID_FILE_PATH,
+                    "grant path is not UTF-8",
+                ));
+            }
+        }
+    }
+    Ok((utf8, unix))
 }
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
@@ -102,6 +129,7 @@ impl BoxService {
                 "too many local grant paths",
             ));
         }
+        let allow_unix_paths = request.allow_unix_paths;
         let grants = tokio::task::spawn_blocking(move || {
             tinybox_jail::grants::resolve_local_jail_grants(
                 request.home.as_deref().map(std::path::Path::new),
@@ -125,9 +153,16 @@ impl BoxService {
                 "too many discovered local grant paths",
             ));
         }
+        let (read_only, unix_read_only) = grant_paths_to_wire(grants.read_only, allow_unix_paths)?;
+        let (read_write, unix_read_write) =
+            grant_paths_to_wire(grants.read_write, allow_unix_paths)?;
         Ok(tinybox_bus::LocalGrants {
-            read_only: grant_paths_to_wire(grants.read_only)?,
-            read_write: grant_paths_to_wire(grants.read_write)?,
+            read_only,
+            read_write,
+            unix_paths: tinybox_bus::UnixPathGrants {
+                read_only: unix_read_only,
+                read_write: unix_read_write,
+            },
         })
     }
     /// Report native jail enforcement facts without starting a workload.

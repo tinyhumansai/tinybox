@@ -11,8 +11,9 @@ state_dir. This is local passthrough execution only; other providers and
 unavailable native jails refuse explicitly.
 
 The module owns shell selection and raw Windows quoting, snapshots only the
-standard execution passthrough and Windows bootstrap names, rejects empty
-present passthrough values, applies approved overrides, and finally removes
+standard execution passthrough, Windows bootstrap names and nonempty Rust
+toolchain homes. It rejects empty ordinary passthrough values, applies approved
+overrides, and finally removes
 startup-hook variables. It clears the rest of the ambient environment.
 
 Each execution owns a private scratch directory under
@@ -36,3 +37,7 @@ Acceptance proves actual compiled-module execution on Windows and Unix,
 quoting, environment isolation, scratch retention/cleanup, timeout/cancellation,
 bounded output, identity replay, admission refusal and unavailable confinement.
 OpenHuman host adaptation waits for an available released module.
+
+## Rust toolchain environment
+
+The native environment snapshots nonempty RUSTUP_HOME and CARGO_HOME as OS values, preserving Unix bytes. Approved UTF8 overrides retain precedence. Empty toolchain values behave as unset. Only these additional names are included; ordinary passthrough validation, Windows bootstrap, startup-hook removal and owned scratch remain unchanged. Canonical confinement grants are resolved separately using the current read-only host-state policy.
