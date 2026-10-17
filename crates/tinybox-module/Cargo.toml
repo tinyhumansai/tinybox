@@ -52,7 +52,7 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 # Stdio children own a process group that is killed as a unit.
-nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
 # Tests serve the storage objects on the in-memory broker the module connects to.
