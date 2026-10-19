@@ -1376,11 +1376,13 @@ version = "0.2.0"
 dependencies = [
  "landlock",
  "log",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
  "tinybox-bus",
  "tinybox-core",
+ "tinybox-linux",
  "windows-sys 0.61.2",
 ]
 
