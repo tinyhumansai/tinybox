@@ -25,7 +25,7 @@ members = [
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.40"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-only"
@@ -58,15 +58,15 @@ serde_json = "1"
 # The model types are serializable; see `tinybox-core`'s dependency comment.
 serde = { version = "1", features = ["derive"] }
 # Internal path dependencies between workspace members.
-tinybox-bus = { path = "crates/tinybox-bus", version = "0.1.25" }
-tinybox-core = { path = "crates/tinybox-core", version = "0.1.25" }
-tinybox-host = { path = "crates/tinybox-host", version = "0.1.25" }
-tinybox-jail = { path = "crates/tinybox-jail", version = "0.1.25" }
-tinybox-linux = { path = "crates/tinybox-linux", version = "0.1.25" }
-tinybox-microvm = { path = "crates/tinybox-microvm", version = "0.1.25" }
-tinybox-docker = { path = "crates/tinybox-docker", version = "0.1.25" }
-tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.1.25" }
-tinybox-sync = { path = "crates/tinybox-sync", version = "0.1.25" }
+tinybox-bus = { path = "crates/tinybox-bus", version = "0.2.0" }
+tinybox-core = { path = "crates/tinybox-core", version = "0.2.0" }
+tinybox-host = { path = "crates/tinybox-host", version = "0.2.0" }
+tinybox-jail = { path = "crates/tinybox-jail", version = "0.2.0" }
+tinybox-linux = { path = "crates/tinybox-linux", version = "0.2.0" }
+tinybox-microvm = { path = "crates/tinybox-microvm", version = "0.2.0" }
+tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.0" }
+tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.0" }
+tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.0" }
 # The storage ports only (no database client), by git tag so a host that vendors
 # tinystoragedrivers once can `[patch]` it. Used by `tinybox-drivers`.
 tinystoragedrivers-core = { version = "1.0.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", tag = "v1.0.0" }
@@ -75,7 +75,7 @@ tinystoragedrivers-core = { version = "1.0.0", git = "https://github.com/tinyhum
 # tests.
 tinystoragedrivers-busproxy = { version = "1.0.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", tag = "v1.0.0" }
 tinystoragedrivers-client = { version = "1.0.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", tag = "v1.0.0" }
-tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.1.32" }
+tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.2.0" }
 
 # Lints apply to every crate in the workspace via `[lints] workspace = true`.
 # CI runs clippy with `-D warnings`, so anything set to "warn" here fails CI.

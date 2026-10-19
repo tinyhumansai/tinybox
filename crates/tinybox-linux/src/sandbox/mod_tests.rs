@@ -5,7 +5,10 @@
 //! then confirms the boundary actually holds against a real kernel — this file
 //! pins the intent, that one pins the reality.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+};
 
 use async_trait::async_trait;
 use tinybox_core::{
@@ -325,6 +328,7 @@ async fn limits_wrap_the_sandbox_in_a_systemd_scope() -> Result<()> {
 
     let argv = host.last();
     assert_eq!(argv.first().map(String::as_str), Some("systemd-run"));
+    assert!(has(&argv, "systemd-run"));
     assert!(has(&argv, "--user"));
     assert!(has(&argv, "--scope"));
     assert!(has(&argv, "--expand-environment=no"));
@@ -414,6 +418,117 @@ async fn failed_systemd_option_probe_refuses_without_launching_workload() -> Res
         *host.seen.lock().unwrap_or_else(PoisonError::into_inner),
         [vec!["systemd-run".to_owned(), "--help".to_owned()]]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fractional_cpu_quota_is_not_rounded_down_to_zero() -> Result<()> {
+    let host = Arc::new(RecordingHost::default());
+    let sandbox =
+        NamespaceSandbox::new(host.clone(), Arc::new(MemoryStore::new())).with_cgroup_limits();
+    let spec = spec()?.with_resources(Resources {
+        cpu_millis: 1,
+        memory_bytes: 64 * 1024 * 1024,
+        pids_max: 16,
+        disk_bytes: 1,
+    });
+    let info = sandbox.create(&spec).await?;
+    sandbox.exec(&info.id, &ExecRequest::new(["true"])).await?;
+    let argv = host.last();
+    assert!(has(&argv, "CPUQuota=0.1%"));
+    assert!(!has(&argv, "CPUQuota=0%"));
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let cwd = root.path().join("work");
+    std::fs::create_dir(&cwd)?;
+    let grant = root.path().join("read-only");
+    std::fs::create_dir(&grant)?;
+    let argv = crate::native_jail_argv(&crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd,
+        read_only: vec![grant.clone()],
+        read_write: Vec::new(),
+        deny_read: Vec::new(),
+        allow_net: false,
+        allow_subprocess: true,
+        cpu_millis: Some(1),
+        memory_bytes: Some(64 * 1024 * 1024),
+        pids_max: Some(16),
+        argv: vec!["/usr/bin/env".into()],
+        env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
+    })?;
+    assert_eq!(argv.first().map(String::as_str), Some("/bin/bash"));
+    assert!(has(&argv, "--property=CPUQuota=0.1%"));
+    assert!(has(&argv, "--property=MemoryMax=67108864"));
+    assert!(has(&argv, "--property=MemorySwapMax=0"));
+    assert!(has(&argv, "--property=TasksMax=16"));
+    assert!(has(&argv, "--unshare-cgroup"));
+    assert!(has(&argv, "--unshare-net"));
+    assert!(has(&argv, "--tmpfs"));
+    assert!(has(&argv, "/run"));
+    assert!(has(&argv, "/sys"));
+    assert!(has(&argv, "--ro-bind"));
+    assert!(has(&argv, grant.to_str().ok_or("grant path is not UTF-8")?));
+    assert!(has(&argv, "BASH_ENV"));
+    let systemd_end = argv
+        .iter()
+        .position(|part| part == "--")
+        .ok_or("missing systemd delimiter")?;
+    assert!(
+        !argv[..systemd_end]
+            .iter()
+            .any(|part| part.contains("BASH_ENV"))
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let cwd = root.path().join("work");
+    std::fs::create_dir(&cwd)?;
+    let request = || crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd: cwd.clone(),
+        read_only: Vec::new(),
+        read_write: Vec::new(),
+        deny_read: Vec::new(),
+        allow_net: false,
+        allow_subprocess: true,
+        cpu_millis: Some(1000),
+        memory_bytes: None,
+        pids_max: None,
+        argv: vec!["/bin/true".into()],
+        env: BTreeMap::new(),
+    };
+
+    let mut invalid = request();
+    invalid.argv.clear();
+    assert!(crate::native_jail_argv(&invalid).is_err());
+
+    let mut invalid = request();
+    invalid.cpu_millis = Some(0);
+    assert!(crate::native_jail_argv(&invalid).is_err());
+
+    let mut invalid = request();
+    invalid.cpu_millis = None;
+    assert!(crate::native_jail_argv(&invalid).is_err());
+
+    let mut unsupported = request();
+    unsupported.allow_net = true;
+    assert!(crate::native_jail_argv(&unsupported).is_err());
+
+    let mut unsupported = request();
+    unsupported.allow_subprocess = false;
+    assert!(crate::native_jail_argv(&unsupported).is_err());
     Ok(())
 }
 

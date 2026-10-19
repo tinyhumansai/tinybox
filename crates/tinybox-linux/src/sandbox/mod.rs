@@ -11,7 +11,7 @@ use tinybox_core::{
 
 mod args;
 
-pub use args::WORKSPACE_MOUNT;
+pub use args::{NativeJailCommand, WORKSPACE_MOUNT, native_jail_argv};
 
 /// The name this sandbox registers under.
 pub const NAME: &str = "namespace";

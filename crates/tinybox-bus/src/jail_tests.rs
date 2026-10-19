@@ -66,3 +66,37 @@ fn native_resource_limits_are_optional_typed_and_round_trip() -> Result<(), serd
     assert_eq!(serde_json::to_value(config)?, request);
     Ok(())
 }
+
+#[test]
+fn native_jail_21_resource_subset_is_additive_and_keeps_disk_explicit()
+-> Result<(), serde_json::Error> {
+    let jail = NativeJailConfig {
+        read_only: vec![],
+        read_write: vec![],
+        allow_net: false,
+        allow_subprocess: true,
+        enforcement: JailEnforcement::Enforced,
+        require_process_isolation: true,
+        deny_read: vec![],
+        resources: None,
+    };
+    let request = NativeJailRequest {
+        jail: jail.clone(),
+        resources: Some(NativeJailResourceRequest {
+            cpu_millis: Some(1),
+            memory_bytes: Some(64 * 1024 * 1024),
+            pids_max: Some(16),
+            disk_bytes: Some(1024),
+        }),
+    };
+    let encoded = serde_json::to_value(&request)?;
+    let decoded: NativeJailRequest = serde_json::from_value(encoded.clone())?;
+    assert_eq!(decoded, request);
+    assert_eq!(decoded.jail, jail);
+    assert_eq!(
+        decoded.resources.and_then(|limits| limits.disk_bytes),
+        Some(1024)
+    );
+    assert_eq!(crate::NATIVE_JAIL_RESOURCES_VERSION, (2, 1));
+    Ok(())
+}

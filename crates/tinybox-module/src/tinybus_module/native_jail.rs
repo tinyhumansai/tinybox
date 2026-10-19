@@ -1,9 +1,11 @@
 //! Validate approved native grants before reserving or starting a child.
 use std::{
+    ffi::OsString,
     path::{Component, Path},
-    sync::Arc,
+    process::{Child, Command},
+    sync::{Arc, Mutex},
 };
-use tinybox_bus::{JailEnforcement, NativeJailConfig};
+use tinybox_bus::{JailEnforcement, NativeJailConfig, NativeJailRequest};
 use tinybox_jail::{Jail, JailBackend};
 use tinybus::{Error, Result};
 
@@ -225,6 +227,196 @@ fn unavailable() -> Error {
     )
 }
 
+/// A private backend whose sole accepted command is the validated launcher
+/// constructed by `prepare_with_resources`. It is created per execution and
+/// consumes that command exactly once at spawn.
+struct NativeResourceBackend {
+    expected: Mutex<Option<Vec<OsString>>>,
+    requested: Mutex<Option<tinybox_bus::NativeJailResourceRequest>>,
+}
+
+impl NativeResourceBackend {
+    fn new() -> Self {
+        Self {
+            expected: Mutex::new(None),
+            requested: Mutex::new(None),
+        }
+    }
+
+    fn bind(&self, argv: &[String]) -> Result<()> {
+        let mut expected = self.expected.lock().map_err(|_| unavailable())?;
+        if expected.is_some() {
+            return Err(unavailable());
+        }
+        *expected = Some(argv.iter().map(OsString::from).collect());
+        Ok(())
+    }
+
+    fn bind_resources(&self, resources: tinybox_bus::NativeJailResourceRequest) -> Result<()> {
+        let mut requested = self.requested.lock().map_err(|_| unavailable())?;
+        if requested.is_some() {
+            return Err(unavailable());
+        }
+        *requested = Some(resources);
+        Ok(())
+    }
+}
+
+impl JailBackend for NativeResourceBackend {
+    fn name(&self) -> &'static str {
+        "tinybox-linux-native-resources"
+    }
+
+    fn is_available(&self) -> bool {
+        cfg!(target_os = "linux")
+            && executable_on_path("bwrap")
+            && executable_on_path("systemd-run")
+    }
+
+    fn isolation(&self) -> tinybox_core::IsolationLevel {
+        tinybox_core::IsolationLevel::Kernel
+    }
+
+    fn is_suitable_for_untrusted_code(&self) -> bool {
+        true
+    }
+
+    fn carves_denials(&self) -> bool {
+        true
+    }
+
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+        ConstraintSupport::NONE
+            .with(Constraint::Filesystem, Enforcement::Enforced)
+            .with(Constraint::Network, Enforcement::Enforced)
+            .with(Constraint::Subprocess, Enforcement::Enforced)
+            .with(Constraint::Cpu, Enforcement::Enforced)
+            .with(Constraint::Memory, Enforcement::Enforced)
+            .with(Constraint::Pids, Enforcement::Enforced)
+            .with(Constraint::Disk, Enforcement::Unsupported)
+    }
+
+    fn spawn(&self, jail: &Jail, mut cmd: Command) -> std::io::Result<Child> {
+        if jail.resources.is_some()
+            || self
+                .requested
+                .lock()
+                .map_err(|_| std::io::Error::other("native resource request lock poisoned"))?
+                .is_none()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "resource backend requires a 2.1 native request",
+            ));
+        }
+        let mut actual = vec![cmd.get_program().to_os_string()];
+        actual.extend(cmd.get_args().map(std::ffi::OsStr::to_os_string));
+        let mut expected = self
+            .expected
+            .lock()
+            .map_err(|_| std::io::Error::other("resource launcher plan lock poisoned"))?;
+        if expected.take().as_deref() != Some(actual.as_slice()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "native resource launcher differs from validated plan",
+            ));
+        }
+        // The trusted supervisor shim closes inherited descriptors above
+        // stdio before starting the resource launcher. The live manager-FD
+        // escape test pins this behavior.
+        // JailLocalHost clears inherited variables before installing this
+        // fixed launcher environment. The target environment is carried only
+        // inside bubblewrap after its namespaces are active.
+        cmd.spawn()
+    }
+}
+
+fn executable_on_path(name: &str) -> bool {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join(name))
+        .any(|path| path.is_file())
+}
+
+fn prepare_with_resources(
+    root: &Path,
+    request: &NativeJailRequest,
+    command: &mut tinybox_core::ExecRequest,
+    backend: &NativeResourceBackend,
+) -> Result<Jail> {
+    let resources = request.resources.ok_or_else(invalid)?;
+    if request.jail.resources.is_some() || resources.disk_bytes.is_some() {
+        return Err(unavailable());
+    }
+    if [
+        resources.cpu_millis,
+        resources.memory_bytes,
+        resources.pids_max,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value == 0)
+        || (resources.cpu_millis.is_none()
+            && resources.memory_bytes.is_none()
+            && resources.pids_max.is_none())
+    {
+        return Err(invalid());
+    }
+    backend.bind_resources(resources)?;
+    let jail = prepare(root, &request.jail, command, backend)?;
+    if request.jail.allow_net || !request.jail.allow_subprocess {
+        return Err(unavailable());
+    }
+    let cwd = command.cwd.as_ref().ok_or_else(invalid)?;
+    let native = tinybox_linux::NativeJailCommand {
+        root: jail.root.clone(),
+        cwd: cwd.canonicalize().map_err(|_| invalid())?,
+        read_only: jail.read_only.clone(),
+        read_write: jail.read_write.clone(),
+        deny_read: jail.deny_read.clone(),
+        allow_net: jail.allow_net,
+        allow_subprocess: jail.allow_subprocess,
+        cpu_millis: resources.cpu_millis,
+        memory_bytes: resources.memory_bytes,
+        pids_max: resources.pids_max,
+        argv: command.argv.clone(),
+        env: command
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    };
+    let argv = tinybox_linux::native_jail_argv(&native).map_err(|_| unavailable())?;
+    backend.bind(&argv)?;
+    command.argv = argv;
+    command.env = launcher_environment();
+    command.cwd = None;
+    Ok(jail)
+}
+
+fn launcher_environment() -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    for key in [
+        "PATH",
+        "HOME",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "SYSTEMD_BUS_ADDRESS",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+    ] {
+        if let Some(value) = std::env::var_os(key).and_then(|value| value.into_string().ok()) {
+            env.insert(key.to_owned(), value);
+        }
+    }
+    env
+}
+
+fn resource_backend() -> Arc<NativeResourceBackend> {
+    Arc::new(NativeResourceBackend::new())
+}
+
 /// Create an owned collector only after the native jail passes preflight.
 pub(super) fn collector(
     root: &Path,
@@ -233,6 +425,19 @@ pub(super) fn collector(
     backend: Arc<dyn JailBackend>,
 ) -> Result<Arc<tinybox_host::JailLocalHost>> {
     let jail = prepare(root, config, command, backend.as_ref())?;
+    tinybox_host::JailLocalHost::with_backend(jail, backend, tinybox_bus::MAX_OUTPUT_BYTES)
+        .map(Arc::new)
+        .map_err(|_| unavailable())
+}
+
+/// Create an owned collector for a separately negotiated contract 2.1 request.
+pub(super) fn collector_with_resources(
+    root: &Path,
+    request: &NativeJailRequest,
+    command: &mut tinybox_core::ExecRequest,
+) -> Result<Arc<tinybox_host::JailLocalHost>> {
+    let backend = resource_backend();
+    let jail = prepare_with_resources(root, request, command, backend.as_ref())?;
     tinybox_host::JailLocalHost::with_backend(jail, backend, tinybox_bus::MAX_OUTPUT_BYTES)
         .map(Arc::new)
         .map_err(|_| unavailable())

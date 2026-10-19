@@ -36,7 +36,6 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | IsRunning | ProcessRef | bool |
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
-| AnalyzeCommand | String | CommandAnalysis |
 | BeginFileRead | BeginFileReadRequest | FileReadInfo |
 | ReadFileChunk | ReadFileChunkRequest | FileChunk |
 | FinishFileRead | FinishFileReadRequest | unit |
@@ -56,24 +55,26 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | KillStdio | ProcessRef | () |
 | StdioStatus | ProcessRef | StdioStatus |
 
-Capabilities advertises contract version 1.22; 1.0 denotes the original
-discovery-only surface. Hosts require equal majors and a module minor at least
-as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
-added reserved resource/process ownership and terminal shutdown; 1.2 adds host
-selection, sandbox networking/resource/port inputs, effective published-port
-facts, and module-owned forwarding. Version 1.3 adds `JailStatus`, which reports
-the detected native directory-jail backend's availability, process isolation,
-and filesystem, network, and subprocess enforcement. The module probes the
-backend; the host applies its own policy to the returned facts. This version is independent of
-package/artifact releases. Version 1.4 adds `AnalyzeCommand`, which returns
-command classes and executor and environment-guard signals alongside parsed
-shell structure. The command classes, executor list, environment guard, and
-`AnalyzeShell.hidden_execution` are deprecated policy vocabulary: command
-policy belongs to TinySecurity. Contract 1.22 is the final one-release
-deprecation window for these fields and method. The next contract major removes
-them; hosts must bind to the matching major and must not rely on this legacy
-vocabulary for policy. Generic shell structure scanning and shell transport
-helpers remain. Describe remains unchanged.
+Capabilities advertises contract version 2.0. Hosts require equal majors and a
+module minor at least as new as their vocabulary, using
+`tinybox_bus::is_compatible`. Contract 1.0 was the original discovery-only
+surface; 1.1 added reserved resource/process ownership and terminal shutdown;
+1.2 added host selection, sandbox networking/resource/port inputs, effective
+published-port facts, and module-owned forwarding. Version 1.3 adds
+`JailStatus`, which reports the detected native directory-jail backend's
+availability, process isolation, and filesystem, network, and subprocess
+enforcement. The module probes the backend; the host applies its own policy to
+the returned facts. This version is independent of package/artifact releases.
+
+Contract 1.22 was the one-release deprecation window for `AnalyzeCommand`,
+`CommandClass`, command classification fields, executor/environment-guard
+signals, and `AnalyzeShell.hidden_execution`. Contract 2.0 removes those policy
+results. `AnalyzeShell` retains only generic shell structure: live segments
+after quoted heredoc bodies are removed and whether an unquoted output redirect
+occurs outside heredoc data. TinySecurity owns command classification and
+execution policy. Old 1.x hosts must reject a 2.x module; there is no fallback
+that applies or reconstructs command policy in TinyBox. Describe remains
+unchanged.
 
 Version 1.5 adds bounded file transfer for mounted directory workspaces.
 Reserve `FileRead(resource)` or `FileWrite(resource)` before opening a transfer.
@@ -228,11 +229,11 @@ Spawn/Cancel cycles impose no lifetime admission limit and keep no history sets.
 Collected commands use LimitedLocalHost with a combined 1 MiB stdout/stderr
 budget enforced during reading; overflow fails rather than truncating output.
 
-AnalyzeShell removes quoted heredoc bodies before segment analysis. Its
-redirection fact ignores all heredoc bodies, while hidden-execution analysis
-retains expansion-aware behavior for unquoted bodies. It returns segments and
-hidden-execution/redirection facts. Authorization,
-credential/path restrictions, and access-tier decisions remain host policy.
+AnalyzeShell removes quoted heredoc bodies before segment analysis and ignores
+all heredoc bodies when scanning for output redirection. It returns only live
+segments and a redirection fact; it makes no authorization or command-policy
+decision. Authorization, credential/path restrictions, and access-tier
+decisions remain host policy.
 Errors use the stable dotted names declared in `tinybox-bus`; backend failures
 retain the underlying diagnostic without exposing native handles.
 
@@ -256,14 +257,11 @@ partial constraints; `Declared` requires an explicit host decision using
 `JailStatus`. Neither mode admits the no-op or unavailable backend. A caller
 requiring the process-isolation security floor sets `require_process_isolation`.
 The host retains approval policy and chooses the credential paths; it sends them
-as `deny_read` (1.20). The module retains prospective paths and resolves them
-against current filesystem aliases both at preflight and immediately before
-spawn. It refuses a denial covering the root or a writable grant. Seatbelt can
-carve a nested denial out of a writable grant; allow-list backends refuse any
-overlap they cannot subtract. Landlock reports its implicit system and device
-baseline grants so credential denials cannot be overridden by those grants;
-direct Landlock backend calls repeat this check at spawn. Paths outside every
-grant remain default-denied on allow-list backends.
+as `deny_read` (1.20), which the module canonicalizes (dropping paths that do not
+exist) and refuses when a denial covers the root or a writable grant, or lies
+inside the root or a grant on a backend that cannot subtract from grants.
+Seatbelt denies them last in its profile; Landlock and `AppContainer` never grant
+them.
 
 The jail owns a separate native collector for each execution. Output replay,
 Cancel, ReleaseOutput, Close and Shutdown use the same retained cleanup barriers
@@ -422,3 +420,7 @@ the previous request behavior. Supplying limits makes each one a hard
 preflight requirement; native jail backends currently declare those controls
 unsupported and refuse before starting the child. See
 `docs/specs/contract-1-22.md`.
+
+Version 2.0 removes TinyBox command classification and execution-policy results
+after the contract 1.22 deprecation window. Hosts must reject modules from a
+different contract major. See `docs/specs/contract-2-0.md`.

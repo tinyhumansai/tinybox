@@ -1,4 +1,4 @@
-//! Turning an argument vector into something a POSIX shell will not mangle.
+//! Shell transport and structural scanning helpers.
 //!
 //! # Why this exists at all
 //!
@@ -17,10 +17,11 @@
 //! re-established by hand, which makes it the one place where a bug is a
 //! command-injection bug. It lives in core, and is public, so that it stays
 //! *one* place: a second copy is a second chance to get it wrong, and the two
-//! callers are in different crates. Every function here is pure, so every case
-//! can be pinned in a test.
+//! callers are in different crates. These helpers do not classify commands or
+//! make authorization decisions. Generic shell structure scanning lives in
+//! [`scan`]. Every function here is pure, so every case can be pinned in a test.
 
-pub mod analysis;
+pub mod scan;
 
 /// Wrap one argument so a POSIX shell reproduces it exactly.
 ///
@@ -95,29 +96,7 @@ pub fn script(
     parts.join(" ")
 }
 
-#[deprecated(
-    since = "0.1.34",
-    note = "command policy belongs to tinysecurity-policy (tinysecurity command_shell::classify); tinybox only reports shell structure through `analysis`. Removed in the release after 0.1.34."
-)]
-pub mod classify;
-#[deprecated(
-    since = "0.1.34",
-    note = "command policy belongs to tinysecurity-policy (tinysecurity env guard); tinybox only reports shell structure through `analysis`. Removed in the release after 0.1.34."
-)]
-pub mod env_guard;
-pub mod executor;
-#[deprecated(
-    since = "0.1.34",
-    note = "command policy belongs to tinysecurity-policy (tinysecurity command_shell::scan); tinybox only reports shell structure through `analysis`. Removed in the release after 0.1.34."
-)]
-pub mod scan;
-
 #[cfg(test)]
-#[allow(deprecated)]
-#[path = "classify_tests.rs"]
-mod classify_test;
-#[cfg(test)]
-#[allow(deprecated)]
 #[path = "scan_tests.rs"]
 mod scan_test;
 #[cfg(test)]

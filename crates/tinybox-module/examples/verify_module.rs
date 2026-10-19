@@ -100,26 +100,14 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
     {
         return Err(io::Error::other("invalid native jail enforcement facts").into());
     }
-    let facts: tinybox_bus::CommandAnalysis = proxy
-        .call("AnalyzeCommand", ("echo hello".to_owned(),))
-        .await?;
-    if facts.segments.len() != 1
-        || facts.segments[0].class != tinybox_bus::CommandClass::Read
-        || facts.literal_words != ["echo", "hello"]
-        || facts.hidden_execution
-        || facts.redirection
-        || facts.expansion
-        || facts.background
-    {
-        return Err(io::Error::other("unexpected command classification facts").into());
-    }
-    // Exercise real resource ownership through the loaded native artifact.
+    // Verify generic shell structure only; command policy belongs to TinySecurity.
     let analysis: ShellAnalysis = proxy
         .call("AnalyzeShell", ("echo hello".to_owned(),))
         .await?;
-    if analysis.hidden_execution || analysis.redirection {
+    if analysis.segments != ["echo hello"] || analysis.redirection {
         return Err(io::Error::other("unexpected shell analysis").into());
     }
+    // Exercise real resource ownership through the loaded native artifact.
     if capabilities
         .create_backends
         .iter()

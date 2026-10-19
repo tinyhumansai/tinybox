@@ -49,8 +49,9 @@ tinybox accepts a plan, enforces it, and reports events. It never decides what
 is allowed: approval, audit decisions, redaction and command classification
 belong to `tinysecurity`. A backend that cannot enforce a requested constraint
 refuses with `Unsupported`/`ConstraintNotEnforced` or reports `BestEffort`; it
-never degrades silently. `tinybox_core::shell::{classify, scan, env_guard}` is
-deprecated for that reason and is removed after 0.1.34.
+never degrades silently. Contract 2.0 removes TinyBox's command classifier,
+executor list, and environment guard. `tinybox_core::shell::scan` remains only
+for generic shell structure parsing; it makes no policy decisions.
 
 Every crate the spec names now exists. Do not scaffold an empty one; that is a
 placeholder.

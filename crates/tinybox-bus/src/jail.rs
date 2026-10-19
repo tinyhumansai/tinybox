@@ -38,6 +38,36 @@ pub struct NativeJailConfig {
     pub resources: Option<crate::ResourceLimits>,
 }
 
+/// Hard resource limits requested by the contract 2.1 native jail members.
+/// Each dimension is independently optional so a backend can enforce a real
+/// supported subset without weakening a requested limit. Disk is represented
+/// explicitly so implementations must refuse it when they cannot enforce it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeJailResourceRequest {
+    /// CPU budget in thousandths of one CPU (for example, 1 is 0.1%).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u64>,
+    /// Maximum resident memory in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    /// Maximum number of processes and threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids_max: Option<u64>,
+    /// Maximum writable disk bytes. Backends without a hard disk quota refuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+}
+
+/// Source-compatible extension of [`NativeJailConfig`] for contract 2.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeJailRequest {
+    /// Existing filesystem, network and process jail configuration.
+    pub jail: NativeJailConfig,
+    /// Additional hard resource dimensions; any explicit unsupported one fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<NativeJailResourceRequest>,
+}
+
 #[cfg(test)]
 #[path = "jail_tests.rs"]
 mod tests;

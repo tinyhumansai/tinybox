@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-bus"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-cli"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-core"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-docker"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-drivers"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "log",
  "serde",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-host"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cap-std",
@@ -1372,23 +1372,21 @@ dependencies = [
 
 [[package]]
 name = "tinybox-jail"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "landlock",
  "log",
- "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
  "tinybox-bus",
  "tinybox-core",
- "tinybox-linux",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "tinybox-linux"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -1399,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-microvm"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1412,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-module"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "log",
@@ -1439,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-ssh"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -1453,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "tinybox-sync"
-version = "0.1.40"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",

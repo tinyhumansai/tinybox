@@ -37,13 +37,17 @@ in-memory bus.
 `tinybox-bus` supplies the serialized vocabulary without TinyBus, Tokio, native
 backends, or optional implementation dependencies. The original Describe wire
 arity and result remain unchanged. Reserve, Capabilities, Shutdown, Create,
-Exec, Inspect, Close, Spawn, IsRunning, Cancel, and AnalyzeShell are additive
-methods documented in the
+Exec, Inspect, Close, Spawn, IsRunning, Cancel, and AnalyzeShell are methods
+documented in the
 [module interface](../../crates/tinybox-module/src/tinybus_module/README.md).
 Native providers and opaque resource ownership stay in the module. Backends
 are selected explicitly and unsupported requests never downgrade isolation.
 Host authorization precedes calls; shell analysis returns structural facts.
 Hosts reserve before Create/Spawn and await terminal Shutdown before ABI unload.
+
+Contract 2.0 is a breaking major version: it removes command-policy methods
+and results. Hosts must match the module's contract major before calling it;
+TinyBox does not provide a fallback for removed command policy.
 
 Publishing the source contract does not publish a compatible native artifact.
 Consumers must retain their current gitlinks until a release includes this

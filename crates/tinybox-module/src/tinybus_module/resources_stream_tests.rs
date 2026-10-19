@@ -1311,3 +1311,272 @@ async fn concurrent_preparations_share_a_bounded_admission_budget()
     );
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn resource_aware_bus_exec_cancellation_reports_events_and_reaps_descendants()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    if !native_resource_bus_available() {
+        eprintln!("skipped: rootless systemd scope and bubblewrap namespaces are unavailable");
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let resources = Resources::default();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(root.path().display().to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let python = detached_descendant_script();
+    let cancel_file = root.path().join("cancelled-descendant");
+    let cancelled =
+        start_resource_descendant(&resources, &resource, root.path(), &cancel_file, &python)
+            .await?;
+    let (cancel_pid, cancel_ns) =
+        wait_for_resource_descendant(&resources, &cancelled, &cancel_file, true).await?;
+    assert!(
+        process_in_namespace(cancel_pid, cancel_ns)?,
+        "fixture descendant was not visible before cancellation"
+    );
+    cancel_resource_descendant(&resources, &cancelled, cancel_pid, cancel_ns).await?;
+    resources.release_output(&cancelled).await?;
+
+    let destroy_file = root.path().join("destroyed-descendant");
+    let destroyed =
+        start_resource_descendant(&resources, &resource, root.path(), &destroy_file, &python)
+            .await?;
+    let (destroy_pid, destroy_ns) =
+        wait_for_resource_descendant(&resources, &destroyed, &destroy_file, false).await?;
+    assert!(
+        process_in_namespace(destroy_pid, destroy_ns)?,
+        "fixture descendant was not visible before destroy"
+    );
+    resources.close(&resource).await?;
+    assert!(
+        !process_in_namespace(destroy_pid, destroy_ns)?,
+        "resource destroy left a detached namespace process alive"
+    );
+    resources.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn native_resource_bus_available() -> bool {
+    use std::{os::unix::fs::FileTypeExt, process::Command};
+    let bus = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+        .ok()
+        .and_then(|address| address.strip_prefix("unix:path=").map(str::to_owned))
+        .is_some_and(|path| {
+            std::fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket())
+        });
+    let scope = Command::new("systemd-run")
+        .args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "--property=MemoryMax=67108864",
+            "--property=MemorySwapMax=0",
+            "--property=OOMPolicy=continue",
+            "--property=CPUQuota=100%",
+            "--property=TasksMax=16",
+            "--",
+            "/bin/true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    let namespaces = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-net",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/lib",
+            "/lib",
+            "--symlink",
+            "usr/lib64",
+            "/lib64",
+            "--",
+            "/usr/bin/true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    let available = bus && scope && namespaces;
+    if std::env::var_os("TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS").is_some() {
+        assert!(available, "required native resource runtime is unavailable");
+    }
+    available
+}
+
+#[cfg(target_os = "linux")]
+fn detached_descendant_script() -> String {
+    "import os,time,sys\nfirst=os.fork()\nif first == 0:\n os.setsid()\n second=os.fork()\n if second == 0:\n  with open(sys.argv[1],'w') as f: f.write(f'{os.getpid()} {os.stat(\"/proc/self/ns/pid\").st_ino}')\n  while True: time.sleep(1)\n os._exit(0)\nos.waitpid(first,0)\nwhile not os.path.exists(sys.argv[1]) or os.path.getsize(sys.argv[1]) == 0: time.sleep(0.01)\nprint('stdout-ready',flush=True)\nprint('stderr-ready',file=sys.stderr,flush=True)\ntime.sleep(600)".into()
+}
+
+#[cfg(target_os = "linux")]
+async fn start_resource_descendant(
+    resources: &Resources,
+    resource: &ResourceId,
+    root: &std::path::Path,
+    pid_file: &std::path::Path,
+    python: &str,
+) -> std::result::Result<ProcessRef, Box<dyn std::error::Error>> {
+    let process_id = resources
+        .reserve(ReserveRequest::Process(resource.clone()))
+        .await?;
+    let process = ProcessRef {
+        resource: resource.clone(),
+        process: process_id.clone(),
+    };
+    resources
+        .start_jailed_exec_with_resources(
+            SpawnRequest {
+                process: process_id,
+                command: ExecRequest {
+                    resource: resource.clone(),
+                    argv: vec![
+                        "python3".into(),
+                        "-c".into(),
+                        python.into(),
+                        pid_file.display().to_string(),
+                    ],
+                    cwd: Some(root.display().to_string()),
+                    env: std::collections::BTreeMap::default(),
+                    stdin: None,
+                },
+            },
+            tinybox_bus::NativeJailRequest {
+                jail: tinybox_bus::NativeJailConfig {
+                    read_only: vec![],
+                    read_write: vec![],
+                    allow_net: false,
+                    allow_subprocess: true,
+                    enforcement: tinybox_bus::JailEnforcement::Enforced,
+                    require_process_isolation: true,
+                    deny_read: vec![],
+                    resources: None,
+                },
+                resources: Some(tinybox_bus::NativeJailResourceRequest {
+                    cpu_millis: Some(1000),
+                    memory_bytes: Some(64 * 1024 * 1024),
+                    pids_max: Some(16),
+                    disk_bytes: None,
+                }),
+            },
+        )
+        .await?;
+    Ok(process)
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_resource_descendant(
+    resources: &Resources,
+    process: &ProcessRef,
+    pid_file: &std::path::Path,
+    check_streams: bool,
+) -> std::result::Result<(i32, u64), Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let batch = resources.read_output(process, 0).await?;
+        let stream_has = |stream, marker: &[u8]| {
+            let bytes: Vec<_> = batch
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.stream == stream)
+                .flat_map(|chunk| chunk.bytes.iter().copied())
+                .collect();
+            bytes.windows(marker.len()).any(|window| window == marker)
+        };
+        let streams_ready = !check_streams
+            || (stream_has(tinybox_bus::OutputStream::Stdout, b"stdout-ready")
+                && stream_has(tinybox_bus::OutputStream::Stderr, b"stderr-ready"));
+        if streams_ready && std::fs::metadata(pid_file).is_ok() {
+            let identity = std::fs::read_to_string(pid_file)?;
+            let mut parts = identity.split_whitespace();
+            return Ok((
+                parts.next().ok_or("missing detached PID")?.parse()?,
+                parts.next().ok_or("missing PID namespace")?.parse()?,
+            ));
+        }
+        if batch.state != ExecutionState::Running || tokio::time::Instant::now() >= deadline {
+            return Err(
+                format!("native bus exec failed before descendant identity: {batch:?}").into(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn cancel_resource_descendant(
+    resources: &Resources,
+    process: &ProcessRef,
+    pid: i32,
+    namespace: u64,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    resources.cancel(process).await?;
+    let cancelled = resources.read_output(process, 0).await?;
+    assert_eq!(cancelled.state, ExecutionState::Cancelled);
+    assert!(
+        cancelled
+            .chunks
+            .iter()
+            .any(|chunk| chunk.stream == tinybox_bus::OutputStream::Stdout)
+            && cancelled
+                .chunks
+                .iter()
+                .any(|chunk| chunk.stream == tinybox_bus::OutputStream::Stderr),
+        "cancellation must preserve both output streams"
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while process_in_namespace(pid, namespace)? {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("bus cancellation left a detached namespace process alive".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn process_in_namespace(pid: i32, namespace_inode: u64) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let Ok(namespace) = std::fs::read_link(entry.path().join("ns/pid")) else {
+            continue;
+        };
+        let same_pid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))
+            .and_then(|pids| pids.split_whitespace().last())
+            .and_then(|pid| pid.parse::<i32>().ok())
+            == Some(pid);
+        let same_namespace = namespace
+            .to_string_lossy()
+            .strip_prefix("pid:[")
+            .and_then(|inode| inode.strip_suffix(']'))
+            .and_then(|inode| inode.parse::<u64>().ok())
+            == Some(namespace_inode);
+        if same_pid && same_namespace {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
