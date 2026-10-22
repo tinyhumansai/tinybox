@@ -112,7 +112,7 @@ fn configure_denials_and_resources(
         return Err(invalid());
     }
     backend
-        .validate_carved_denials(&jail)
+        .validate_carved_denials(jail)
         .map_err(|_| invalid())?;
     if !backend.carves_denials() {
         let mut implicit_grants = Vec::new();
