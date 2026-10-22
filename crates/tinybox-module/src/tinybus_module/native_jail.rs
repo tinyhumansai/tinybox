@@ -61,6 +61,34 @@ pub(super) fn prepare(
         .extend(unix_grants(&config.unix_paths.read_only)?);
     jail.read_write
         .extend(unix_grants(&config.unix_paths.read_write)?);
+    configure_denials_and_resources(&mut jail, config, backend)?;
+    if config.require_process_isolation && !backend.is_suitable_for_untrusted_jail(&jail) {
+        return Err(unavailable());
+    }
+    backend
+        .require_resources(&jail)
+        .map_err(|_| unavailable())?;
+    match config.enforcement {
+        JailEnforcement::Enforced => backend.require(&jail).map_err(|_| unavailable())?,
+        JailEnforcement::Declared => {
+            if backend
+                .plan_check(&jail)
+                .constraints
+                .iter()
+                .any(|(_, support)| *support == tinybox_core::Enforcement::Unsupported)
+            {
+                return Err(unavailable());
+            }
+        }
+    }
+    Ok(jail)
+}
+
+fn configure_denials_and_resources(
+    jail: &mut Jail,
+    config: &NativeJailConfig,
+    backend: &dyn JailBackend,
+) -> Result<()> {
     jail.deny_read = denials(&config.deny_read)?;
     jail.resources = config.resources.map(|limits| tinybox_core::Resources {
         cpu_millis: limits.cpu_millis,
@@ -103,27 +131,9 @@ pub(super) fn prepare(
             return Err(unavailable());
         }
     }
-    if config.require_process_isolation && !backend.is_suitable_for_untrusted_jail(&jail) {
-        return Err(unavailable());
-    }
-    backend
-        .require_resources(&jail)
-        .map_err(|_| unavailable())?;
-    match config.enforcement {
-        JailEnforcement::Enforced => backend.require(&jail).map_err(|_| unavailable())?,
-        JailEnforcement::Declared => {
-            if backend
-                .plan_check(&jail)
-                .constraints
-                .iter()
-                .any(|(_, support)| *support == tinybox_core::Enforcement::Unsupported)
-            {
-                return Err(unavailable());
-            }
-        }
-    }
-    Ok(jail)
+    Ok(())
 }
+
 /// Validate and canonicalize byte-preserving Unix grant paths.
 fn unix_grants(paths: &[Vec<u8>]) -> Result<Vec<std::path::PathBuf>> {
     if paths.is_empty() {
