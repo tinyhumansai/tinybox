@@ -394,6 +394,18 @@ impl Sandbox for DockerSandbox {
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
         spec.network.refuse_allowlist(self.name())?;
+        // The workspace is bind-mounted read-write, so it gets the one-shot
+        // mount policy before any record or container exists.
+        // ponytail: through an SSH host the daemon's filesystem is remote, so
+        // only the lexical checks apply; resolve on that host if it matters.
+        if let tinybox_core::WorkspaceSource::LocalDir(path) = &spec.source
+            && path.to_str().is_none_or(crate::policy::is_dangerous_mount)
+        {
+            return Err(Error::UnsupportedWorkspaceSource {
+                sandbox: NAME.to_owned(),
+                kind: "dangerous host directory",
+            });
+        }
         let attempt = uuid::Uuid::new_v4().to_string();
         // Claim the record first. A container is expensive to create and has to
         // be torn down if the record cannot be written, so taking the cheap

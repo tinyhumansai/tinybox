@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Canonicalize the existing ancestor and append missing normal components.
 /// Never treat a dangling symlink or an access failure as a missing directory.
-pub(super) fn canonicalize_missing(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn canonicalize_missing(path: &Path) -> io::Result<PathBuf> {
     if path
         .components()
         .any(|part| matches!(part, Component::ParentDir))

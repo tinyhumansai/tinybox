@@ -29,6 +29,22 @@ fn profile_allow_subprocess_default_has_no_process_deny() {
 }
 
 #[test]
+fn profile_denies_reads_and_writes_of_denied_paths_last() {
+    let mut jail = Jail::new("/Users/a/project", "x");
+    assert!(!render_profile(&jail).contains("file-read*"));
+    jail.deny_read = vec!["/Users/a/.ssh".into(), "/Users/a/.netrc".into()];
+    let p = render_profile(&jail);
+    let denial = p
+        .find("(deny file-read* file-write*")
+        .expect("denied paths are emitted");
+    // After the write allows, so it overrides them.
+    assert!(denial > p.find("(allow file-write*").unwrap());
+    assert!(p[denial..].contains("(subpath \"/Users/a/.ssh\")"));
+    assert!(p[denial..].contains("(subpath \"/Users/a/.netrc\")"));
+    assert!(SeatbeltBackend::new().carves_denials());
+}
+
+#[test]
 fn escape_handles_backslash_and_quote() {
     assert_eq!(escape("a\\b"), "a\\\\b");
     assert_eq!(escape("a\"b"), "a\\\"b");
@@ -235,7 +251,7 @@ fn launcher_preserves_arguments_environment_overrides_and_working_directory() {
         .env("SET", "value")
         .env_remove("REMOVE")
         .current_dir("/work");
-    let wrapper = prepare_command(&jail, &cmd, std::ffi::OsStr::new("launcher"));
+    let wrapper = prepare_command(&jail, &cmd, std::ffi::OsStr::new("launcher")).expect("launcher");
     assert_eq!(wrapper.get_program(), "launcher");
     let args: Vec<_> = wrapper.get_args().collect();
     assert_eq!(
@@ -265,7 +281,8 @@ fn launcher_preserves_arguments_environment_overrides_and_working_directory() {
         &jail,
         &Command::new("true"),
         std::ffi::OsStr::new("launcher"),
-    );
+    )
+    .expect("launcher");
     assert!(defaults.get_current_dir().is_none());
     assert_default_name::<SeatbeltBackend>("seatbelt");
 }
@@ -324,7 +341,7 @@ fn launcher_does_not_restore_inherited_environment_after_env_clear() -> std::io:
         &Jail::new(root.path(), "environment"),
         &cmd,
         launcher.as_os_str(),
-    )
+    )?
     .output()?;
     assert!(output.status.success());
     // The shell may synthesize PWD/SHLVL and other local variables. The
@@ -438,7 +455,7 @@ fn captured_launcher_preserves_all_three_owned_pipes() -> std::io::Result<()> {
     command
         .args(["-c", "cat; printf diagnostic >&2"])
         .env_clear();
-    let mut child = prepare_captured_command(&jail, &command, launcher.as_os_str()).spawn()?;
+    let mut child = prepare_captured_command(&jail, &command, launcher.as_os_str())?.spawn()?;
     let mut input = child
         .stdin
         .take()
@@ -450,4 +467,88 @@ fn captured_launcher_preserves_all_three_owned_pipes() -> std::io::Result<()> {
     assert_eq!(output.stdout, b"owned-input");
     assert_eq!(output.stderr, b"diagnostic");
     Ok(())
+}
+
+#[test]
+fn seatbelt_refuses_a_denial_nested_below_any_writable_path() {
+    let launcher = std::ffi::OsStr::new("launcher");
+    let prepare = |deny: &str| {
+        let mut jail = Jail::new("/work", "nested");
+        jail.read_write = vec!["/data".into()];
+        jail.deny_read = vec![deny.into()];
+        prepare_command(&jail, &Command::new("true"), launcher).map(|_| ())
+    };
+    // A direct child of a writable path, or a path outside every one, holds.
+    for held in [
+        "/work/secret",
+        "/data/secret",
+        "/private/tmp/secret",
+        "/Users/a/.ssh",
+    ] {
+        assert!(prepare(held).is_ok(), "{held}");
+    }
+    // Deeper, `mv <writable>/a <writable>/b` renames the denied path away.
+    for nested in [
+        "/work/a/secret",
+        "/data/a/b/secret",
+        "/private/tmp/a/secret",
+    ] {
+        let error = prepare(nested).expect_err(nested);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{nested}");
+    }
+    let mut jail = Jail::new("/work", "nested");
+    jail.deny_read = vec!["/work/a/secret".into()];
+    assert!(
+        SeatbeltBackend::new()
+            .validate_carved_denials(&jail)
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn seatbelt_refuses_a_non_utf8_denial() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut jail = Jail::new("/work", "lossy");
+    jail.deny_read = vec![std::ffi::OsStr::from_bytes(b"/Users/a/\xff").into()];
+    let error = prepare_command(
+        &jail,
+        &Command::new("true"),
+        std::ffi::OsStr::new("launcher"),
+    )
+    .expect_err("non-UTF-8 denial");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn seatbelt_rename_of_a_parent_cannot_expose_a_nested_denial() {
+    let backend = SeatbeltBackend::new();
+    if !backend.is_available() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path().canonicalize().expect("canonical root");
+    fs::create_dir(root.join("a")).expect("mkdir");
+    fs::write(root.join("a").join("secret"), "nested-denial-secret").expect("write");
+    let mut jail = Jail::new(&root, "test.rename");
+    jail.deny_read = vec![root.join("a").join("secret")];
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", "mv a b && cat b/secret"])
+        .current_dir(&root);
+    // Refused before the child starts; were it started, the rename would
+    // leave `b/secret` outside the profile's path-based deny.
+    match backend.spawn_captured(&jail, cmd) {
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput),
+        Ok(child) => {
+            let output = child.wait_with_output().expect("wait");
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("nested-denial-secret"),
+                "a renamed parent exposed the denied file"
+            );
+        }
+    }
+    assert!(
+        root.join("a").join("secret").exists(),
+        "refused before the rename ran"
+    );
 }

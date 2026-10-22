@@ -5,20 +5,140 @@
 //! the ~500-line guideline.
 
 use super::*;
+use std::sync::Arc;
 use std::time::Duration;
-use tinybox_core::clock::FixedClock;
+use tinybox_core::clock::{Clock, FixedClock, SystemClock};
+use tinystoragedrivers_api::{DocumentStore, Storage, StorageBackend};
+use tinystoragedrivers_testkit::{FaultPlan, MemoryBackend};
+use tinystoragedrivers_types::{CollectionSpec, ErrorKind, Precondition, Scope, WriteOptions};
 
-fn tempdir(tag: &str) -> tempfile::TempDir {
-    tempfile::Builder::new()
+const TEST_INDEX_COLLECTION: &str = "tinybox.test_jail_registry";
+
+fn block_storage<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+#[derive(Debug)]
+struct TestDocumentIndexStore {
+    documents: Arc<dyn DocumentStore>,
+    key: String,
+    faults: Option<FaultPlan>,
+}
+
+impl IndexStore for TestDocumentIndexStore {
+    fn load(&self) -> io::Result<Option<Vec<u8>>> {
+        let documents = Arc::clone(&self.documents);
+        let key = self.key.clone();
+        let record = block_storage(async move { documents.get(TEST_INDEX_COLLECTION, &key).await })
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        record
+            .map(|record| {
+                serde_json::from_value::<Vec<u8>>(record.doc["bytes"].clone())
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            })
+            .transpose()
+    }
+
+    fn save(&self, bytes: &[u8]) -> io::Result<()> {
+        if let Some(faults) = &self.faults {
+            faults
+                .check("save")
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        let documents = Arc::clone(&self.documents);
+        let key = self.key.clone();
+        let body = serde_json::json!({ "bytes": bytes });
+        block_storage(async move {
+            documents
+                .put_with(
+                    TEST_INDEX_COLLECTION,
+                    &key,
+                    body,
+                    Precondition::None,
+                    WriteOptions::new(),
+                )
+                .await
+        })
+        .map(|_| ())
+        .map_err(|error| io::Error::other(error.to_string()))
+    }
+}
+
+#[derive(Debug)]
+struct TestRegistry {
+    directory: tempfile::TempDir,
+    _storage: Storage,
+    store: Arc<TestDocumentIndexStore>,
+}
+
+impl TestRegistry {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn open(&self) -> io::Result<JailRegistry> {
+        self.open_with_clock(Arc::new(SystemClock::new()))
+    }
+
+    fn open_with_clock(&self, clock: Arc<dyn Clock>) -> io::Result<JailRegistry> {
+        JailRegistry::open_with_store(self.path(), clock, self.store.clone())
+    }
+
+    fn open_with_index(&self, store: Arc<dyn IndexStore>) -> io::Result<JailRegistry> {
+        JailRegistry::open_with_store(self.path(), Arc::new(SystemClock::new()), store)
+    }
+
+    fn open_at(&self, path: impl AsRef<Path>) -> io::Result<JailRegistry> {
+        JailRegistry::open_with_store(path, Arc::new(SystemClock::new()), self.store.clone())
+    }
+
+    fn fail_next_save(&self) -> Arc<dyn IndexStore> {
+        let faults = FaultPlan::new();
+        faults.fail_operation_nth("save", 1, ErrorKind::Backend);
+        Arc::new(TestDocumentIndexStore {
+            documents: Arc::clone(&self.store.documents),
+            key: self.store.key.clone(),
+            faults: Some(faults),
+        })
+    }
+}
+
+fn tempdir(tag: &str) -> TestRegistry {
+    let directory = tempfile::Builder::new()
         .prefix(&format!("tinybox-registry-{tag}-"))
         .tempdir()
-        .unwrap()
+        .unwrap();
+    let scope_name = format!("tinybox-registry-test-{tag}-{}", directory.path().display());
+    let scope = Scope::new(&scope_name).unwrap();
+    let backend = MemoryBackend::new();
+    let storage = backend.for_scope(&scope).unwrap();
+    let documents = Arc::clone(storage.documents());
+    block_storage(async {
+        documents
+            .ensure_collection(&CollectionSpec::new(TEST_INDEX_COLLECTION))
+            .await
+    })
+    .unwrap();
+    let store = Arc::new(TestDocumentIndexStore {
+        documents,
+        key: "jail-registry".to_owned(),
+        faults: None,
+    });
+    TestRegistry {
+        directory,
+        _storage: storage,
+        store,
+    }
 }
 
 #[test]
 fn create_list_get_roundtrip() {
     let base = tempdir("crud");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("alpha").unwrap();
     let b = reg.create("beta").unwrap();
     assert_ne!(a.id, b.id);
@@ -33,7 +153,7 @@ fn create_list_get_roundtrip() {
 #[test]
 fn rename_changes_label_not_id_or_dir() {
     let base = tempdir("rename");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("old").unwrap();
     let renamed = reg.rename(&a.id, "new").unwrap();
     assert_eq!(renamed.id, a.id);
@@ -45,7 +165,7 @@ fn rename_changes_label_not_id_or_dir() {
 #[test]
 fn delete_removes_dir_and_record() {
     let base = tempdir("delete");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("doomed").unwrap();
     let dir = a.dir.clone();
     assert!(dir.exists());
@@ -57,20 +177,20 @@ fn delete_removes_dir_and_record() {
 #[test]
 fn delete_persists_removal_after_jail_directory_is_already_missing() {
     let base = tempdir("delete-missing-directory");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let record = reg.create("missing directory").unwrap();
     fs::remove_dir_all(&record.dir).unwrap();
 
     reg.delete(&record.id).unwrap();
 
     assert!(reg.get(&record.id).is_none());
-    assert!(JailRegistry::open(&base).unwrap().list().is_empty());
+    assert!(base.open().unwrap().list().is_empty());
 }
 
 #[test]
 fn delete_missing_errors() {
     let base = tempdir("missing");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let err = reg.delete("nope").unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
 }
@@ -78,10 +198,10 @@ fn delete_missing_errors() {
 #[test]
 fn index_persists_across_reopen() {
     let base = tempdir("persist");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("persistent").unwrap();
     drop(reg);
-    let reg2 = JailRegistry::open(&base).unwrap();
+    let reg2 = base.open().unwrap();
     let listed = reg2.list();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, a.id);
@@ -91,7 +211,7 @@ fn index_persists_across_reopen() {
 #[test]
 fn find_by_label_substring() {
     let base = tempdir("find");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     reg.create("agent-alpha").unwrap();
     reg.create("agent-beta").unwrap();
     reg.create("tool-gamma").unwrap();
@@ -103,7 +223,7 @@ fn find_by_label_substring() {
 #[test]
 fn clear_drops_everything() {
     let base = tempdir("clear");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     reg.create("a").unwrap();
     reg.create("b").unwrap();
     reg.create("c").unwrap();
@@ -115,7 +235,7 @@ fn clear_drops_everything() {
 #[test]
 fn parallel_jails_have_distinct_dirs() {
     let base = tempdir("parallel");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let jails: Vec<_> = (0..5)
         .map(|i| reg.create(format!("p{i}")).unwrap())
         .collect();
@@ -131,7 +251,7 @@ fn parallel_jails_have_distinct_dirs() {
 #[test]
 fn set_notes_roundtrips() {
     let base = tempdir("notes");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("with-notes").unwrap();
     assert!(a.notes.is_none());
     let updated = reg.set_notes(&a.id, Some("hello".into())).unwrap();
@@ -143,7 +263,7 @@ fn set_notes_roundtrips() {
 #[test]
 fn set_notes_on_missing_id_errors() {
     let base = tempdir("notes-missing");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let err = reg.set_notes("nope", Some("x".into())).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
 }
@@ -151,7 +271,7 @@ fn set_notes_on_missing_id_errors() {
 #[test]
 fn rename_on_missing_id_errors() {
     let base = tempdir("rename-missing");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let err = reg.rename("nope", "x").unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
 }
@@ -159,7 +279,7 @@ fn rename_on_missing_id_errors() {
 #[test]
 fn delete_twice_second_is_not_found() {
     let base = tempdir("delete-twice");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("once").unwrap();
     reg.delete(&a.id).unwrap();
     let err = reg.delete(&a.id).unwrap_err();
@@ -169,7 +289,7 @@ fn delete_twice_second_is_not_found() {
 #[test]
 fn spawn_in_with_missing_id_errors() {
     let base = tempdir("spawn-missing");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let err = reg
         .spawn_in_with("nope", &super::super::NoopBackend, Command::new("true"))
         .unwrap_err();
@@ -178,8 +298,8 @@ fn spawn_in_with_missing_id_errors() {
 
 #[test]
 fn spawn_in_uses_default_backend() -> io::Result<()> {
-    let base = tempfile::tempdir()?;
-    let reg = JailRegistry::open(&base)?;
+    let base = tempdir("converted-tempdir");
+    let reg = base.open()?;
     let a = reg.create("def")?;
     let cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
@@ -203,38 +323,36 @@ fn spawn_in_uses_default_backend() -> io::Result<()> {
 #[test]
 fn clear_on_empty_registry_is_zero() {
     let base = tempdir("empty-clear");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     assert_eq!(reg.clear().unwrap(), 0);
 }
 
 #[test]
 fn find_by_label_on_empty_registry() {
     let base = tempdir("empty-find");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     assert!(reg.find_by_label("anything").is_empty());
 }
 
 #[test]
 fn open_creates_base_directory_if_missing() {
-    let base = tempfile::Builder::new()
-        .prefix("oh-reg-mkdir-")
-        .tempdir()
-        .unwrap();
-    let path = base.path();
-    let reg = JailRegistry::open(path).unwrap();
+    let base = tempdir("mkdir");
+    let path = base.path().join("registry");
+    let reg = base.open_at(&path).unwrap();
     assert!(path.exists());
     assert!(reg.list().is_empty());
 }
 
 #[test]
 fn open_creates_a_missing_nested_base_directory() -> io::Result<()> {
+    let fixture = tempdir("nested");
     let parent = tempfile::tempdir()?;
-    let base = parent.path().join("nested").join("registry");
-    assert!(!base.exists());
+    let path = parent.path().join("nested").join("registry");
+    assert!(!path.exists());
 
-    let registry = JailRegistry::open(&base)?;
+    let registry = fixture.open_at(&path)?;
 
-    assert!(base.is_dir());
+    assert!(path.is_dir());
     assert!(registry.list().is_empty());
     Ok(())
 }
@@ -242,26 +360,23 @@ fn open_creates_a_missing_nested_base_directory() -> io::Result<()> {
 #[test]
 fn corrupt_index_returns_invalid_data() {
     let base = tempdir("corrupt");
-    fs::write(base.path().join("index.json"), b"this is not json").unwrap();
-    let err = JailRegistry::open(&base).unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    base.store.save(b"not json").unwrap();
+    assert_eq!(base.open().unwrap_err().kind(), io::ErrorKind::InvalidData);
 }
 
 #[test]
-fn persist_writes_index_file() {
+fn persist_writes_through_supplied_index_store() {
     let base = tempdir("persist-file");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     reg.create("x").unwrap();
-    let path = base.path().join("index.json");
-    assert!(path.exists());
-    let raw = fs::read_to_string(&path).unwrap();
+    let raw = String::from_utf8(base.store.load().unwrap().unwrap()).unwrap();
     assert!(raw.contains("\"label\": \"x\""));
 }
 
 #[test]
 fn base_accessor_returns_open_dir() {
     let base = tempdir("base-accessor");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     assert_eq!(reg.base(), base.path().canonicalize().unwrap());
 }
 
@@ -270,7 +385,7 @@ fn delete_refuses_path_outside_base() {
     // Corrupt the index so a record points at /tmp directly (outside
     // base). delete() should refuse without touching anything on disk.
     let base = tempdir("escape");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("escape").unwrap();
     {
         let mut idx = reg.index.lock().unwrap();
@@ -288,7 +403,7 @@ fn spawn_in_refuses_path_outside_base() {
     // Same corruption as delete_refuses_path_outside_base, but for the
     // spawn path — covers the base-containment guard in `jail_for()`.
     let base = tempdir("spawn-escape");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("escape").unwrap();
     {
         let mut idx = reg.index.lock().unwrap();
@@ -303,7 +418,7 @@ fn spawn_in_refuses_path_outside_base() {
 #[test]
 fn spawn_in_uses_record_dir_as_root() {
     let base = tempdir("spawn");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let a = reg.create("spawn-target").unwrap();
     let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "true" });
     if cfg!(windows) {
@@ -325,7 +440,7 @@ fn create_consecutive_ids_are_unique_in_same_second() {
     // being unreachable here without a process restart, so this test
     // just confirms the happy path remains collision-free.
     let base = tempdir("ids");
-    let reg = JailRegistry::open(&base).unwrap();
+    let reg = base.open().unwrap();
     let ids: std::collections::HashSet<_> = (0..32)
         .map(|i| reg.create(format!("j{i}")).unwrap().id)
         .collect();
@@ -340,7 +455,9 @@ fn create_skips_an_existing_unindexed_jail_directory() {
     let collision = base.path().join(format!("j0{:x}", counter + 1));
     fs::create_dir(&collision).unwrap();
 
-    let reg = JailRegistry::open_with_clock(base.path(), Arc::new(FixedClock::at_epoch())).unwrap();
+    let reg = base
+        .open_with_clock(Arc::new(FixedClock::at_epoch()))
+        .unwrap();
     let created = reg.create("safe").unwrap();
 
     assert_ne!(created.dir, collision);
@@ -352,7 +469,7 @@ fn create_skips_an_existing_unindexed_jail_directory() {
 fn registry_uses_the_injected_clock_for_timestamps() {
     let base = tempdir("clock");
     let clock = Arc::new(FixedClock::at_epoch());
-    let reg = JailRegistry::open_with_clock(base.path(), clock.clone()).unwrap();
+    let reg = base.open_with_clock(clock.clone()).unwrap();
     let created = reg.create("clocked").unwrap();
     assert_eq!(created.created_at_unix, 0);
     assert_eq!(created.updated_at_unix, 0);
@@ -364,26 +481,32 @@ fn registry_uses_the_injected_clock_for_timestamps() {
 
 #[test]
 fn create_rolls_back_when_index_persistence_fails() -> io::Result<()> {
-    let base = tempfile::tempdir()?;
-    fs::create_dir(base.path().join("index.json.tmp"))?;
-    let reg = JailRegistry::open(base.path())?;
+    let base = tempdir("create-failure");
+    let reg = base.open_with_index(base.fail_next_save())?;
 
     assert!(reg.create("not-persisted").is_err());
     assert!(reg.list().is_empty());
-    assert_eq!(fs::read_dir(base.path())?.count(), 1);
+    assert_eq!(fs::read_dir(base.path())?.count(), 0);
     Ok(())
 }
 
 #[test]
 fn rename_and_notes_roll_back_when_index_persistence_fails() -> io::Result<()> {
-    let base = tempfile::tempdir()?;
-    let reg = JailRegistry::open(base.path())?;
-    let created = reg.create("original")?;
-    fs::create_dir(base.path().join("index.json.tmp"))?;
-
-    assert!(reg.rename(&created.id, "changed").is_err());
-    assert!(reg.set_notes(&created.id, Some("changed".into())).is_err());
-    let current = reg
+    let base = tempdir("rename-failure");
+    let initial = base.open()?;
+    let created = initial.create("original")?;
+    drop(initial);
+    let rename_reg = base.open_with_index(base.fail_next_save())?;
+    assert!(rename_reg.rename(&created.id, "changed").is_err());
+    drop(rename_reg);
+    let notes_reg = base.open_with_index(base.fail_next_save())?;
+    assert!(
+        notes_reg
+            .set_notes(&created.id, Some("changed".into()))
+            .is_err()
+    );
+    let current = base
+        .open()?
         .get(&created.id)
         .ok_or_else(|| io::Error::other("record disappeared"))?;
     assert_eq!(current.label, "original");
@@ -393,10 +516,11 @@ fn rename_and_notes_roll_back_when_index_persistence_fails() -> io::Result<()> {
 
 #[test]
 fn delete_keeps_memory_aligned_when_index_persistence_fails() -> io::Result<()> {
-    let base = tempfile::tempdir()?;
-    let reg = JailRegistry::open(base.path())?;
-    let created = reg.create("remove")?;
-    fs::create_dir(base.path().join("index.json.tmp"))?;
+    let base = tempdir("delete-failure");
+    let initial = base.open()?;
+    let created = initial.create("remove")?;
+    drop(initial);
+    let reg = base.open_with_index(base.fail_next_save())?;
 
     assert!(reg.delete(&created.id).is_err());
     assert!(reg.get(&created.id).is_none());
@@ -406,8 +530,8 @@ fn delete_keeps_memory_aligned_when_index_persistence_fails() -> io::Result<()> 
 
 #[test]
 fn delete_persists_when_the_jail_directory_is_already_missing() -> io::Result<()> {
-    let base = tempfile::tempdir()?;
-    let reg = JailRegistry::open(base.path())?;
+    let base = tempdir("converted-tempdir");
+    let reg = base.open()?;
     let created = reg.create("removed-outside")?;
     fs::remove_dir_all(&created.dir)?;
 
@@ -420,17 +544,14 @@ fn delete_persists_when_the_jail_directory_is_already_missing() -> io::Result<()
 #[test]
 fn failed_index_write_after_delete_keeps_in_memory_removal() {
     let base = tempdir("delete-rollback");
-    let reg = JailRegistry::open(base.path()).unwrap();
-    let record = reg.create("deleted").unwrap();
-    let blocked_tmp = base.path().join("index.json.tmp");
-    fs::create_dir(&blocked_tmp).unwrap();
+    let initial = base.open().unwrap();
+    let record = initial.create("deleted").unwrap();
+    drop(initial);
+    let reg = base.open_with_index(base.fail_next_save()).unwrap();
 
     let error = reg.delete(&record.id).unwrap_err();
 
-    // The OS maps writing a directory differently (Windows: PermissionDenied,
-    // Unix: IsADirectory). Compare with the same independent filesystem failure.
-    let expected = fs::write(&blocked_tmp, b"independent probe").unwrap_err();
-    assert_eq!(error.kind(), expected.kind());
+    assert_eq!(error.kind(), io::ErrorKind::Other);
     assert!(!record.dir.exists());
     assert!(reg.get(&record.id).is_none());
 }
@@ -440,13 +561,13 @@ fn open_rejects_a_file_as_registry_directory() {
     let base = tempdir("not-directory");
     let file = base.path().join("file");
     fs::write(&file, b"not a directory").unwrap();
-    assert!(JailRegistry::open(file).is_err());
+    assert!(base.open_at(file).is_err());
 }
 
 #[test]
 fn spawn_rejects_a_jail_directory_removed_after_creation() -> io::Result<()> {
-    let base = tempfile::tempdir()?;
-    let reg = JailRegistry::open(base.path())?;
+    let base = tempdir("converted-tempdir");
+    let reg = base.open()?;
     let record = reg.create("removed")?;
     fs::remove_dir_all(&record.dir)?;
 
@@ -466,12 +587,12 @@ fn removed_jail_under_symlinked_registry_base_can_be_deleted() -> io::Result<()>
     fs::create_dir(&real)?;
     let linked = root.path().join("linked");
     std::os::unix::fs::symlink(&real, &linked)?;
-    let reg = JailRegistry::open(&linked)?;
+    let reg = root.open_at(&linked)?;
     let record = reg.create("removed")?;
     fs::remove_dir_all(&record.dir)?;
     reg.delete(&record.id)?;
     assert!(reg.get(&record.id).is_none());
-    assert!(JailRegistry::open(&linked)?.get(&record.id).is_none());
+    assert!(root.open_at(&linked)?.get(&record.id).is_none());
     Ok(())
 }
 
@@ -483,7 +604,7 @@ fn removed_jail_under_symlinked_base_reports_missing_not_outside() -> io::Result
     fs::create_dir(&real)?;
     let linked = root.path().join("linked");
     std::os::unix::fs::symlink(&real, &linked)?;
-    let reg = JailRegistry::open(&linked)?;
+    let reg = root.open_at(&linked)?;
     let record = reg.create("removed")?;
     fs::remove_dir_all(&record.dir)?;
     assert_eq!(
@@ -500,7 +621,7 @@ fn removed_jail_under_symlinked_base_reports_missing_not_outside() -> io::Result
 fn missing_jail_through_outside_symlink_remains_forbidden() -> io::Result<()> {
     let root = tempdir("outside-link");
     let outside = tempdir("outside-target");
-    let reg = JailRegistry::open(root.path())?;
+    let reg = root.open_at(root.path())?;
     let record = reg.create("corrupt")?;
     let link = root.path().join("outside");
     std::os::unix::fs::symlink(outside.path(), &link)?;
@@ -532,7 +653,7 @@ fn trusted_base_parent_components_are_normalized_before_creating_records() -> io
     let base = root.path().join("base");
     fs::create_dir(&base)?;
     let lexical = base.join("..").join("base");
-    let reg = JailRegistry::open(&lexical)?;
+    let reg = root.open_at(&lexical)?;
     let record = reg.create("normalized")?;
     assert_eq!(
         reg.jail_for(&record.id)?.root,
@@ -558,7 +679,7 @@ fn old_records_inherit_only_normalized_trusted_base_components() -> io::Result<(
     let base = root.path().join("base");
     fs::create_dir(&base)?;
     let lexical = base.join("..").join("base");
-    let reg = JailRegistry::open(&base)?;
+    let reg = root.open_at(&base)?;
     let record = reg.create("legacy")?;
     {
         let mut index = reg.index.lock().unwrap();
@@ -566,7 +687,7 @@ fn old_records_inherit_only_normalized_trusted_base_components() -> io::Result<(
         reg.persist(&index)?;
     }
     drop(reg);
-    let reopened = JailRegistry::open(&lexical)?;
+    let reopened = root.open_at(&lexical)?;
     assert_eq!(
         reopened.jail_for(&record.id)?.root,
         base.canonicalize()?.join(&record.id)
@@ -583,14 +704,14 @@ fn normalized_trusted_base_does_not_adopt_corrupt_suffix_traversal() -> io::Resu
     let base = root.path().join("base");
     fs::create_dir(&base)?;
     let lexical = base.join("..").join("base");
-    let reg = JailRegistry::open(&base)?;
+    let reg = root.open_at(&base)?;
     let record = reg.create("corrupt")?;
     {
         let mut index = reg.index.lock().unwrap();
         index.records.get_mut(&record.id).unwrap().dir = lexical.join("child/..").join(&record.id);
         reg.persist(&index)?;
     }
-    let reopened = JailRegistry::open(&lexical)?;
+    let reopened = root.open_at(&lexical)?;
     assert_eq!(
         reopened
             .jail_for(&record.id)
@@ -614,14 +735,14 @@ fn old_symlink_base_records_work_when_reopened_by_the_real_base() -> io::Result<
     fs::create_dir(&base)?;
     let alias = root.path().join("alias");
     std::os::unix::fs::symlink(&base, &alias)?;
-    let reg = JailRegistry::open(&base)?;
+    let reg = root.open_at(&base)?;
     let record = reg.create("legacy-alias")?;
     {
         let mut index = reg.index.lock().unwrap();
         index.records.get_mut(&record.id).unwrap().dir = alias.join(&record.id);
         reg.persist(&index)?;
     }
-    let reopened = JailRegistry::open(&base)?;
+    let reopened = root.open_at(&base)?;
     assert_eq!(reopened.jail_for(&record.id)?.root, record.dir);
     fs::remove_dir_all(&record.dir)?;
     reopened.delete(&record.id)?;

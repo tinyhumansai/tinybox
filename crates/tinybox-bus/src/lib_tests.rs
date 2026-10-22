@@ -46,12 +46,12 @@ fn docker_run_vocabulary_is_typed_bounded_and_additive() -> Result<(), serde_jso
         label: Some("openhuman.sandbox=true".into()),
         timeout_ms: 120_000,
     };
-    assert_eq!(METHODS[27], "RunDocker");
-    assert_eq!(METHODS[28], "DockerStatus");
-    assert_eq!(METHODS[29], "CleanupDocker");
-    assert_eq!(METHODS[30], "RunDockerWithoutWorkspace");
-    assert_eq!(METHODS[34], "StartNativeShellExec");
-    assert_eq!(CONTRACT_VERSION, (1, 20));
+    assert_eq!(METHODS[26], "RunDocker");
+    assert_eq!(METHODS[27], "DockerStatus");
+    assert_eq!(METHODS[28], "CleanupDocker");
+    assert_eq!(METHODS[29], "RunDockerWithoutWorkspace");
+    assert_eq!(METHODS[33], "StartNativeShellExec");
+    assert_eq!(CONTRACT_VERSION, (2, 0));
     assert_eq!(MAX_DOCKER_RUN_TIMEOUT_MS, 86_400_000);
     let serialized = serde_json::to_value(&request)?;
     assert_eq!(serialized["read_only_rootfs"], false);
@@ -129,10 +129,10 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (1, 20));
+    assert_eq!(CONTRACT_VERSION, (2, 0));
     assert!(is_compatible(CONTRACT_VERSION));
-    assert!(!is_compatible((1, 19)));
-    assert!(!is_compatible((1, 18)));
+    assert!(!is_compatible((1, 22)));
+    assert!(!is_compatible((1, 21)));
     assert!(!is_compatible((1, 8)));
     assert!(!is_compatible((1, 7)));
     assert!(!is_compatible((1, 6)));
@@ -142,14 +142,16 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
     assert!(!is_compatible((1, 2)));
     assert!(!is_compatible((1, 0)));
     assert!(!is_compatible((0, 99)));
-    assert!(!is_compatible((2, 1)));
+    assert!(!is_compatible((1, 22)));
+    assert!(!is_compatible((3, 0)));
+    assert!(is_compatible((2, 1)));
     let capabilities = ModuleCapabilities {
         contract_version: CONTRACT_VERSION,
         create_backends: vec!["passthrough".into()],
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[1,20],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[2,0],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
@@ -160,7 +162,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 
 #[test]
 fn no_workspace_docker_operation_is_present_in_the_contract() {
-    assert_eq!(METHODS.get(30), Some(&"RunDockerWithoutWorkspace"));
+    assert_eq!(METHODS.get(29), Some(&"RunDockerWithoutWorkspace"));
     assert_eq!(
         METHODS
             .iter()
@@ -168,44 +170,22 @@ fn no_workspace_docker_operation_is_present_in_the_contract() {
             .count(),
         1
     );
-    assert_eq!(CONTRACT_VERSION, (1, 20));
+    assert_eq!(CONTRACT_VERSION, (2, 0));
 }
 
 #[test]
-fn command_classes_keep_wire_labels_and_security_order() -> Result<(), serde_json::Error> {
-    let classes = [
-        CommandClass::Read,
-        CommandClass::Write,
-        CommandClass::Network,
-        CommandClass::Install,
-        CommandClass::Destructive,
-    ];
-    assert_eq!(
-        serde_json::to_value(classes)?,
-        serde_json::json!(["read", "write", "network", "install", "destructive"])
-    );
-    for pair in classes.windows(2) {
-        assert!(pair[0] < pair[1]);
-    }
-    assert_eq!(
-        serde_json::from_value::<Vec<CommandClass>>(serde_json::to_value(classes)?)?,
-        classes
-    );
-    Ok(())
-}
-
-#[test]
-fn command_analysis_wire_facts_round_trip_without_host_policy() -> Result<(), serde_json::Error> {
-    let snapshot = serde_json::json!({
-        "segments": [{"source": "echo hello", "command": "echo hello", "basename": "echo",
-            "normalized_name": "echo", "arguments": ["hello"], "class": "read",
-            "leading_env_assignment": false, "dangerous_env_prefix": false, "executor": false}],
-        "hidden_execution": false, "redirection": false, "expansion": false,
-        "tee": false, "background": false, "literal_words": ["echo", "hello"]
-    });
-    let facts: CommandAnalysis = serde_json::from_value(snapshot.clone())?;
+fn shell_analysis_wire_shape_contains_only_structural_facts() -> Result<(), serde_json::Error> {
+    let snapshot = serde_json::json!({"segments": ["echo hello"], "redirection": false});
+    let facts: ShellAnalysis = serde_json::from_value(snapshot.clone())?;
     assert_eq!(serde_json::to_value(facts)?, snapshot);
     Ok(())
+}
+
+#[test]
+fn contract_two_drops_command_classification_but_keeps_structural_shell_analysis() {
+    assert_eq!(CONTRACT_VERSION, (2, 0));
+    assert!(!METHODS.contains(&"AnalyzeCommand"));
+    assert!(METHODS.contains(&"AnalyzeShell"));
 }
 
 #[test]
@@ -301,8 +281,8 @@ fn shell_selection_wire_defaults_preserve_safe_pipeline_behavior() -> Result<(),
         serde_json::from_value::<ShellInvocation>(value)?,
         invocation
     );
-    assert_eq!(METHODS[31], "ResolveLocalGrants");
-    assert_eq!(METHODS[32], "SelectShell");
+    assert_eq!(METHODS[30], "ResolveLocalGrants");
+    assert_eq!(METHODS[31], "SelectShell");
     assert!(!is_compatible((1, 9)));
     Ok(())
 }
@@ -330,8 +310,8 @@ fn native_shell_wire_defaults_close_stdin_and_keep_a_bounded_runtime()
     assert_eq!(request.cwd, None);
     assert_eq!(request.jail, None);
     assert_eq!(request.extra_env, std::collections::BTreeMap::new());
-    assert_eq!(METHODS[33], "StartShellExec");
-    assert_eq!(METHODS[34], "StartNativeShellExec");
+    assert_eq!(METHODS[32], "StartShellExec");
+    assert_eq!(METHODS[33], "StartNativeShellExec");
     assert!(!is_compatible((1, 13)));
     assert!(!is_compatible((1, 10)));
     Ok(())
@@ -356,7 +336,6 @@ fn named_members_resolve_to_the_method_catalogue_in_order() {
         FORWARD,
         CLOSE_FORWARD,
         JAIL_STATUS,
-        ANALYZE_COMMAND,
         BEGIN_FILE_READ,
         READ_FILE_CHUNK,
         FINISH_FILE_READ,
@@ -377,6 +356,12 @@ fn named_members_resolve_to_the_method_catalogue_in_order() {
         START_SHELL_EXEC,
         START_NATIVE_SHELL_EXEC,
         VALIDATE_DOCKER_POLICY,
+        START_STDIO,
+        WRITE_STDIO,
+        READ_STDIO,
+        CLOSE_STDIN,
+        KILL_STDIO,
+        STDIO_STATUS,
     ];
     assert_eq!(METHODS, &expected[..]);
     assert_eq!(DESCRIBE, "Describe");
@@ -389,8 +374,7 @@ fn named_members_resolve_to_the_method_catalogue_in_order() {
 
 #[test]
 fn docker_policy_validation_is_a_standalone_appended_member() -> Result<(), serde_json::Error> {
-    assert_eq!(METHODS.last(), Some(&"ValidateDockerPolicy"));
-    assert_eq!(METHODS[35], "ValidateDockerPolicy");
+    assert_eq!(METHODS[34], "ValidateDockerPolicy");
     assert_eq!(names::VALIDATE_DOCKER_POLICY, "ValidateDockerPolicy");
     let request: DockerPolicyRequest = serde_json::from_value(serde_json::json!({}))?;
     assert_eq!(request, DockerPolicyRequest::default());

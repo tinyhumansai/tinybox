@@ -92,6 +92,14 @@ impl LandlockBackend {
 }
 
 impl JailBackend for LandlockBackend {
+    fn implicit_grants(&self) -> Vec<std::path::PathBuf> {
+        SYSTEM_READ_PATHS
+            .iter()
+            .chain(DEVICE_PATHS)
+            .map(std::path::PathBuf::from)
+            .collect()
+    }
+
     fn name(&self) -> &'static str {
         LANDLOCK_BACKEND_NAME
     }
@@ -120,7 +128,10 @@ impl JailBackend for LandlockBackend {
         self.constraint_support()
             .require(self.name(), &requested)
             .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error))?;
-        imp::spawn(jail, cmd)
+        let mut jail = jail.clone();
+        jail.canonicalize()?;
+        jail.validate_denials(false, &self.implicit_grants())?;
+        imp::spawn(&jail, cmd)
     }
 }
 

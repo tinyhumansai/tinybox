@@ -226,6 +226,8 @@ impl OneShot {
         }
 
         let mut push = |s: &str| argv.push(OsString::from(s));
+        // End docker's options so an image like `--privileged` stays a positional.
+        push("--");
         push(&self.image);
         push("sh");
         push(if self.login_shell { "-lc" } else { "-c" });

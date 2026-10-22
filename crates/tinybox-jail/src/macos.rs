@@ -50,6 +50,15 @@ impl JailBackend for SeatbeltBackend {
         declared_constraint_support(self.is_available())
     }
 
+    /// The profile's last rule denies `deny_read` paths over every allow.
+    fn carves_denials(&self) -> bool {
+        true
+    }
+
+    fn validate_carved_denials(&self, jail: &Jail) -> std::io::Result<()> {
+        validate_denials(jail)
+    }
+
     /// Launcher presence proves no process-isolation guarantee.
     fn isolation(&self) -> tinybox_core::IsolationLevel {
         tinybox_core::IsolationLevel::None
@@ -57,7 +66,7 @@ impl JailBackend for SeatbeltBackend {
 
     fn spawn(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
         let mut wrapper =
-            prepare_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec"));
+            prepare_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec"))?;
         // The launcher is a fresh `Command`, so a process group the caller set
         // on `cmd` does not carry over. Make the launcher a group leader here:
         // a caller that times the child out signals that group, and without
@@ -73,7 +82,7 @@ impl JailBackend for SeatbeltBackend {
     }
 
     fn spawn_captured(&self, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
-        prepare_captured_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec")).spawn()
+        prepare_captured_command(jail, &cmd, std::ffi::OsStr::new("/usr/bin/sandbox-exec"))?.spawn()
     }
 }
 
@@ -89,8 +98,39 @@ fn declared_constraint_support(available: bool) -> tinybox_core::ConstraintSuppo
         .with(Constraint::Subprocess, Enforcement::BestEffort)
 }
 
+/// Refuses a denial the profile cannot hold. Seatbelt matches paths, and
+/// `mv R/a R/b` succeeds under every writable `R` (the root, each `read_write`
+/// grant and `/private/tmp`), so a denial deeper than a direct child of any of
+/// them is readable after a rename. A non-UTF-8 denial would render lossily
+/// and deny some other path.
+fn validate_denials(jail: &Jail) -> std::io::Result<()> {
+    let tmp = std::path::Path::new("/private/tmp");
+    for deny in &jail.deny_read {
+        if deny.to_str().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("deny_read {} is not valid UTF-8", deny.display()),
+            ));
+        }
+        for writable in std::iter::once(jail.root.as_path())
+            .chain(jail.read_write.iter().map(std::path::PathBuf::as_path))
+            .chain(std::iter::once(tmp))
+        {
+            if let Some(error) = super::jail::nested_denial(deny, writable) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build the launcher separately so forwarding can be checked on any host.
-fn prepare_command(jail: &Jail, cmd: &Command, launcher: &std::ffi::OsStr) -> Command {
+fn prepare_command(
+    jail: &Jail,
+    cmd: &Command,
+    launcher: &std::ffi::OsStr,
+) -> std::io::Result<Command> {
+    validate_denials(jail)?;
     let profile = render_profile(jail);
 
     // sandbox-exec only accepts profiles from disk or from `-p`. Inline
@@ -127,12 +167,16 @@ fn prepare_command(jail: &Jail, cmd: &Command, launcher: &std::ffi::OsStr) -> Co
     // defaults — callers can re-wire by spawning into a pre-set stdio
     // via the returned `Child` is not possible; for now we match the
     // sandbox-exec defaults (inherit). Document this in mod.rs.
-    wrapper
+    Ok(wrapper)
 }
 
 /// Reconstruct the launcher with explicit owned-pipe semantics.
-fn prepare_captured_command(jail: &Jail, cmd: &Command, launcher: &std::ffi::OsStr) -> Command {
-    let mut wrapper = prepare_command(jail, cmd, launcher);
+fn prepare_captured_command(
+    jail: &Jail,
+    cmd: &Command,
+    launcher: &std::ffi::OsStr,
+) -> std::io::Result<Command> {
+    let mut wrapper = prepare_command(jail, cmd, launcher)?;
     wrapper
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -142,7 +186,7 @@ fn prepare_captured_command(jail: &Jail, cmd: &Command, launcher: &std::ffi::OsS
         use std::os::unix::process::CommandExt;
         wrapper.process_group(0);
     }
-    wrapper
+    Ok(wrapper)
 }
 
 /// Render a Seatbelt profile.
@@ -185,6 +229,17 @@ fn render_profile(jail: &Jail) -> String {
         let _ = writeln!(out, "  (subpath \"{}\")", escape(&path.to_string_lossy()));
     }
     out.push_str("  (subpath \"/private/tmp\")\n  (literal \"/dev/null\")\n)\n");
+
+    // Reads are allow-default, so a credential store is readable unless it is
+    // denied here. Last, so it also overrides the write grants above; a
+    // `subpath` matches a single file as well as a directory tree.
+    if !jail.deny_read.is_empty() {
+        out.push_str("(deny file-read* file-write*\n");
+        for path in &jail.deny_read {
+            let _ = writeln!(out, "  (subpath \"{}\")", escape(&path.to_string_lossy()));
+        }
+        out.push_str(")\n");
+    }
 
     // `read_only` is informational on macOS — reads are already allowed
     // by `(allow default)`. We keep the field on `Jail` because Landlock

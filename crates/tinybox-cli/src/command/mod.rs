@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -12,14 +12,12 @@ use tinybox_core::{
     SystemClock, TemplateName, Templates, WorkspaceSource, passthrough,
 };
 use tinybox_docker::DockerSandbox;
+#[cfg(test)]
 use tinybox_host::LocalHost;
 use tinybox_linux::NamespaceSandbox;
 use tinybox_microvm::MicroVmSandbox;
 use tinybox_ssh::{SshHost, SshTarget};
 use tinybox_sync::{Exclusions, Syncer};
-
-use crate::store::FileStore;
-use crate::templates::FileTemplates;
 
 /// Encapsulate a box and run code in it.
 #[derive(Debug, Parser)]
@@ -295,6 +293,16 @@ enum TemplateCommand {
 const EXIT_TINYBOX_ERROR: u8 = 70;
 
 impl Cli {
+    /// Return the legacy CLI state-file path requested with `--store`, if any.
+    ///
+    /// A composition root can use this to choose its backend and import the
+    /// previous file-based state format without making the CLI library own a
+    /// persistence engine.
+    #[must_use]
+    pub fn requested_store_path(&self) -> Option<&Path> {
+        self.store.as_deref()
+    }
+
     /// Run the parsed command, writing output to `out` and errors to `err`.
     ///
     /// Streams are injected rather than assumed so the whole surface is
@@ -315,17 +323,12 @@ impl Cli {
     ///
     /// Returns [`Error::Store`] when no store location can be determined, and
     /// [`Error::InvalidIdentifier`] when the SSH destination is unusable.
-    fn resolve(&self, local: Arc<dyn Host>) -> tinybox_core::Result<Context> {
-        let path = match &self.store {
-            Some(path) => path.clone(),
-            None => FileStore::default_path()?,
-        };
-        // Templates live beside the boxes they were made from, so pointing
-        // `--store` elsewhere moves both rather than mixing one directory's
-        // boxes with another's names.
-        let templates: Arc<dyn Templates> = Arc::new(FileTemplates::beside(&path));
-        let store: Arc<dyn Store> = Arc::new(FileStore::new(path));
-
+    fn resolve(
+        &self,
+        local: Arc<dyn Host>,
+        store: Arc<dyn Store>,
+        templates: Arc<dyn Templates>,
+    ) -> tinybox_core::Result<Context> {
         // `--host` chooses reach; the sandbox chooses confinement. They are
         // independent, so every backend works remotely without knowing it.
         let reach = reach(
@@ -360,6 +363,8 @@ impl Cli {
     pub async fn dispatch(
         self,
         host: Arc<dyn Host>,
+        store: Arc<dyn Store>,
+        templates: Arc<dyn Templates>,
         out: &mut dyn Write,
         err: &mut dyn Write,
     ) -> tinybox_core::Result<u8> {
@@ -367,7 +372,7 @@ impl Cli {
             store,
             templates,
             reach,
-        } = self.resolve(host)?;
+        } = self.resolve(host, store, templates)?;
         let backends = Backends {
             reach: &reach,
             store: &store,
@@ -1204,12 +1209,45 @@ fn write(stream: &mut dyn Write, bytes: &[u8]) -> tinybox_core::Result<()> {
 ///
 /// Errors are reported to `err` rather than returned, because this is the top
 /// of the program and there is nobody left to hand them to.
+#[cfg(test)]
 pub async fn run<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> u8
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
     run_with_host(args, Arc::new(LocalHost::new()), out, err).await
+}
+
+#[cfg(test)]
+type TestStorePair = (
+    Arc<tinybox_core::MemoryStore>,
+    Arc<tinybox_core::MemoryTemplates>,
+);
+
+#[cfg(test)]
+type TestStores = std::sync::Mutex<std::collections::HashMap<PathBuf, TestStorePair>>;
+
+#[cfg(test)]
+fn test_stores(
+    path: &Path,
+) -> (
+    Arc<tinybox_core::MemoryStore>,
+    Arc<tinybox_core::MemoryTemplates>,
+) {
+    static TEST_STORES: std::sync::OnceLock<TestStores> = std::sync::OnceLock::new();
+    let stores = TEST_STORES.get_or_init(Default::default);
+    let mut stores = stores
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    stores
+        .entry(path.to_owned())
+        .or_insert_with(|| {
+            (
+                Arc::new(tinybox_core::MemoryStore::new()),
+                Arc::new(tinybox_core::MemoryTemplates::new()),
+            )
+        })
+        .clone()
 }
 
 /// Parse `args` and run the command against an explicit host.
@@ -1221,6 +1259,7 @@ where
 ///
 /// Errors are reported to `err` rather than returned, because this is the top
 /// of the program and there is nobody left to hand them to.
+#[cfg(test)]
 pub async fn run_with_host<I, T>(
     args: I,
     host: Arc<dyn Host>,
@@ -1245,7 +1284,15 @@ where
         }
     };
 
-    match cli.dispatch(host, out, err).await {
+    let store_key = cli.requested_store_path().map_or_else(
+        || PathBuf::from("tinybox-default-test-store"),
+        Path::to_owned,
+    );
+    let (store, templates) = test_stores(&store_key);
+    let store = store as Arc<dyn Store>;
+    let templates = templates as Arc<dyn Templates>;
+
+    match cli.dispatch(host, store, templates, out, err).await {
         Ok(code) => code,
         Err(error) => {
             let _ = writeln!(err, "error: {error}");

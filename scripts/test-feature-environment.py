@@ -48,7 +48,14 @@ class WindowsFeatureEnvironmentTests(unittest.TestCase):
                 "cygpath": "#!/bin/sh\n[ \"$*\" = \"-w /usr/bin\" ] || exit 1\nprintf \"%s\\n\" \"$FIXTURE_BIN\"\n",
                 "pwsh": "#!/bin/sh\n[ \"$*\" = \"-NoProfile -File scripts/test-windows-fixtures.ps1\" ] && exit 0\n[ \"$*\" = \"-NoProfile -File scripts/prepare-windows-fixtures.ps1 -PosixBin $FIXTURE_BIN\" ] || exit 1\ntouch \"$FIXTURE_READY\"\n",
                 "python3": "#!/bin/sh\nexit 0\n",
-                "cargo": "#!/bin/sh\n[ -f \"$FIXTURE_READY\" ] || exit 1\nprintf \"%s\\n\" \"$*\" >> \"$FIXTURE_CALLS\"\n",
+                "cargo": (
+                    "#!/bin/sh\n[ -f \"$FIXTURE_READY\" ] || exit 1\n"
+                    "printf \"%s\\n\" \"$*\" >> \"$FIXTURE_CALLS\"\n"
+                    "case \"$1\" in\n"
+                    "metadata) printf '%s\\n' '{\"workspace_members\":[\"fixture 0.1.0 (path+file:///fixture)\"],\"packages\":[{\"id\":\"fixture 0.1.0 (path+file:///fixture)\",\"name\":\"tinybox-fixture\",\"targets\":[{\"kind\":[\"lib\"]}]}]}' ;;\n"
+                    "tree) printf '%s\\n' 'tinybox-fixture v0.1.0' ;;\n"
+                    "esac\n"
+                ),
             }
             for name, source in fixtures.items():
                 path = tools / name
@@ -61,7 +68,13 @@ class WindowsFeatureEnvironmentTests(unittest.TestCase):
                                     env=env, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(calls.read_text().splitlines(), [
-                "test --locked --workspace", "test --locked --workspace --all-features"])
+                "test --locked --workspace",
+                "test --locked --workspace --all-features",
+                "metadata --locked --format-version 1 --no-deps",
+                "tree --locked --format {p} --prefix none -e normal,build -p tinybox-fixture",
+                "tree --locked --format {p} --prefix none -e normal,build -p tinybox-fixture --no-default-features",
+                "tree --locked --format {p} --prefix none -e normal,build -p tinybox-fixture --all-features",
+            ])
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,15 @@ cannot grow beyond the configured cap. Overflow is an explicit
 OutputLimitExceeded error, and kills/awaits the child. Standard input writing
 runs concurrently with both readers to avoid pipe-buffer deadlocks.
 
+Collection ends when the command has exited and both pipes have ended. A
+process the command started in the background can keep the pipes open after
+the command exits (a daemon that inherits stdout), and waiting for their end
+would wait for that process. So once the command exits, the pipes get
+`OUTPUT_DRAIN_GRACE` (3 s) to end; after that the output read so far is
+returned with a note on stderr saying a process still holds the output.
+Cleanup then retires the command's process group as usual. Both the plain and
+the jailed collector use the same `collect_until_exit`.
+
 LocalHost keeps its existing unbounded API. On Unix, LimitedLocalHost starts a
 separate process group for every collected or managed command. Cleanup sends
 SIGKILL to that group, waits for the direct child to be reaped, and then waits up

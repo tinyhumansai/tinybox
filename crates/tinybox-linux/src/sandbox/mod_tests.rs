@@ -44,7 +44,34 @@ impl Host for RecordingHost {
 
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
         self.seen().push(request.argv.clone());
+        if request.argv == ["systemd-run", "--help"] {
+            return Ok(ExecOutput::new(
+                0,
+                b"--expand-environment=BOOL".to_vec(),
+                Vec::new(),
+            ));
+        }
         Ok(ExecOutput::new(0, b"ran".to_vec(), Vec::new()))
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailedProbeHost {
+    seen: Mutex<Vec<Vec<String>>>,
+}
+
+#[async_trait]
+impl Host for FailedProbeHost {
+    fn name(&self) -> &'static str {
+        "failed-probe"
+    }
+
+    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.argv.clone());
+        Ok(ExecOutput::new(1, Vec::new(), b"probe failed".to_vec()))
     }
 }
 
@@ -300,6 +327,7 @@ async fn limits_wrap_the_sandbox_in_a_systemd_scope() -> Result<()> {
     assert_eq!(argv.first().map(String::as_str), Some("systemd-run"));
     assert!(has(&argv, "--user"));
     assert!(has(&argv, "--scope"));
+    assert!(has(&argv, "--expand-environment=no"));
     let properties = argv
         .iter()
         .enumerate()
@@ -321,6 +349,71 @@ async fn limits_wrap_the_sandbox_in_a_systemd_scope() -> Result<()> {
     );
     // The sandbox still runs inside the scope.
     assert!(has(&argv, "bwrap"));
+    Ok(())
+}
+
+#[test]
+fn systemd_scope_environment_flag_is_added_only_when_supported() {
+    let resources = Resources {
+        cpu_millis: 1_000,
+        memory_bytes: 64 * 1024 * 1024,
+        pids_max: 16,
+        disk_bytes: 1024 * 1024,
+    };
+
+    let supported = args::cgroup_prefix(&resources, true);
+    assert!(has(&supported, "--expand-environment=no"));
+    assert_eq!(
+        supported.get(3).map(String::as_str),
+        Some("--expand-environment=no")
+    );
+
+    let legacy = args::cgroup_prefix(&resources, false);
+    assert!(!has(&legacy, "--expand-environment=no"));
+    assert_eq!(legacy.get(3).map(String::as_str), Some("--quiet"));
+}
+
+#[test]
+fn systemd_environment_flag_probe_distinguishes_legacy_and_fails_closed() {
+    assert_eq!(
+        args::parse_expand_environment_help(true, b"--help", b""),
+        Ok(false)
+    );
+    assert_eq!(
+        args::parse_expand_environment_help(true, b"--expand-environment=BOOL", b""),
+        Ok(true)
+    );
+    assert_eq!(
+        args::parse_expand_environment_help(false, b"--expand-environment=BOOL", b""),
+        Err(Error::Unsupported {
+            sandbox: NAME.to_owned(),
+            capability: tinybox_core::Capability::ResourceLimits,
+        })
+    );
+}
+
+#[tokio::test]
+async fn failed_systemd_option_probe_refuses_without_launching_workload() -> Result<()> {
+    let host = Arc::new(FailedProbeHost::default());
+    let sandbox =
+        NamespaceSandbox::new(host.clone(), Arc::new(MemoryStore::new())).with_cgroup_limits();
+    let info = sandbox.create(&spec()?).await?;
+
+    let result = sandbox
+        .exec(&info.id, &ExecRequest::new(["echo", "must not run"]))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(Error::Unsupported {
+            sandbox: NAME.to_owned(),
+            capability: Capability::ResourceLimits,
+        })
+    );
+    assert_eq!(
+        *host.seen.lock().unwrap_or_else(PoisonError::into_inner),
+        [vec!["systemd-run".to_owned(), "--help".to_owned()]]
+    );
     Ok(())
 }
 

@@ -5,22 +5,28 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tinybox_jail::IndexStore;
-use tinystoragedrivers_core::{
-    Blocking, CollectionSpec, DocumentStore, ErrorKind, Precondition, StorageError,
-};
+use tinystoragedrivers_api::{DocumentStore, Storage};
+use tinystoragedrivers_types::{ErrorKind, Key, StorageError, WriteOptions};
 
-/// The collection that holds one index document per registry.
-pub const JAIL_INDEX_COLLECTION: &str = "tinybox_jail_index";
+use crate::blocking::Blocking;
+use crate::migrations;
+use crate::repo::Repo;
+use tinybox_bus::storage::jail_index as index_body;
+use tinybox_bus::storage::{BODY_VERSION, JAIL_INDEX_COLLECTION};
 
-/// A jail registry's index as one document, `tinybox_jail_index/<registry>`.
+/// A jail registry's index as one document, `box.jail_index/<registry>`.
 ///
-/// The registry serializes the index; this keeps the JSON value, so the
-/// document has the same shape as the legacy `index.json`. A document that is
-/// not valid JSON reads as [`io::ErrorKind::InvalidData`].
+/// The registry serializes the index in its own form (the legacy `index.json`
+/// shape); this keeps the equivalent v2 body: the same records with
+/// millisecond times and no version field (see the `index_body` module). A
+/// document that is not valid JSON reads as [`io::ErrorKind::InvalidData`].
+///
+/// The collection is declared and migrated by the owner when this store opens.
 #[derive(Clone)]
 pub struct DocumentIndexStore {
-    documents: Arc<dyn DocumentStore>,
+    index: Repo<Value>,
     bridge: Blocking,
+    key: String,
     registry: String,
 }
 
@@ -33,27 +39,31 @@ impl std::fmt::Debug for DocumentIndexStore {
 }
 
 impl DocumentIndexStore {
-    /// An index store for the registry named `registry`; the collection is
-    /// declared here.
+    /// Open an index store after `TinyBox`'s owner migrations have completed.
     ///
     /// # Errors
     ///
-    /// Returns an error when the bridge cannot start or the backend refuses
-    /// the collection.
-    pub fn new(documents: Arc<dyn DocumentStore>, registry: impl Into<String>) -> io::Result<Self> {
+    /// Returns an error when the declaration or migration fails, the bridge
+    /// cannot start, or `registry` cannot be a document id.
+    pub async fn open(storage: Storage, registry: impl Into<String>) -> io::Result<Self> {
+        migrations::prepare(&storage)
+            .await
+            .map_err(|error| to_io(&error))?;
+        let documents: Arc<dyn DocumentStore> = Arc::clone(storage.documents());
+        let registry = registry.into();
         let bridge = Blocking::new().map_err(|e| to_io(&e))?;
-        let docs = Arc::clone(&documents);
-        bridge
-            .run(async move {
-                docs.ensure_collection(&CollectionSpec::new(JAIL_INDEX_COLLECTION))
-                    .await
-            })
-            .and_then(|inner| inner)
-            .map_err(|e| to_io(&e))?;
+        let key = Key::new(registry.as_str())
+            .map_err(|e| to_io(&e))?
+            .as_str()
+            .to_owned();
+        let index = Repo::new(&documents, JAIL_INDEX_COLLECTION)
+            .map_err(|e| to_io(&e))?
+            .with_options(WriteOptions::new().schema(BODY_VERSION));
         Ok(Self {
-            documents,
+            index,
             bridge,
-            registry: registry.into(),
+            key,
+            registry,
         })
     }
 }
@@ -69,31 +79,29 @@ fn to_io(error: &StorageError) -> io::Error {
 
 impl IndexStore for DocumentIndexStore {
     fn load(&self) -> io::Result<Option<Vec<u8>>> {
-        let docs = Arc::clone(&self.documents);
-        let key = self.registry.clone();
+        let index = self.index.clone();
+        let key = self.key.clone();
         let found = self
             .bridge
-            .run(async move { docs.get(JAIL_INDEX_COLLECTION, &key).await })
+            .run(async move { index.get(&key).await })
             .and_then(|inner| inner)
             .map_err(|e| to_io(&e))?;
         found
             .map(|entry| {
-                serde_json::to_vec(&entry.doc)
+                serde_json::to_vec(&index_body::from_body(entry.doc))
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
             })
             .transpose()
     }
 
     fn save(&self, bytes: &[u8]) -> io::Result<()> {
-        let doc: Value = serde_json::from_slice(bytes)
+        let registry_form: Value = serde_json::from_slice(bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let docs = Arc::clone(&self.documents);
-        let key = self.registry.clone();
+        let body = index_body::to_body(registry_form)?;
+        let index = self.index.clone();
+        let key = self.key.clone();
         self.bridge
-            .run(async move {
-                docs.put(JAIL_INDEX_COLLECTION, &key, doc, Precondition::None)
-                    .await
-            })
+            .run(async move { index.put(&key, &body).await })
             .and_then(|inner| inner)
             .map(|_| ())
             .map_err(|e| to_io(&e))

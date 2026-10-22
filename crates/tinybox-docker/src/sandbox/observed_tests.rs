@@ -5,8 +5,17 @@ use super::*;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 
-async fn reserve_fixture(token: &str) -> Result<String> {
-    let dir = control_dir(token);
+async fn reserve_fixture(token: &str) -> Result<(tempfile::TempDir, String)> {
+    // The production control root is the container's `/tmp`. Keep these shell
+    // protocol tests inside an owned fixture directory instead of relying on
+    // the host process's `/tmp` quota.
+    let fixture_root =
+        tempfile::tempdir().map_err(|error| Error::io("create control fixture", &error))?;
+    let dir = fixture_root
+        .path()
+        .join(format!("tinybox-observed-{token}"))
+        .display()
+        .to_string();
     let output = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(RESERVE)
@@ -18,7 +27,7 @@ async fn reserve_fixture(token: &str) -> Result<String> {
         .map_err(|error| Error::io("reserve observed fixture", &error))?;
     assert!(output.status.success());
     assert_eq!(output.stdout, b"ready\n");
-    Ok(dir)
+    Ok((fixture_root, dir))
 }
 
 #[test]
@@ -49,7 +58,7 @@ fn observed_exec_keeps_docker_flags_and_untrusted_argv_separate() -> Result<()> 
 async fn supervisor_preserves_binary_pipes_stdin_and_exit_status() -> Result<()> {
     let temporary = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
     let token = format!("binary-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let real_workspace = temporary.path().join("real");
     std::fs::create_dir(&real_workspace)
         .map_err(|error| Error::io("create fixture workspace", &error))?;
@@ -115,7 +124,7 @@ async fn supervisor_preserves_binary_pipes_stdin_and_exit_status() -> Result<()>
 async fn supervisor_reaps_leader_and_retires_background_process_group() -> Result<()> {
     let temporary = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
     let token = format!("background-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new("sh")
@@ -155,7 +164,7 @@ async fn image_without_setsid_refuses_observed_command_before_execution() -> Res
     std::os::unix::fs::symlink("/bin/cat", path.join("cat"))
         .map_err(|error| Error::io("link fixture cat", &error))?;
     let token = format!("unsupported-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
 
     let output = tokio::process::Command::new("/bin/sh")
         .arg("-c")
@@ -198,7 +207,11 @@ async fn image_without_setsid_refuses_observed_command_before_execution() -> Res
 async fn supervisor_requires_a_reserved_owner_token_before_starting() -> Result<()> {
     let temporary = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
     let token = format!("unreserved-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = control_dir(&token);
+    let dir = temporary
+        .path()
+        .join(format!("tinybox-observed-{token}"))
+        .display()
+        .to_string();
     let output = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(SUPERVISOR)
@@ -222,7 +235,7 @@ async fn supervisor_requires_a_reserved_owner_token_before_starting() -> Result<
 #[tokio::test]
 async fn reservation_retries_only_accept_the_original_owner_token() -> Result<()> {
     let token = format!("owner-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let retry = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(RESERVE)
@@ -257,7 +270,7 @@ async fn reservation_retries_only_accept_the_original_owner_token() -> Result<()
 #[tokio::test]
 async fn cancellation_fence_acknowledges_a_supervisor_that_starts_late() -> Result<()> {
     let token = format!("late-start-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let cancellation = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(CANCEL_AND_ACK)
@@ -314,7 +327,7 @@ async fn cancellation_fence_acknowledges_a_supervisor_that_starts_late() -> Resu
 async fn cancellation_waits_for_container_side_waiter_acknowledgement() -> Result<()> {
     let temporary = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
     let token = format!("cancel-fixture-{}", uuid::Uuid::new_v4().simple());
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let mut child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(SUPERVISOR)
@@ -410,7 +423,7 @@ async fn cancelling_a_workload_does_not_leak_the_supervisors_wait_diagnostic() -
         "cancel-diagnostic-fixture-{}",
         uuid::Uuid::new_v4().simple()
     );
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(SUPERVISOR)
@@ -471,7 +484,7 @@ async fn bash_supervisor_reaps_its_watcher_without_changing_workload_stderr() ->
         "watcher-diagnostic-fixture-{}",
         uuid::Uuid::new_v4().simple()
     );
-    let dir = reserve_fixture(&token).await?;
+    let (_control_root, dir) = reserve_fixture(&token).await?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new("bash")

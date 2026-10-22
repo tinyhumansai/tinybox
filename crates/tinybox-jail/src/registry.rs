@@ -14,7 +14,7 @@
 //!
 //! All metadata is persisted to `<base>/index.json`. The on-disk index is
 //! the source of truth; the in-memory state is rebuilt from it on every
-//! [`JailRegistry::open`].
+//! [`JailRegistry::open_with_store`].
 //!
 //! Concurrency: a `std::sync::Mutex` guards mutations. The index file
 //! is rewritten atomically via write-temp + rename. This is sufficient
@@ -35,17 +35,18 @@ use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
-use tinybox_core::clock::{Clock, SystemClock};
+use tinybox_core::clock::Clock;
 
 use super::default_backend;
 use super::jail::{Jail, JailBackend};
 
 #[path = "registry_path.rs"]
 mod path;
+pub(crate) use path::canonicalize_missing;
 
 #[path = "registry_index_store.rs"]
 mod index_store;
-pub use index_store::{FileIndexStore, IndexStore};
+pub use index_store::IndexStore;
 
 /// Metadata persisted for each jail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +77,6 @@ struct Index {
 }
 
 const INDEX_SCHEMA_VERSION: u32 = 1;
-const INDEX_FILENAME: &str = "index.json";
 
 /// Top-level manager for multiple jailed workspaces.
 #[derive(Debug)]
@@ -88,32 +88,6 @@ pub struct JailRegistry {
 }
 
 impl JailRegistry {
-    /// Open (or create) a registry rooted at `base`. The directory is
-    /// created if it does not exist; the index file is loaded if present
-    /// and seeded blank otherwise.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the base directory cannot be created or the index
-    /// cannot be read or decoded.
-    pub fn open(base: impl AsRef<Path>) -> io::Result<Self> {
-        Self::open_with_clock(base, Arc::new(SystemClock::new()))
-    }
-
-    /// Open a registry with a caller-supplied clock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the registry directory cannot be created or its
-    /// index cannot be read or decoded.
-    pub fn open_with_clock(base: impl AsRef<Path>, clock: Arc<dyn Clock>) -> io::Result<Self> {
-        let requested_base = base.as_ref().to_path_buf();
-        fs::create_dir_all(&requested_base)?;
-        let canonical = requested_base.canonicalize()?;
-        let store = Arc::new(FileIndexStore::new(canonical.join(INDEX_FILENAME)));
-        Self::open_with_store(requested_base, clock, store)
-    }
-
     /// Open a registry whose index lives in `store` instead of
     /// `<base>/index.json`.
     ///

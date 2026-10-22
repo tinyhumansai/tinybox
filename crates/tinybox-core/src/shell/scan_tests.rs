@@ -1,16 +1,11 @@
 //! Tests for the quote-aware shell scanners.
 //!
-//! A host that gates command execution relies on these, so every case here is
-//! one such a host was found to depend on: quoting that must hide a separator,
-//! an escape that must not, and heredoc bodies that are data only when their
-//! delimiter is quoted.
+//! Structural cases retained by `TinyBox` for generic shell scanning.
 
 use std::borrow::Cow;
 
 use super::scan::{
-    command_basename, contains_unquoted_background_ampersand, contains_unquoted_char,
-    contains_unquoted_single_ampersand, has_leading_env_assignment, normalized_command_name,
-    skip_env_assignments, split_unquoted_segments, strip_heredoc_bodies,
+    contains_unquoted_char, split_unquoted_segments, strip_heredoc_bodies,
     strip_quoted_heredoc_bodies,
 };
 
@@ -57,42 +52,6 @@ fn empty_and_blank_segments_are_dropped() {
     assert_eq!(segs("").len(), 0);
     assert_eq!(segs("  ;  ;\n").len(), 0);
     assert_eq!(segs(";;a;;"), ["a"]);
-}
-
-#[test]
-fn single_ampersand_detection() {
-    assert!(contains_unquoted_single_ampersand("sleep 1 &"));
-    assert!(contains_unquoted_single_ampersand("a & b"));
-    assert!(!contains_unquoted_single_ampersand("a && b"));
-    assert!(!contains_unquoted_single_ampersand("echo 'a & b'"));
-    assert!(!contains_unquoted_single_ampersand(r#"echo "a & b""#));
-    assert!(contains_unquoted_single_ampersand(r"echo \& &"));
-    assert!(!contains_unquoted_single_ampersand(r"echo \&"));
-    // The fd-dup redirect counts here; the background variant is the lenient one.
-    assert!(contains_unquoted_single_ampersand("cmd 2>&1"));
-}
-
-#[test]
-fn background_ampersand_ignores_fd_duplication() {
-    assert!(!contains_unquoted_background_ampersand("cmd 2>&1"));
-    assert!(!contains_unquoted_background_ampersand("cmd >&2"));
-    assert!(!contains_unquoted_background_ampersand("cmd &>out.log"));
-    assert!(!contains_unquoted_background_ampersand("a && b"));
-    assert!(contains_unquoted_background_ampersand("cmd &"));
-    assert!(contains_unquoted_background_ampersand("a & b"));
-    assert!(contains_unquoted_background_ampersand("cmd 2>&1 &"));
-    assert!(!contains_unquoted_background_ampersand("echo 'a & b'"));
-    assert!(!contains_unquoted_background_ampersand(r#"echo "a & b""#));
-    assert!(!contains_unquoted_background_ampersand(r"echo a\&b"));
-    assert!(contains_unquoted_background_ampersand(
-        r#"echo "$(malicious &)""#
-    ));
-    assert!(contains_unquoted_background_ampersand(
-        r#"echo "`malicious &`""#
-    ));
-    assert!(contains_unquoted_background_ampersand(
-        r#"echo "$(echo \) &)""#
-    ));
 }
 
 #[test]
@@ -322,51 +281,4 @@ fn empty_or_multiline_quoted_delimiter_is_not_a_heredoc() {
         strip_quoted_heredoc_bodies("cat << 'EO\nF'\nbody\n"),
         Cow::Borrowed(_)
     ));
-}
-
-#[test]
-fn basename_handles_both_separators() {
-    assert_eq!(command_basename("/usr/bin/git"), "git");
-    assert_eq!(command_basename(r"C:\Windows\System32\cmd.exe"), "cmd.exe");
-    assert_eq!(command_basename("git"), "git");
-    assert_eq!(command_basename(""), "");
-    assert_eq!(command_basename("/bin/"), "");
-}
-
-#[test]
-fn normalized_name_lowercases_and_strips_exe() {
-    assert_eq!(normalized_command_name("/usr/bin/GIT"), "git");
-    assert_eq!(
-        normalized_command_name(r"C:\x\PowerShell.EXE"),
-        "powershell"
-    );
-    assert_eq!(normalized_command_name("python3"), "python3");
-    assert_eq!(normalized_command_name("a.exe.exe"), "a.exe");
-}
-
-#[test]
-fn leading_env_assignment_shape() {
-    assert!(has_leading_env_assignment("FOO=bar cmd"));
-    assert!(has_leading_env_assignment("  _x1=1 cmd"));
-    assert!(has_leading_env_assignment("LD_PRELOAD=/x ls"));
-    assert!(has_leading_env_assignment("A= cmd"));
-    assert!(!has_leading_env_assignment("cmd FOO=bar"));
-    assert!(!has_leading_env_assignment("=bar cmd"));
-    assert!(!has_leading_env_assignment("1A=b cmd"));
-    assert!(!has_leading_env_assignment("foo[bar]=1 cmd"));
-    assert!(!has_leading_env_assignment("git log"));
-    assert!(!has_leading_env_assignment(""));
-}
-
-#[test]
-fn skipping_env_assignments() {
-    assert_eq!(skip_env_assignments("A=1 B=2 git log"), "git log");
-    assert_eq!(skip_env_assignments("  A=1 B=2 git log"), "git log");
-    assert_eq!(skip_env_assignments("git log"), "git log");
-    assert_eq!(skip_env_assignments("A=1"), "");
-    assert_eq!(skip_env_assignments(""), "");
-    // `=` in a non-identifier word is a command, not an assignment.
-    assert_eq!(skip_env_assignments("1A=b cmd"), "1A=b cmd");
-    // The assignment filter is intentionally looser than the shape check.
-    assert_eq!(skip_env_assignments("foo[bar]=1 cmd"), "cmd");
 }

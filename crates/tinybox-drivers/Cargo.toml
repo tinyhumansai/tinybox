@@ -6,21 +6,28 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Not published: it depends on `tinystoragedrivers-core` by git tag, which a
-# crates.io package cannot do. The published crates stay free of any storage
-# dependency.
+# Not published: it depends on `tinystoragedrivers` git crates, which a
+# crates.io package cannot resolve. The published crates stay free of any
+# storage dependency.
 publish = false
 
 [dependencies]
+tinybox-bus = { workspace = true, features = ["storage"] }
 tinybox-core.workspace = true
 tinybox-jail.workspace = true
-tinystoragedrivers-core = { workspace = true, features = ["blocking"] }
+tinystoragedrivers-api.workspace = true
+tinystoragedrivers-types.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 log = "0.4"
+tokio.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3"
 tokio = { workspace = true }
+tinystoragedrivers-testkit.workspace = true
+tinystoragedrivers-document.workspace = true
 
 [lints]
 workspace = true

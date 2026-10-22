@@ -13,15 +13,14 @@
 //!
 //! # State
 //!
-//! `create` and `exec` are separate processes, so box records live in a JSON
-//! file — see [`FileStore`]. Point `TINYBOX_STATE_DIR` somewhere else to keep a
-//! run self-contained.
+//! The CLI library receives its [`tinybox_core::Store`] and
+//! [`tinybox_core::Templates`] from a host composition root. The `tinybox`
+//! executable chooses a local document engine and imports the previous JSON
+//! state files before dispatch.
 
 mod command;
-mod document;
-mod store;
-mod templates;
 
-pub use command::{Cli, run, run_with_host};
-pub use store::FileStore;
-pub use templates::FileTemplates;
+pub use command::Cli;
+
+#[cfg(test)]
+pub use command::{run, run_with_host};

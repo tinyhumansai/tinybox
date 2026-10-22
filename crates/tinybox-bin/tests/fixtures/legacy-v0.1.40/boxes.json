@@ -1,0 +1,39 @@
+{
+  "box-released": {
+    "id": "box-released",
+    "state": "Ready",
+    "spec": {
+      "runner": {
+        "host": "local",
+        "sandbox": "passthrough"
+      },
+      "workspace": {
+        "host": "local",
+        "sandbox": "passthrough"
+      },
+      "source": {
+        "LocalDir": "/srv/legacy-project"
+      },
+      "resources": {
+        "cpu_millis": 2000,
+        "memory_bytes": 2147483648,
+        "pids_max": 512,
+        "disk_bytes": 8589934592
+      },
+      "lifecycle": {
+        "Ephemeral": {
+          "ttl": {
+            "secs": 3600,
+            "nanos": 0
+          }
+        }
+      },
+      "network": "Denied",
+      "ports": [],
+      "env": {
+        "FIXTURE": "released-writer"
+      }
+    },
+    "created_at": null
+  }
+}

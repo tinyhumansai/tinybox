@@ -231,6 +231,68 @@ fn baseline_lets_the_resolver_config_be_read_through_its_symlink() -> io::Result
     Ok(())
 }
 
+#[test]
+fn raw_landlock_spawn_refuses_a_deny_root_that_overlaps_implicit_baseline_access() -> io::Result<()>
+{
+    if !available() {
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let backend = LandlockBackend::new();
+    let baseline = SYSTEM_READ_PATHS
+        .iter()
+        .chain(DEVICE_PATHS)
+        .filter(|path| Path::new(path).exists())
+        .collect::<Vec<_>>();
+    assert!(
+        !baseline.is_empty(),
+        "the test host must expose baseline paths"
+    );
+    for path in baseline {
+        let mut jail = jail_for(root.path());
+        jail.deny_read.push(Path::new(path).to_path_buf());
+        let result = backend.spawn(&jail, Command::new("/bin/true"));
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidInput),
+            "raw LandlockBackend::spawn must refuse deny root {path} that overlaps an implicit baseline grant"
+        );
+    }
+
+    // `/bin` is commonly a symlink to `/usr/bin`; prospective denials through
+    // the alias must also conflict with the canonical baseline grant.
+    let mut aliased = jail_for(root.path());
+    aliased
+        .deny_read
+        .push(Path::new("/bin/tinybox-future-credential").to_path_buf());
+    let result = backend.spawn(&aliased, Command::new("/bin/true"));
+    assert_eq!(
+        result.err().map(|error| error.kind()),
+        Some(io::ErrorKind::InvalidInput)
+    );
+    Ok(())
+}
+
+#[test]
+fn landlock_validation_keeps_future_baseline_roots_protected() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let baseline_root = tempfile::tempdir()?;
+    let future_baseline = baseline_root
+        .path()
+        .join("baseline-created-after-preflight");
+    let mut jail = jail_for(root.path());
+    jail.deny_read
+        .push(future_baseline.join("future-credential"));
+
+    let result = jail.validate_denials(false, &[future_baseline]);
+    assert_eq!(
+        result.err().map(|error| error.kind()),
+        Some(io::ErrorKind::InvalidInput),
+        "a prospective baseline grant could appear before Landlock opens its rules"
+    );
+    Ok(())
+}
+
 /// File grants must enforce fully without granting their parent directory.
 #[test]
 fn individual_file_grants_preserve_read_only_and_read_write_access() -> io::Result<()> {

@@ -28,14 +28,21 @@ mod shell_selection;
 pub use shell_execution::ShellExecRequest;
 pub use shell_selection::{SelectShellRequest, ShellFlavor, ShellInvocation};
 
+mod stdio;
+#[cfg(feature = "storage")]
+pub mod storage;
+pub use stdio::{
+    MAX_STDIO_BUFFER_BYTES, MAX_STDIO_PROCESSES, MAX_STDIO_READ_BYTES, MAX_STDIO_WAIT_MS,
+    MAX_STDIO_WRITE_BYTES, STDIO_CLOSED, StdioChunk, StdioExit, StdioReadRequest,
+    StdioStartRequest, StdioStatus, StdioWriteRequest,
+};
+
 mod policy;
 pub use policy::{DockerPolicyReport, DockerPolicyRequest};
 
 mod event;
 pub use event::{DenialKind, EgressAllowlist, LimitKind, SandboxEvent};
 
-mod shell;
-pub use shell::{CommandAnalysis, CommandClass, CommandSegment};
 mod files;
 pub use files::{
     AbortFileWriteRequest, BeginFileReadRequest, BeginFileWriteRequest, FileChunk, FileReadInfo,
@@ -49,7 +56,7 @@ pub use files::{
 /// reservations, owned lifecycle/operations, capabilities and terminal shutdown.
 /// 1.2 adds host selection, container networking/ports, and owned forwards.
 /// 1.3 adds native jail discovery.
-/// 1.4 adds detailed shell facts for host execution policy. 1.5 adds bounded
+/// 1.4 added legacy shell facts for host execution policy, removed in 2.0. 1.5 adds bounded
 /// file transfer for mounted workspaces. 1.6 adds bounded live native output.
 /// 1.7 adds explicitly approved native directory-jail execution. 1.8 adds a
 /// bounded, module-owned one-shot Docker operation. 1.9 adds bounded Docker
@@ -68,8 +75,11 @@ pub use files::{
 /// suppression for a native shell child; ignored elsewhere).
 /// 1.19 adds `NetworkPolicy::Allowlist` and the observational
 /// [`SandboxEvent`] vocabulary (`Started`, `Denied`, `LimitHit`, `Exited`).
-/// 1.20 adds opted-in byte-preserving Unix grant transport.
-pub const CONTRACT_VERSION: (u32, u32) = (1, 20);
+/// 1.20 adds `deny_read` to [`NativeJailConfig`].
+/// 1.21 adds interactive piped-stdio members. 1.22 adds optional hard resource
+/// limits. The merged 2.0 surface also carries opted-in byte-preserving Unix
+/// grant transport and removes TinyBox-owned command policy classification.
+pub const CONTRACT_VERSION: (u32, u32) = (2, 0);
 
 /// Whether this host vocabulary can bind to a module's advertised version.
 /// The major must match and the module's minor must include every host member.
@@ -142,8 +152,6 @@ pub mod names {
     pub const CLOSE_FORWARD: &str = "CloseForward";
     /// Wire name of the `JailStatus` member.
     pub const JAIL_STATUS: &str = "JailStatus";
-    /// Wire name of the `AnalyzeCommand` member.
-    pub const ANALYZE_COMMAND: &str = "AnalyzeCommand";
     /// Wire name of the `BeginFileRead` member.
     pub const BEGIN_FILE_READ: &str = "BeginFileRead";
     /// Wire name of the `ReadFileChunk` member.
@@ -184,10 +192,22 @@ pub mod names {
     pub const START_NATIVE_SHELL_EXEC: &str = "StartNativeShellExec";
     /// Wire name of the `ValidateDockerPolicy` member.
     pub const VALIDATE_DOCKER_POLICY: &str = "ValidateDockerPolicy";
+    /// Wire name of the `StartStdio` member.
+    pub const START_STDIO: &str = "StartStdio";
+    /// Wire name of the `WriteStdio` member.
+    pub const WRITE_STDIO: &str = "WriteStdio";
+    /// Wire name of the `ReadStdio` member.
+    pub const READ_STDIO: &str = "ReadStdio";
+    /// Wire name of the `CloseStdin` member.
+    pub const CLOSE_STDIN: &str = "CloseStdin";
+    /// Wire name of the `KillStdio` member.
+    pub const KILL_STDIO: &str = "KillStdio";
+    /// Wire name of the `StdioStatus` member.
+    pub const STDIO_STATUS: &str = "StdioStatus";
 }
 
-/// Supported additive methods, including the original discovery operation.
-/// Derived from [`names`]; the order is append-only.
+/// Supported methods in this contract, including the original discovery
+/// operation. Derived from [`names`]; the order is stable within this major.
 pub const METHODS: &[&str] = &[
     names::DESCRIBE,
     names::CREATE,
@@ -204,7 +224,6 @@ pub const METHODS: &[&str] = &[
     names::FORWARD,
     names::CLOSE_FORWARD,
     names::JAIL_STATUS,
-    names::ANALYZE_COMMAND,
     names::BEGIN_FILE_READ,
     names::READ_FILE_CHUNK,
     names::FINISH_FILE_READ,
@@ -225,6 +244,12 @@ pub const METHODS: &[&str] = &[
     names::START_SHELL_EXEC,
     names::START_NATIVE_SHELL_EXEC,
     names::VALIDATE_DOCKER_POLICY,
+    names::START_STDIO,
+    names::WRITE_STDIO,
+    names::READ_STDIO,
+    names::CLOSE_STDIN,
+    names::KILL_STDIO,
+    names::STDIO_STATUS,
 ];
 
 /// Facts about the detected native directory-jail backend.
@@ -648,13 +673,12 @@ pub struct ProcessRef {
     pub process: ResourceId,
 }
 
-/// Structural shell facts. These do not grant permission or choose an access tier.
+/// Generic structural shell facts. These do not classify a command, grant
+/// permission, or choose an access tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellAnalysis {
     /// Live shell segments after quoted heredoc bodies are removed.
     pub segments: Vec<String>,
-    /// Whether shell syntax can execute hidden commands.
-    pub hidden_execution: bool,
     /// Whether an unquoted redirect occurs outside heredoc data.
     pub redirection: bool,
 }
@@ -668,3 +692,5 @@ pub use output::{ExecutionFailure, ExecutionState, OutputBatch, OutputChunk, Out
 
 /// Invalid native shell execution inputs.
 pub const INVALID_SHELL_EXEC: &str = "ai.tinyhumans.tinybox.Error.InvalidShellExec";
+/// Invalid interactive stdio program, argument, or environment.
+pub const INVALID_STDIO: &str = "ai.tinyhumans.tinybox.Error.InvalidStdio";

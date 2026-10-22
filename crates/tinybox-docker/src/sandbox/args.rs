@@ -113,6 +113,9 @@ pub(super) fn run(
         format!("{OWNER_LABEL}={id}"),
         "--label".to_owned(),
         format!("{OWNER_ATTEMPT_LABEL}={attempt}"),
+        // Stop setuid/setgid escalation inside the container.
+        "--security-opt".to_owned(),
+        "no-new-privileges".to_owned(),
     ];
 
     argv.extend(resource_flags(&spec.resources));
@@ -131,6 +134,8 @@ pub(super) fn run(
         argv.push(format!("{key}={value}"));
     }
 
+    // End docker's options so an image like `--privileged` stays a positional.
+    argv.push("--".to_owned());
     argv.push(image_reference(spec)?);
     argv.extend(KEEPALIVE.iter().map(|part| (*part).to_owned()));
     Ok(argv)

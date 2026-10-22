@@ -17,6 +17,9 @@ use tinybus::broker::Broker;
 use tinybus::module::ModuleHost;
 use tinybus::transport::memory::MemoryBus;
 
+#[path = "support/storage_host.rs"]
+mod storage_host;
+
 const INTERFACE: &str = "ai.tinyhumans.tinybox.Box";
 const OBJECT_PATH: &str = "/ai/tinyhumans/tinybox/Box";
 
@@ -26,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus = MemoryBus::new();
     let broker = Broker::new();
     let broker_task = broker.spawn(bus.clone());
+    let _storage_host = storage_host::serve(&bus).await?;
     let module_host = ModuleHost::new(broker);
     let info = module_host.load_github_release(
         &release_url,

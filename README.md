@@ -301,7 +301,6 @@ crates/
 └── tinybox-module/          # cdylib, TinyBus ABI v1  ->  libtinybox.so
     ├── src/tinybus_module/  # bus interface, setup, ABI exports
     └── examples/            # verify_module, verify_github_release
-vendor/tinybus/              # pinned TinyBus git submodule (build-time SDK)
 docs/
 ├── specs/tinybox-runtime.md # the runtime specification
 ├── plans/                   # implementation-ordered delivery plans

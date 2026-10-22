@@ -12,7 +12,8 @@
 //!
 //! | OS      | Backend       | Mechanism                                  |
 //! |---------|---------------|--------------------------------------------|
-//! | Linux   | landlock      | Kernel 5.13+ LSM, applied on a spawn thread |
+//! | Linux   | bubblewrap    | `bwrap` namespaces; process isolation      |
+//! | Linux   | landlock      | Fallback: kernel 5.13+ LSM, spawn thread   |
 //! | macOS   | seatbelt      | `sandbox-exec -p '<profile>' …`            |
 //! | Windows | (not compiled)| `AppContainer`, pending a `Child` bridge   |
 //! | other   | unsupported   | Spawning is rejected                       |
@@ -61,15 +62,19 @@ pub mod registry;
 // deliberately not compiled: it needs `unsafe` FFI the workspace forbids and
 // cannot yet return a waitable `std::process::Child`.
 #[cfg(target_os = "linux")]
+pub mod bwrap;
+#[cfg(target_os = "linux")]
 pub mod linux;
 pub mod macos;
 
-pub use jail::{Jail, JailBackend};
+#[cfg(target_os = "linux")]
+pub use bwrap::{BWRAP_BACKEND_NAME, BubblewrapBackend};
+pub use jail::{Jail, JailBackend, nested_denial, reject_symlinked_grants};
 #[cfg(target_os = "linux")]
 pub use linux::LandlockBackend;
 pub use macos::SeatbeltBackend;
 pub use noop::{NOOP_BACKEND_NAME, NoopBackend};
-pub use registry::{FileIndexStore, IndexStore, JailRecord, JailRegistry};
+pub use registry::{IndexStore, JailRecord, JailRegistry};
 
 use std::process::{Child, Command};
 use std::sync::{Arc, OnceLock};
@@ -99,7 +104,10 @@ pub fn default_backend() -> Arc<dyn JailBackend> {
 pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
     let mut jail = jail.clone();
     jail.canonicalize()?;
-    default_backend().spawn(&jail, cmd)
+    let backend = default_backend();
+    require_resources(backend.as_ref(), &jail)?;
+    jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
+    backend.spawn(&jail, cmd)
 }
 
 /// Same as [`spawn`] but with a caller-supplied backend. Useful in
@@ -116,6 +124,8 @@ pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
 pub fn spawn_with(backend: &dyn JailBackend, jail: &Jail, cmd: Command) -> std::io::Result<Child> {
     let mut jail = jail.clone();
     jail.canonicalize()?;
+    require_resources(backend, &jail)?;
+    jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
     backend.spawn(&jail, cmd)
 }
 
@@ -130,16 +140,30 @@ pub fn spawn_captured_with(
 ) -> std::io::Result<Child> {
     let mut jail = jail.clone();
     jail.canonicalize()?;
+    require_resources(backend, &jail)?;
+    jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
     backend.spawn_captured(&jail, cmd)
+}
+
+fn require_resources(backend: &dyn JailBackend, jail: &Jail) -> std::io::Result<()> {
+    backend.require_resources(jail).map_err(|error| {
+        let kind = match error {
+            tinybox_core::Error::ZeroResourceLimit { .. } => std::io::ErrorKind::InvalidInput,
+            _ => std::io::ErrorKind::Unsupported,
+        };
+        std::io::Error::new(kind, error)
+    })
 }
 
 /// Spawn only after all jail constraints pass a hard preflight.
 ///
 /// This strict entry point rejects the explicitly trusted no-op backend and
-/// Seatbelt's partial filesystem policy. Landlock can satisfy filesystem-only
-/// requests, but offers no process isolation and is unsuitable for arbitrary
-/// untrusted code. Availability and actual policy application are also checked
-/// by the backend when spawning.
+/// any backend that cannot enforce a requested constraint (Seatbelt's partial
+/// filesystem policy, Landlock's missing network and subprocess denial).
+/// Whether a backend isolates *processes* well enough for untrusted code is a
+/// separate question: ask [`JailBackend::is_suitable_for_untrusted_jail`].
+/// Availability and actual policy application are also checked by the backend
+/// when spawning.
 ///
 /// # Errors
 /// Returns `Unsupported` before spawning for partial or unsupported constraints,

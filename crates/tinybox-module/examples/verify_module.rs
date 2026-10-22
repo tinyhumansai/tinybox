@@ -13,6 +13,9 @@ use tinybus::broker::Broker;
 use tinybus::module::ModuleHost;
 use tinybus::transport::memory::MemoryBus;
 
+#[path = "support/storage_host.rs"]
+mod storage_host;
+
 const INTERFACE: &str = "ai.tinyhumans.tinybox.Box";
 const OBJECT_PATH: &str = "/ai/tinyhumans/tinybox/Box";
 
@@ -22,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bus = MemoryBus::new();
     let broker = Broker::new();
     let broker_task = broker.spawn(bus.clone());
+    let _storage_host = storage_host::serve(&bus).await?;
     let module_host = ModuleHost::new(broker);
     let info = module_host.load_file(&module)?;
 
@@ -100,26 +104,14 @@ async fn verify_resources(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::err
     {
         return Err(io::Error::other("invalid native jail enforcement facts").into());
     }
-    let facts: tinybox_bus::CommandAnalysis = proxy
-        .call("AnalyzeCommand", ("echo hello".to_owned(),))
-        .await?;
-    if facts.segments.len() != 1
-        || facts.segments[0].class != tinybox_bus::CommandClass::Read
-        || facts.literal_words != ["echo", "hello"]
-        || facts.hidden_execution
-        || facts.redirection
-        || facts.expansion
-        || facts.background
-    {
-        return Err(io::Error::other("unexpected command classification facts").into());
-    }
-    // Exercise real resource ownership through the loaded native artifact.
+    // Verify generic shell structure only; command policy belongs to TinySecurity.
     let analysis: ShellAnalysis = proxy
         .call("AnalyzeShell", ("echo hello".to_owned(),))
         .await?;
-    if analysis.hidden_execution || analysis.redirection {
+    if analysis.segments != ["echo hello"] || analysis.redirection {
         return Err(io::Error::other("unexpected shell analysis").into());
     }
+    // Exercise real resource ownership through the loaded native artifact.
     if capabilities
         .create_backends
         .iter()

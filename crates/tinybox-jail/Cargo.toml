@@ -1,6 +1,6 @@
 [package]
 name = "tinybox-jail"
-description = "Per-process directory jail for spawned commands: Landlock, Seatbelt, and AppContainer."
+description = "Per-process directory jail for spawned commands: bubblewrap, Landlock, Seatbelt, and AppContainer."
 documentation = "https://docs.rs/tinybox-jail"
 version.workspace = true
 edition.workspace = true
@@ -30,6 +30,9 @@ serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = { version = "0.4", optional = true }
+# `NamespaceProbe` locates `bwrap`; reused so there is one definition of how the
+# Linux backends find it.
+tinybox-linux.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # AppContainer profile APIs, ACL editing, STARTUPINFOEXW process spawn, and the
@@ -46,6 +49,16 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 tempfile = "3"
+tinystoragedrivers-api.workspace = true
+tinystoragedrivers-testkit.workspace = true
+tinystoragedrivers-types.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Clears close-on-exec on a descriptor in the fd-leak regression test; the safe
+# `fcntl_setfd` avoids `unsafe`, which the workspace forbids. Already in the
+# lockfile through tempfile.
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 
 [lints]
 workspace = true

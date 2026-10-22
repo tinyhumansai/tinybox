@@ -1,20 +1,31 @@
 //! Unconditional compiled-artifact admission and local grant discovery proof.
 
+use std::sync::Arc;
 use std::time::Duration;
 use tinybus::{Connection, broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
+use tinystoragedrivers_api::StorageBackend;
+use tinystoragedrivers_busproxy::{PerCallerEndpoint, ServedStorage, StorageServer, serve};
+use tinystoragedrivers_testkit::MemoryBackend;
+use tinystoragedrivers_types::Scope;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compiled_manifest_admits_and_executes_grant_and_shell_discovery()
 -> Result<(), Box<dyn std::error::Error>> {
     let built_artifact = compiled_artifact()?;
-    // Cargo output inherits the checkout ACL on Windows, which need not meet
-    // production module admission. Stage the real artifact with private ACLs.
-    let staged = tempfile::Builder::new()
-        .prefix("admitted-module-")
-        .tempdir_in(built_artifact.parent().ok_or("artifact has no directory")?)?;
+    // Cargo output inherits checkout permissions and writable ancestors, which
+    // need not meet production admission. Stage the real artifact privately.
+    let mut staging = tempfile::Builder::new();
+    staging.prefix("admitted-module-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        staging.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let staged = staging.tempdir_in(std::env::temp_dir())?;
     #[cfg(windows)]
     secure_staging_directory(staged.path())?;
-    let artifact = staged.path().join(
+    let staging_path = staged.path().canonicalize()?;
+    let artifact = staging_path.join(
         built_artifact
             .file_name()
             .ok_or("artifact has no filename")?,
@@ -28,6 +39,7 @@ async fn compiled_manifest_admits_and_executes_grant_and_shell_discovery()
     let bus = MemoryBus::new();
     let broker = Broker::new();
     let broker_task = broker.spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
     let modules = ModuleHost::new(broker);
     let loaded = modules.load_file(&artifact)?;
     let declared: Vec<_> = loaded
@@ -63,6 +75,29 @@ async fn compiled_manifest_admits_and_executes_grant_and_shell_discovery()
     proxy.call::<()>("Shutdown", ()).await?;
     broker_task.abort();
     Ok(())
+}
+
+struct ServedTestStorage {
+    _host: Connection,
+    _served: ServedStorage,
+}
+
+async fn serve_test_storage(bus: &MemoryBus) -> tinybus::Result<ServedTestStorage> {
+    let backend = Arc::new(MemoryBackend::new());
+    let host = Connection::connect(bus.connect().await?).await?;
+    let bound = Arc::clone(&backend);
+    let endpoint = PerCallerEndpoint::new(move |_sender| {
+        let scope = Scope::new("tinybox/grants-manifest-e2e").ok()?;
+        let storage = bound.for_scope(&scope).ok()?;
+        Some(StorageServer::new(storage))
+    });
+    let served = serve(&host, Arc::new(endpoint))
+        .await
+        .map_err(|error| tinybus::Error::failed(error.to_string()))?;
+    Ok(ServedTestStorage {
+        _host: host,
+        _served: served,
+    })
 }
 
 async fn verify_discovery(proxy: &tinybus::Proxy) -> Result<(), Box<dyn std::error::Error>> {

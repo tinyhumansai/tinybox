@@ -34,7 +34,10 @@ impl JailBackend for UnsupportedBackend {
 /// waitable `std::process::Child` yet (see `windows.rs`).
 #[cfg(target_os = "linux")]
 fn candidates() -> Vec<Arc<dyn JailBackend>> {
-    vec![Arc::new(crate::linux::LandlockBackend::new())]
+    vec![
+        Arc::new(crate::bwrap::BubblewrapBackend::new()),
+        Arc::new(crate::linux::LandlockBackend::new()),
+    ]
 }
 
 /// The OS backends this build knows about, strongest first.
@@ -49,8 +52,8 @@ fn candidates() -> Vec<Arc<dyn JailBackend>> {
     Vec::new()
 }
 
-/// Picks the first available OS backend (Landlock on Linux, Seatbelt on
-/// macOS). When none works it logs a warning and returns an unsupported
+/// Picks the first available OS backend (bubblewrap then Landlock on Linux,
+/// Seatbelt on macOS). When none works it logs a warning and returns an unsupported
 /// backend whose `is_available` is `false` and whose `spawn` fails with
 /// `ErrorKind::Unsupported`. It never silently returns an unconfined backend:
 /// a caller that wants to run unconfined must choose `NoopBackend` itself.

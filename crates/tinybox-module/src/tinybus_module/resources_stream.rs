@@ -145,7 +145,10 @@ fn select_collector(
             )
         })?;
         Collector::Jailed(super::super::native_jail::collector(
-            root, config, resolved,
+            root,
+            config,
+            resolved,
+            tinybox_jail::default_backend(),
         )?)
     } else {
         let native = Arc::new(tinybox_host::LimitedLocalHost::new(
@@ -523,6 +526,7 @@ impl Resources {
                     .values()
                     .filter(|stream| stream.request.command.resource == process.resource)
                     .count()
+                + self.stdio_count(&process.resource)
                 >= tinybox_bus::MAX_PROCESSES_PER_RESOURCE
             {
                 return Err(failure(
@@ -590,6 +594,7 @@ impl Resources {
                     .values()
                     .filter(|stream| stream.request.command.resource == request.command.resource)
                     .count()
+                + self.stdio_count(&request.command.resource)
                 >= tinybox_bus::MAX_PROCESSES_PER_RESOURCE
         {
             return Err(failure(
@@ -677,7 +682,7 @@ impl Resources {
             .collect()
     }
     pub(super) fn at_process_limit(&self, entry: &super::Resource, resource: &ResourceId) -> bool {
-        entry.processes.len() + self.streams_for(resource).len()
+        entry.processes.len() + self.streams_for(resource).len() + self.stdio_count(resource)
             >= tinybox_bus::MAX_PROCESSES_PER_RESOURCE
     }
     pub(super) fn stream_cleanup_pending(&self, resource: &ResourceId) -> bool {

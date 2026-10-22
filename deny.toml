@@ -7,7 +7,6 @@ all-features = true
 [advisories]
 # Fail on any crate with a security advisory or an unmaintained warning.
 # Add an entry here only with a comment explaining the exposure and the plan.
-ignore = []
 
 [licenses]
 # Licenses accepted for this crate and its dependencies. Keep GPL-3.0-only for
@@ -40,5 +39,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # `tinybox-drivers` (never published) takes the storage ports from the
-# tinystoragedrivers repository by tag.
-allow-git = ["https://github.com/tinyhumansai/tinystoragedrivers"]
+# canonical tinystoragedrivers v2.1 commit.
+allow-git = [
+    "https://github.com/tinyhumansai/tinystoragedrivers",
+]

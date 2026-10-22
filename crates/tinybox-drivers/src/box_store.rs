@@ -2,29 +2,28 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
 use tinybox_core::{BoxId, BoxInfo, BoxState, Error, Result, Store};
-use tinystoragedrivers_core::{
-    Blocking, CollectionSpec, DocumentStore, DocumentStoreExt, ErrorKind, Precondition, Query,
-    StorageError, Versioned,
-};
+use tinystoragedrivers_api::{DocumentStore, Storage};
+use tinystoragedrivers_types::{ErrorKind, Key, Query, StorageError, WriteOptions};
 
-/// The collection that holds one document per box, keyed by box id.
-pub const BOX_COLLECTION: &str = "tinybox_boxes";
+use crate::blocking::Blocking;
+use crate::migrations;
+use crate::record::{BoxRecord, StateRecord};
+use crate::repo::Repo;
+use tinybox_bus::storage::{BODY_VERSION, BOX_COLLECTION};
 
-/// How many times a read-modify-write retries when another writer wins.
-const CAS_ATTEMPTS: usize = 8;
-
-/// Box records as documents, `tinybox_boxes/<box id>`.
+/// Box records as documents, `box.boxes/<box id>`.
 ///
 /// Inserts use an absent-only precondition, so two processes racing for one
 /// name resolve to a [`Error::DuplicateBox`] for the loser (which
 /// [`insert_new`](tinybox_core::store::insert_new) retries). State changes are
-/// compare-and-swap on the document version, so they never overwrite a
-/// concurrent change.
+/// one compare-and-swap loop on the document version, so
+/// they never overwrite a concurrent change.
+///
+/// The collection is declared and migrated by the owner when this store opens.
 #[derive(Clone)]
 pub struct DocumentBoxStore {
-    documents: Arc<dyn DocumentStore>,
+    boxes: Repo<BoxRecord>,
     bridge: Blocking,
 }
 
@@ -35,22 +34,23 @@ impl std::fmt::Debug for DocumentBoxStore {
 }
 
 impl DocumentBoxStore {
-    /// A store on `documents`; the collection is declared here.
+    /// Open a store and migrate legacy box documents before returning it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Store`] when the bridge cannot start or the backend
-    /// refuses the collection.
-    pub fn new(documents: Arc<dyn DocumentStore>) -> Result<Self> {
+    /// Returns [`Error::Store`] when declarations, migrations, or the bridge
+    /// cannot be opened.
+    pub async fn open(storage: Storage) -> Result<Self> {
+        migrations::prepare(&storage)
+            .await
+            .map_err(|error| store_error("open", &error))?;
+        let documents: Arc<dyn DocumentStore> = Arc::clone(storage.documents());
         let bridge = Blocking::new().map_err(|error| store_error("open", &error))?;
-        let store = Self { documents, bridge };
-        let docs = Arc::clone(&store.documents);
-        store.run("open", async move {
-            docs.ensure_collection(&CollectionSpec::new(BOX_COLLECTION))
-                .await
-        })?;
+        let boxes = Repo::new(&documents, BOX_COLLECTION)
+            .map_err(|error| store_error("open", &error))?
+            .with_options(WriteOptions::new().schema(BODY_VERSION));
         log::debug!("[tinybox_drivers] box store ready collection={BOX_COLLECTION}");
-        Ok(store)
+        Ok(Self { boxes, bridge })
     }
 
     fn run<T, F>(&self, operation: &'static str, future: F) -> Result<T>
@@ -63,15 +63,6 @@ impl DocumentBoxStore {
             .and_then(|inner| inner)
             .map_err(|error| store_error(operation, &error))
     }
-
-    fn fetch(&self, id: &BoxId) -> Result<Versioned<Value>> {
-        let docs = Arc::clone(&self.documents);
-        let key = id.as_str().to_owned();
-        self.run("read", async move { docs.get(BOX_COLLECTION, &key).await })?
-            .ok_or_else(|| Error::UnknownBox {
-                id: id.as_str().to_owned(),
-            })
-    }
 }
 
 fn store_error(operation: &'static str, error: &StorageError) -> Error {
@@ -81,25 +72,45 @@ fn store_error(operation: &'static str, error: &StorageError) -> Error {
     }
 }
 
-fn decode(found: Value) -> Result<BoxInfo> {
-    serde_json::from_value(found).map_err(|error| Error::Store {
+fn key(id: &BoxId) -> Result<String> {
+    Key::new(id.as_str())
+        .map(|key| key.as_str().to_owned())
+        .map_err(|error| store_error("key", &error))
+}
+
+fn unknown(id: &BoxId) -> Error {
+    Error::UnknownBox {
+        id: id.as_str().to_owned(),
+    }
+}
+
+/// The record stored under document id `key`, as a model record.
+fn decode(key: &str, record: BoxRecord) -> Result<BoxInfo> {
+    let id = BoxId::new(key).map_err(|error| Error::Store {
         operation: "decode",
         message: error.to_string(),
-    })
+    })?;
+    Ok(record.into_info(id))
+}
+
+/// Document ids and bodies are read through serde, so a body that is not a
+/// [`BoxRecord`] arrives as a serialization error; report it as a decode.
+fn read_error(operation: &'static str, error: &StorageError) -> Error {
+    if error.kind() == ErrorKind::Serialization {
+        store_error("decode", error)
+    } else {
+        store_error(operation, error)
+    }
 }
 
 impl Store for DocumentBoxStore {
     fn insert(&self, info: &BoxInfo) -> Result<()> {
-        let doc = serde_json::to_value(info).map_err(|error| Error::Store {
-            operation: "encode",
-            message: error.to_string(),
-        })?;
-        let docs = Arc::clone(&self.documents);
-        let key = info.id.as_str().to_owned();
-        let outcome = self.bridge.run(async move {
-            docs.put(BOX_COLLECTION, &key, doc, Precondition::Absent)
-                .await
-        });
+        let record = BoxRecord::try_from(info)?;
+        let key = key(&info.id)?;
+        let boxes = self.boxes.clone();
+        let outcome = self
+            .bridge
+            .run(async move { boxes.insert(&key, &record).await });
         match outcome.and_then(|inner| inner) {
             Ok(_) => Ok(()),
             Err(error)
@@ -114,62 +125,70 @@ impl Store for DocumentBoxStore {
     }
 
     fn get(&self, id: &BoxId) -> Result<BoxInfo> {
-        decode(self.fetch(id)?.doc)
+        let key = key(id)?;
+        let boxes = self.boxes.clone();
+        let lookup = key.clone();
+        let found = self
+            .bridge
+            .run(async move { boxes.get(&lookup).await })
+            .and_then(|inner| inner)
+            .map_err(|error| read_error("read", &error))?;
+        let found = found.ok_or_else(|| unknown(id))?;
+        decode(&key, found.doc)
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>> {
-        let docs = Arc::clone(&self.documents);
-        let found = self.run("list", async move {
-            docs.query_all(BOX_COLLECTION, &Query::default()).await
-        })?;
+        let boxes = self.boxes.clone();
+        let found = self
+            .bridge
+            .run(async move {
+                let mut query = Query::default();
+                let mut all = Vec::new();
+                loop {
+                    let page = boxes.query(&query).await?;
+                    all.extend(page.items);
+                    match page.next {
+                        Some(cursor) => query.cursor = Some(cursor),
+                        None => return Ok(all),
+                    }
+                }
+            })
+            .and_then(|inner: std::result::Result<Vec<_>, StorageError>| inner)
+            .map_err(|error| read_error("list", &error))?;
         // Documents come back ordered by id; keep that so output is stable.
-        found.into_iter().map(|entry| decode(entry.doc)).collect()
+        found
+            .into_iter()
+            .map(|entry| decode(&entry.id, entry.doc))
+            .collect()
     }
 
     fn set_state(&self, id: &BoxId, state: BoxState) -> Result<()> {
-        for _ in 0..CAS_ATTEMPTS {
-            let found = self.fetch(id)?;
-            let mut info = decode(found.doc)?;
-            info.state = state;
-            let doc = serde_json::to_value(&info).map_err(|error| Error::Store {
-                operation: "encode",
-                message: error.to_string(),
-            })?;
-            let docs = Arc::clone(&self.documents);
-            let key = id.as_str().to_owned();
-            let version = found.version;
-            let outcome = self.bridge.run(async move {
-                docs.put(BOX_COLLECTION, &key, doc, Precondition::Version(version))
+        let state = StateRecord::try_from(state)?;
+        let key = key(id)?;
+        let boxes = self.boxes.clone();
+        let updated = self
+            .bridge
+            .run(async move {
+                boxes
+                    .update(&key, |current| {
+                        Ok(current.map(|mut record| {
+                            record.state = state;
+                            record
+                        }))
+                    })
                     .await
-            });
-            match outcome.and_then(|inner| inner) {
-                Ok(_) => return Ok(()),
-                // Another writer changed the record first: read it again.
-                Err(error) if matches!(error.kind(), ErrorKind::Conflict) => {
-                    log::trace!("[tinybox_drivers] set_state conflict, retrying");
-                }
-                Err(error) => return Err(store_error("write", &error)),
-            }
-        }
-        Err(Error::Store {
-            operation: "write",
-            message: format!("the record kept changing after {CAS_ATTEMPTS} attempts"),
-        })
+            })
+            .and_then(|inner| inner)
+            .map_err(|error| read_error("update", &error))?;
+        // The loop leaves a missing record alone.
+        updated.map(|_| ()).ok_or_else(|| unknown(id))
     }
 
     fn remove(&self, id: &BoxId) -> Result<()> {
-        let docs = Arc::clone(&self.documents);
-        let key = id.as_str().to_owned();
-        let removed = self.run("remove", async move {
-            docs.delete(BOX_COLLECTION, &key, Precondition::None).await
-        })?;
-        if removed {
-            Ok(())
-        } else {
-            Err(Error::UnknownBox {
-                id: id.as_str().to_owned(),
-            })
-        }
+        let key = key(id)?;
+        let boxes = self.boxes.clone();
+        let removed = self.run("remove", async move { boxes.delete(&key).await })?;
+        if removed { Ok(()) } else { Err(unknown(id)) }
     }
 }
 

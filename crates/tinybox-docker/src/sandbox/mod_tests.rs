@@ -388,6 +388,28 @@ async fn creating_a_box_runs_a_detached_named_labelled_container() -> Result<()>
 }
 
 #[tokio::test]
+async fn an_image_that_looks_like_a_flag_stays_a_positional() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+
+    sandbox
+        .create(&spec_from(WorkspaceSource::OciImage(
+            "--privileged".to_owned(),
+        ))?)
+        .await?;
+
+    let argv = host.command(0).unwrap_or_default();
+    let image = argv.iter().position(|part| part == "--privileged");
+    assert_eq!(
+        image
+            .and_then(|index| argv.get(index - 1))
+            .map(String::as_str),
+        Some("--"),
+        "{argv:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_container_is_held_open_so_commands_have_somewhere_to_land() -> Result<()> {
     let (sandbox, host, _store) = sandbox();
 
@@ -455,6 +477,42 @@ async fn a_local_directory_is_bind_mounted_and_becomes_the_working_directory() -
     assert_eq!(flag_value(&argv, "--workdir"), Some("/workspace"));
     // A directory is not an image, so a base image supplies the userland.
     assert!(argv.contains(&"alpine:3".to_owned()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_high2_a_dangerous_local_directory_is_refused_before_any_record() -> Result<()> {
+    let (sandbox, host, store) = sandbox();
+
+    for path in ["/", "/etc", "/var/run"] {
+        let outcome = sandbox
+            .create(&spec_from(WorkspaceSource::LocalDir(path.into()))?)
+            .await;
+        assert_eq!(
+            outcome.err(),
+            Some(Error::UnsupportedWorkspaceSource {
+                sandbox: NAME.to_owned(),
+                kind: "dangerous host directory",
+            }),
+            "{path}"
+        );
+    }
+    assert_eq!(store.list()?.len(), 0);
+    assert!(host.command(0).is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_persistent_box_cannot_gain_new_privileges() -> Result<()> {
+    let (sandbox, host, _store) = sandbox();
+
+    sandbox.create(&spec()?).await?;
+
+    let argv = host.command(0).unwrap_or_default();
+    assert_eq!(
+        flag_value(&argv, "--security-opt"),
+        Some("no-new-privileges")
+    );
     Ok(())
 }
 

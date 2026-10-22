@@ -410,6 +410,34 @@ async fn live_a_memory_limit_is_actually_enforced() -> Result<()> {
 }
 
 #[tokio::test]
+async fn live_systemd_scope_preserves_shell_dollar_literals() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let dir = workspace()?;
+    let sandbox = NamespaceSandbox::new(Arc::new(LocalHost::new()), Arc::new(MemoryStore::new()))
+        .with_cgroup_limits();
+    let info = sandbox.create(&spec(dir.path())?).await?;
+    let output = sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["/bin/sh", "-c", "printf '%s\\n' '${cgroup_path}'"]),
+        )
+        .await?;
+    sandbox.destroy(&info.id).await?;
+
+    if !output.succeeded() {
+        return Err(Error::Backend {
+            sandbox: "namespace".to_owned(),
+            operation: "preserve a literal dollar reference in a systemd scope",
+            message: output.stderr_lossy().trim().to_owned(),
+        });
+    }
+    assert_eq!(output.stdout_lossy(), "${cgroup_path}\n");
+    Ok(())
+}
+
+#[tokio::test]
 async fn live_a_box_is_only_a_record_so_destroying_it_leaves_the_workspace() -> Result<()> {
     if !enabled() {
         return Ok(());

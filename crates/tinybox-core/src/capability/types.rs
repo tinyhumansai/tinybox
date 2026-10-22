@@ -14,10 +14,16 @@ pub enum IsolationLevel {
     /// launching user's full privileges.
     None,
     /// The workload runs under a separate user or working directory, but shares
-    /// the host's process table and filesystem view.
+    /// the host's process table and filesystem view. A namespace backend that
+    /// cannot guarantee [`IsolationLevel::Kernel`] for every configuration (for
+    /// example, because the host network is shared) also reports this level as
+    /// its conservative minimum; it then states its per-configuration level
+    /// separately.
     Process,
-    /// Separate namespaces and cgroups. The workload cannot see host processes
-    /// or escape its root, but shares the host kernel.
+    /// Separate pid, mount, user and ipc (and, where stated, network)
+    /// namespaces. The workload cannot see host processes or reach paths
+    /// outside its root, but shares the host kernel. It does not imply a
+    /// seccomp filter or resource limits.
     Kernel,
     /// A separate kernel behind a hypervisor boundary.
     Hardware,

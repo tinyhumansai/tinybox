@@ -249,39 +249,27 @@ impl LimitedLocalHost {
                 operation: "own output collector",
                 message: "missing native child".into(),
             })?;
-            let collection = async {
-                tokio::try_join!(
-                    read_with_observer(
-                        stdout,
-                        budget.clone(),
-                        limit,
-                        OutputStream::Stdout,
-                        observer.clone()
-                    ),
-                    read_with_observer(
-                        stderr,
-                        budget,
-                        limit,
-                        OutputStream::Stderr,
-                        observer.clone()
-                    ),
-                    async {
-                        if let (Some(mut pipe), Some(payload)) = (stdin, payload) {
-                            pipe.write_all(&payload)
+            let collection =
+                collect_until_exit(stdout, stderr, budget, limit, observer.clone(), async {
+                    let ((), status) = tokio::try_join!(
+                        async {
+                            if let (Some(mut pipe), Some(payload)) = (stdin, payload) {
+                                pipe.write_all(&payload)
+                                    .await
+                                    .map_err(|error| Error::io("write to stdin", &error))?;
+                            }
+                            Ok(())
+                        },
+                        async {
+                            process::wait_native(child)
                                 .await
-                                .map_err(|error| Error::io("write to stdin", &error))?;
+                                .map_err(|error| Error::io("wait", &error))
                         }
-                        Ok(())
-                    },
-                    async {
-                        process::wait_native(child)
-                            .await
-                            .map_err(|error| Error::io("wait", &error))
-                    }
-                )
-            };
+                    )?;
+                    Ok(status)
+                });
             let result = tokio::select! {
-                result = collection => result.map(|(stdout, stderr, (), status)| ExecOutput::new(status.code().unwrap_or(128), stdout, stderr)),
+                result = collection => result,
                 () = observer_cancelled(observer.as_deref()) => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
                 _ = cancelled => Err(Error::Backend { sandbox: crate::LOCAL.into(), operation: "collect output", message: "execution cancelled".into() }),
             };
@@ -424,17 +412,123 @@ async fn read(
     budget: Arc<AtomicUsize>,
     limit: usize,
 ) -> Result<Vec<u8>> {
-    read_with_observer(pipe, budget, limit, OutputStream::Stdout, None).await
+    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    read_with_observer(
+        pipe,
+        budget,
+        limit,
+        OutputStream::Stdout,
+        None,
+        bytes.clone(),
+    )
+    .await?;
+    let read = std::mem::take(
+        &mut *bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    Ok(read)
 }
 
+/// Reads a command's stdout and stderr while `exited` (stdin delivery and the
+/// wait for the process) runs, and returns once the process has exited and
+/// both pipes have ended.
+///
+/// A process the command started in the background can hold the pipes open
+/// after the command itself exits; waiting for their end would wait for that
+/// process (a daemon start hung a call to its whole time limit). So once the
+/// command has exited the pipes get [`OUTPUT_DRAIN_GRACE`] to end, and then
+/// the output read so far is returned with [`OUTPUT_HELD_NOTE`] on stderr.
+async fn collect_until_exit(
+    stdout: impl AsyncRead + Unpin,
+    stderr: impl AsyncRead + Unpin,
+    budget: Arc<AtomicUsize>,
+    limit: usize,
+    observer: Option<Arc<dyn ExecutionObserver>>,
+    exited: impl std::future::Future<Output = Result<std::process::ExitStatus>>,
+) -> Result<ExecOutput> {
+    let stdout_bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let readers = async {
+        tokio::try_join!(
+            read_with_observer(
+                stdout,
+                budget.clone(),
+                limit,
+                OutputStream::Stdout,
+                observer.clone(),
+                stdout_bytes.clone(),
+            ),
+            read_with_observer(
+                stderr,
+                budget,
+                limit,
+                OutputStream::Stderr,
+                observer,
+                stderr_bytes.clone(),
+            ),
+        )
+        .map(|_| ())
+    };
+    tokio::pin!(readers, exited);
+    let mut drained = false;
+    let status = tokio::select! {
+        read = &mut readers => {
+            read?;
+            drained = true;
+            (&mut exited).await?
+        }
+        status = &mut exited => status?,
+    };
+    let held = if drained {
+        false
+    } else {
+        match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut readers).await {
+            Ok(read) => {
+                read?;
+                false
+            }
+            Err(_) => true,
+        }
+    };
+    let take = |bytes: &std::sync::Mutex<Vec<u8>>| {
+        std::mem::take(
+            &mut *bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    };
+    let stdout = take(&stdout_bytes);
+    let mut stderr = take(&stderr_bytes);
+    if held {
+        stderr.extend_from_slice(OUTPUT_HELD_NOTE.as_bytes());
+    }
+    Ok(ExecOutput::new(
+        status.code().unwrap_or(128),
+        stdout,
+        stderr,
+    ))
+}
+
+/// How long the output pipes may stay open after the command exits before
+/// collection returns what it has read.
+pub(crate) const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Appended to stderr when the command exited but its output pipes stayed open.
+pub(crate) const OUTPUT_HELD_NOTE: &str = "\n[tinybox] The command exited, but a process it \
+     started still holds its output open; stopped reading after 3s. Redirect a background \
+     process's output (`cmd > file 2>&1 &`) so the call returns at once.\n";
+
+/// Reads `pipe` to its end into `bytes`, which keeps what was read if the
+/// caller stops waiting first.
 async fn read_with_observer(
     mut pipe: impl AsyncRead + Unpin,
     budget: Arc<AtomicUsize>,
     limit: usize,
     stream: OutputStream,
     observer: Option<Arc<dyn ExecutionObserver>>,
-) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+) -> Result<()> {
     let mut buffer = [0; 8192];
     loop {
         let count = pipe
@@ -442,7 +536,7 @@ async fn read_with_observer(
             .await
             .map_err(|error| Error::io("read output", &error))?;
         if count == 0 {
-            return Ok(bytes);
+            return Ok(());
         }
         let mut used = budget.load(Ordering::SeqCst);
         loop {
@@ -457,7 +551,10 @@ async fn read_with_observer(
         if let Some(observer) = &observer {
             observer.output(stream, &buffer[..count])?;
         }
-        bytes.extend_from_slice(&buffer[..count]);
+        bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(&buffer[..count]);
     }
 }
 

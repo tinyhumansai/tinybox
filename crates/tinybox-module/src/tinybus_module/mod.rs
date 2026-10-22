@@ -21,6 +21,7 @@ mod native_jail;
 mod native_shell;
 mod output;
 mod resources;
+mod stdio;
 mod storage;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,13 +103,6 @@ fn grant_paths_to_wire(
 
 #[tinybus::interface(name = "ai.tinyhumans.tinybox.Box")]
 impl BoxService {
-    /// Return detailed generic shell facts for caller-owned execution policy.
-    async fn analyze_command(
-        &self,
-        command: String,
-    ) -> TinyBusResult<tinybox_bus::CommandAnalysis> {
-        std::future::ready(Ok(tinybox_core::shell::analysis::analyze_command(&command))).await
-    }
     /// Discover the module machine's shell syntax and invocation plan.
     async fn select_shell(
         &self,
@@ -166,6 +160,11 @@ impl BoxService {
         })
     }
     /// Report native jail enforcement facts without starting a workload.
+    ///
+    /// The answer is the backend's guaranteed minimum for *any* configuration:
+    /// a backend whose isolation depends on the jail (bubblewrap with a shared
+    /// network namespace) reports its weaker level here. Admission decisions
+    /// use the per-jail form in `native_jail::prepare`.
     async fn jail_status(&self) -> TinyBusResult<tinybox_bus::JailStatus> {
         let backend = tinybox_jail::default_backend();
         let support = backend.constraint_support();
@@ -340,6 +339,50 @@ impl BoxService {
         .await
     }
 
+    /// Start one program with piped stdio inside the resource's native jail.
+    async fn start_stdio(
+        &self,
+        request: tinybox_bus::StdioStartRequest,
+    ) -> TinyBusResult<ProcessRef> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.start_stdio(request).await },
+        ))
+        .await
+    }
+
+    /// Write bytes to a stdio process's stdin.
+    async fn write_stdio(&self, request: tinybox_bus::StdioWriteRequest) -> TinyBusResult<()> {
+        self.resources.write_stdio(request).await
+    }
+
+    /// Take buffered stdout and stderr, waiting briefly when none is ready.
+    async fn read_stdio(
+        &self,
+        request: tinybox_bus::StdioReadRequest,
+    ) -> TinyBusResult<tinybox_bus::StdioChunk> {
+        self.resources.read_stdio(request).await
+    }
+
+    /// Close a stdio process's stdin so it sees end of input.
+    async fn close_stdin(&self, process: ProcessRef) -> TinyBusResult<()> {
+        self.resources.close_stdin(&process).await
+    }
+
+    /// Kill a stdio process's group, reap it and release its buffers.
+    async fn kill_stdio(&self, process: ProcessRef) -> TinyBusResult<()> {
+        let resources = self.resources.clone();
+        finish_operation(tokio::spawn(
+            async move { resources.kill_stdio(&process).await },
+        ))
+        .await
+    }
+
+    /// Report whether a stdio process runs and how it ended.
+    async fn stdio_status(&self, process: ProcessRef) -> TinyBusResult<tinybox_bus::StdioStatus> {
+        std::future::ready(self.resources.stdio_status(&process)).await
+    }
+
     /// Report how a Docker run would weaken isolation, without starting anything.
     /// Applies the same checks `RunDocker` enforces before it creates a container.
     async fn validate_docker_policy(
@@ -417,12 +460,11 @@ impl BoxService {
     /// Return shell structure facts without applying host security policy.
     #[allow(deprecated)]
     async fn analyze_shell(&self, command: String) -> TinyBusResult<ShellAnalysis> {
-        use tinybox_core::shell::{classify, scan};
+        use tinybox_core::shell::scan;
         let stripped = scan::strip_quoted_heredoc_bodies(&command);
         let structural = scan::strip_heredoc_bodies(&command);
         std::future::ready(Ok(ShellAnalysis {
             segments: scan::split_unquoted_segments(&stripped),
-            hidden_execution: classify::has_hidden_execution(&command),
             redirection: scan::contains_unquoted_char(&structural, '>'),
         }))
         .await
@@ -573,7 +615,7 @@ tinybus_module::module_export_optional_static! {
     setup = setup,
     worker_threads = 1,
     provides = ["ai.tinyhumans.tinybox.Box"],
-    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "AnalyzeCommand", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite", "StartExec", "ReadOutput", "ReleaseOutput", "StartJailedExec", "RunDocker", "DockerStatus", "CleanupDocker", "RunDockerWithoutWorkspace", "ResolveLocalGrants", "SelectShell", "StartShellExec", "StartNativeShellExec", "ValidateDockerPolicy"],
+    methods = ["Describe", "Create", "Exec", "Inspect", "Close", "Spawn", "IsRunning", "Cancel", "AnalyzeShell", "Reserve", "Capabilities", "Shutdown", "Forward", "CloseForward", "JailStatus", "BeginFileRead", "ReadFileChunk", "FinishFileRead", "BeginFileWrite", "WriteFileChunk", "FinishFileWrite", "AbortFileWrite", "StartExec", "ReadOutput", "ReleaseOutput", "StartJailedExec", "RunDocker", "DockerStatus", "CleanupDocker", "RunDockerWithoutWorkspace", "ResolveLocalGrants", "SelectShell", "StartShellExec", "StartNativeShellExec", "ValidateDockerPolicy", "StartStdio", "WriteStdio", "ReadStdio", "CloseStdin", "KillStdio", "StdioStatus"],
     signals = [],
     requires = [],
     optional = [],

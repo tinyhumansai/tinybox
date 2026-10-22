@@ -167,21 +167,43 @@ fn run(request: &ExecRequest) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Run a command as if the sandbox's `/tmp` were backed by an owned host
+/// directory. The command builders still use the production guest path; only
+/// the shell fixture maps that path for this process-level test.
+fn run_with_tmp(request: &ExecRequest, process: &ProcessId, tmp: &Path) -> Option<String> {
+    let guest_path = crate::shell::quote(&pid_file(process));
+    let host_path = tmp
+        .join(format!("tinybox-{process}.pid"))
+        .to_str()
+        .map(crate::shell::quote)?;
+    let mut mapped = request.clone();
+    for argument in &mut mapped.argv {
+        *argument = argument.replace(&guest_path, &host_path);
+    }
+    run(&mapped)
+}
+
 #[test]
 fn a_started_process_is_reported_running_and_then_stops() -> Result<()> {
     // The property the encoding tests cannot check: that this really does
     // background something, and that the recorded pid is that something's.
     let id = mint();
     let started = start(&id, &ExecRequest::new(["sleep", "30"]))?;
+    let tmp = std::env::temp_dir().join(format!("tinybox-detach-{id}"));
+    std::fs::create_dir(&tmp).map_err(|error| Error::io("create pid-file fixture", &error))?;
 
-    if run(&started).is_none() {
+    if run_with_tmp(&started, &id, &tmp).is_none() {
+        std::fs::remove_dir_all(&tmp)
+            .map_err(|error| Error::io("remove pid-file fixture", &error))?;
         return Ok(()); // No shell on this host.
     }
 
-    assert_eq!(run(&probe(&id)).as_deref(), Some(RUNNING));
-
-    run(&stop(&id, Duration::from_secs(1)));
-    assert_eq!(run(&probe(&id)).as_deref(), Some("gone"));
+    let running = run_with_tmp(&probe(&id), &id, &tmp);
+    run_with_tmp(&stop(&id, Duration::from_secs(1)), &id, &tmp);
+    let stopped = run_with_tmp(&probe(&id), &id, &tmp);
+    std::fs::remove_dir_all(&tmp).map_err(|error| Error::io("remove pid-file fixture", &error))?;
+    assert_eq!(running.as_deref(), Some(RUNNING));
+    assert_eq!(stopped.as_deref(), Some("gone"));
     Ok(())
 }
 

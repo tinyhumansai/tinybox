@@ -306,3 +306,48 @@ async fn observed_shell_keeps_cwd_environment_stdin_and_output_limits() -> Resul
     host.drain_checked().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_background_process_holding_the_output_does_not_hold_the_call() -> Result<()> {
+    let observer = Arc::new(Observer::default());
+    let host = LimitedLocalHost::new(4096);
+    let started = std::time::Instant::now();
+    let output = host
+        .run_observed(
+            &ExecRequest::new(["/bin/sh", "-c", "printf ready; sleep 30 &"]),
+            observer,
+        )
+        .await?;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "returned after the grace, not when the background sleep ended: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(output.stdout, b"ready");
+    assert_eq!(output.exit_code, 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("still holds its output open"),
+        "the caller is told why: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn output_that_ends_within_the_grace_is_kept_whole() -> Result<()> {
+    let observer = Arc::new(Observer::default());
+    let host = LimitedLocalHost::new(4096);
+    let output = host
+        .run_observed(
+            &ExecRequest::new(["/bin/sh", "-c", "(sleep 1; printf late) & printf early"]),
+            observer,
+        )
+        .await?;
+    assert_eq!(output.stdout, b"earlylate");
+    assert!(
+        output.stderr.is_empty(),
+        "no note when the pipes end: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}

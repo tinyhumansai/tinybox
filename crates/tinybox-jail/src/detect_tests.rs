@@ -36,10 +36,19 @@ fn detection_prefers_the_platform_backend_when_it_works() {
 
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 #[test]
-fn linux_with_landlock_selects_landlock_on_a_supporting_kernel() {
-    if crate::linux::LandlockBackend::new().is_available() {
+fn linux_prefers_bubblewrap_then_landlock() {
+    if crate::bwrap::BubblewrapBackend::new().is_available() {
+        assert_eq!(pick_backend().name(), "bubblewrap");
+    } else if crate::linux::LandlockBackend::new().is_available() {
         assert_eq!(pick_backend().name(), "landlock");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_candidates_rank_bubblewrap_before_landlock() {
+    let names: Vec<_> = candidates().iter().map(|b| b.name()).collect();
+    assert_eq!(names, ["bubblewrap", "landlock"]);
 }
 
 #[test]

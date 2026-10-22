@@ -145,7 +145,21 @@ impl Sandbox for NamespaceSandbox {
             });
         }
 
-        let argv = args::exec(&info.spec, request, self.limits)?;
+        let supports_expand_environment = if self.limits {
+            let probe = self
+                .host
+                .run(&ExecRequest::new(["systemd-run", "--help"]).with_env("LC_ALL", "C"))
+                .await?;
+            args::parse_expand_environment_help(probe.succeeded(), &probe.stdout, &probe.stderr)?
+        } else {
+            false
+        };
+        let argv = args::exec(
+            &info.spec,
+            request,
+            self.limits,
+            supports_expand_environment,
+        )?;
         // A command that runs and fails is a result, so the raw output is
         // returned rather than being turned into a backend error.
         self.host.run(&ExecRequest::new(argv)).await

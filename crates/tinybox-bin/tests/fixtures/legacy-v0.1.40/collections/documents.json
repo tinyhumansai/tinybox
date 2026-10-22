@@ -1,0 +1,59 @@
+[
+  {
+    "body": {
+      "created_ms": null,
+      "spec": {
+        "env": {
+          "FIXTURE": "public-document-writer"
+        },
+        "lifecycle": {
+          "kind": "ephemeral",
+          "ttl_ms": 3600000
+        },
+        "network": {
+          "kind": "denied"
+        },
+        "ports": [],
+        "resources": {
+          "cpu_millis": 2000,
+          "disk_bytes": 8589934592,
+          "memory_bytes": 2147483648,
+          "pids_max": 512
+        },
+        "runner": {
+          "host": "local",
+          "sandbox": "passthrough"
+        },
+        "source": {
+          "kind": "local_dir",
+          "path": "/srv/fixture-workspace"
+        },
+        "workspace": {
+          "host": "local",
+          "sandbox": "passthrough"
+        }
+      },
+      "state": "ready"
+    },
+    "collection": "box.boxes",
+    "expires_ms": null,
+    "id": "fixture-box",
+    "schema": 2
+  },
+  {
+    "body": {
+      "records": {
+        "jail-fixture": {
+          "created_ms": 1700000000000,
+          "id": "jail-fixture",
+          "label": "fixture",
+          "updated_ms": 1700000001000
+        }
+      }
+    },
+    "collection": "box.jail_index",
+    "expires_ms": null,
+    "id": "fixture-registry",
+    "schema": 2
+  }
+]

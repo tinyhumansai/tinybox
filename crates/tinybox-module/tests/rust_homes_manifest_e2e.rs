@@ -9,6 +9,9 @@ use std::{
 };
 use tinybus::{Connection, broker::Broker, module::ModuleHost, transport::memory::MemoryBus};
 
+#[path = "../examples/support/storage_host.rs"]
+mod storage_host;
+
 const TEST_NAME: &str = "compiled_module_discovers_and_runs_custom_rust_homes";
 const CHILD_MODE: &str = "TINYBOX_RUST_HOMES_CHILD";
 // Admission scans host toolchain trees; bound that I/O separately from shell calls.
@@ -293,8 +296,7 @@ async fn run_module_child(mode: &str) -> TestResult<()> {
     // Stage the production artifact through the same admission path as the existing proof.
     let staged = tempfile::Builder::new()
         .prefix("rust-homes-module-")
-        .tempdir_in(artifact.parent().ok_or("compiled artifact has no parent")?)?;
-    #[cfg(windows)]
+        .tempdir_in(std::env::temp_dir())?;
     secure_staging_directory(staged.path())?;
     let staged_artifact = staged.path().join(
         artifact
@@ -306,6 +308,7 @@ async fn run_module_child(mode: &str) -> TestResult<()> {
     let bus = MemoryBus::new();
     let broker = Broker::new();
     let broker_task = broker.spawn(bus.clone());
+    let _storage_host = storage_host::serve(&bus).await?;
     let modules = ModuleHost::new(broker);
     let loaded = modules.load_file(&staged_artifact)?;
     let declared: Vec<_> = loaded
@@ -326,7 +329,7 @@ async fn run_module_child(mode: &str) -> TestResult<()> {
     )?;
 
     let capabilities: tinybox_bus::ModuleCapabilities = proxy.call("Capabilities", ()).await?;
-    assert_eq!(capabilities.contract_version, (1, 20));
+    assert_eq!(capabilities.contract_version, tinybox_bus::CONTRACT_VERSION);
     match mode {
         "utf8" => {
             let grants = resolve_grants(&proxy, &home, false).await?;
@@ -649,6 +652,8 @@ async fn run_local_shell(
         allow_subprocess: true,
         enforcement: tinybox_bus::JailEnforcement::Enforced,
         require_process_isolation: false,
+        deny_read: Vec::new(),
+        resources: None,
     };
     let extra_env = [
         (
@@ -824,6 +829,13 @@ fn compiled_artifact() -> TestResult<PathBuf> {
     );
     Ok(target.join("debug").join(filename))
 }
+#[cfg(unix)]
+fn secure_staging_directory(path: &Path) -> TestResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
 #[cfg(windows)]
 fn secure_staging_directory(path: &Path) -> TestResult<()> {
     let identity = Command::new("powershell")

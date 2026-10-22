@@ -36,7 +36,6 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | IsRunning | ProcessRef | bool |
 | Cancel | ProcessRef | unit |
 | AnalyzeShell | String | ShellAnalysis |
-| AnalyzeCommand | String | CommandAnalysis |
 | BeginFileRead | BeginFileReadRequest | FileReadInfo |
 | ReadFileChunk | ReadFileChunkRequest | FileChunk |
 | FinishFileRead | FinishFileReadRequest | unit |
@@ -49,21 +48,26 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | StartShellExec | SpawnRequest, SelectShellRequest | ProcessRef |
 | StartNativeShellExec | ShellExecRequest | ProcessRef |
 | ValidateDockerPolicy | DockerPolicyRequest | DockerPolicyReport |
+| StartStdio | StdioStartRequest | ProcessRef |
+| WriteStdio | StdioWriteRequest | () |
+| ReadStdio | StdioReadRequest | StdioChunk |
+| CloseStdin | ProcessRef | () |
+| KillStdio | ProcessRef | () |
+| StdioStatus | ProcessRef | StdioStatus |
 
-Capabilities advertises contract version 1.20; 1.0 denotes the original
-discovery-only surface. Hosts require equal majors and a module minor at least
-as new as their vocabulary, using `tinybox_bus::is_compatible`. Version 1.1
-added reserved resource/process ownership and terminal shutdown; 1.2 adds host
-selection, sandbox networking/resource/port inputs, effective published-port
-facts, and module-owned forwarding. Version 1.3 adds `JailStatus`, which reports
-the detected native directory-jail backend's availability, process isolation,
-and filesystem, network, and subprocess enforcement. The module probes the
-backend; the host applies its own policy to the returned facts. This version is independent of
-package/artifact releases. Version 1.4 adds `AnalyzeCommand`, returning generic
-classification, executor/environment signals, expansion, background execution,
-and literal tokens. Hosts continue to own path resolution, allowlists, approval
-gates, and policy-disabled behavior. `AnalyzeShell` retains its arity and result.
-Describe remains unchanged.
+Capabilities advertises contract version 2.0. Hosts require equal majors and a
+module minor at least as new as their vocabulary, using
+`tinybox_bus::is_compatible`. Contract 1.0 was the original discovery-only
+surface; 1.1 added reserved resource/process ownership and terminal shutdown;
+1.2 added host selection, sandbox networking/resource/port inputs, effective
+published-port facts, and module-owned forwarding. Version 1.3 adds
+`JailStatus`, which reports native jail availability and enforcement facts.
+Contract 1.20 added `deny_read`; 1.21 added piped stdio and 1.22 added optional
+hard resource limits. The 2.0 contract includes opted-in byte-preserving Unix
+grant transport and removes TinyBox-owned command policy classification and
+the `AnalyzeShell.hidden_execution` signal. `AnalyzeShell` retains only generic
+shell structure. TinySecurity owns command classification and execution policy;
+old 1.x hosts must reject a 2.x module. Describe remains unchanged.
 
 Version 1.5 adds bounded file transfer for mounted directory workspaces.
 Reserve `FileRead(resource)` or `FileWrite(resource)` before opening a transfer.
@@ -226,11 +230,11 @@ Spawn/Cancel cycles impose no lifetime admission limit and keep no history sets.
 Collected commands use LimitedLocalHost with a combined 1 MiB stdout/stderr
 budget enforced during reading; overflow fails rather than truncating output.
 
-AnalyzeShell removes quoted heredoc bodies before segment analysis. Its
-redirection fact ignores all heredoc bodies, while hidden-execution analysis
-retains expansion-aware behavior for unquoted bodies. It returns segments and
-hidden-execution/redirection facts. Authorization,
-credential/path restrictions, and access-tier decisions remain host policy.
+AnalyzeShell removes quoted heredoc bodies before segment analysis and ignores
+all heredoc bodies when scanning for output redirection. It returns only live
+segments and a redirection fact; it makes no authorization or command-policy
+decision. Authorization, credential/path restrictions, and access-tier
+decisions remain host policy.
 Errors use the stable dotted names declared in `tinybox-bus`; backend failures
 retain the underlying diagnostic without exposing native handles.
 
@@ -253,7 +257,17 @@ enforcement preflight before consuming process admission. `Enforced` refuses
 partial constraints; `Declared` requires an explicit host decision using
 `JailStatus`. Neither mode admits the no-op or unavailable backend. A caller
 requiring the process-isolation security floor sets `require_process_isolation`.
-The host retains credential-path exclusions and approval policy.
+The host retains approval policy and chooses the credential paths; it sends them
+as `deny_read` (1.20). The module retains prospective paths and resolves them
+against current filesystem aliases both at preflight and immediately before
+spawn. It refuses a denial covering the root or a writable grant. Seatbelt can
+carve a denial that is a direct child of a writable grant (or of the root or
+`/private/tmp`), and refuses a deeper one, which a rename of the directory in
+between would move out of its path-based rule; allow-list backends refuse any
+overlap they cannot subtract. Landlock reports its implicit system and device
+baseline grants so credential denials cannot be overridden by those grants;
+direct Landlock backend calls repeat this check at spawn. Paths outside every
+grant remain default-denied on allow-list backends.
 
 The jail owns a separate native collector for each execution. Output replay,
 Cancel, ReleaseOutput, Close and Shutdown use the same retained cleanup barriers
@@ -387,4 +401,32 @@ operation. State directory authorization and Windows private parent ACLs belong
 to the caller. See [the native shell contract](../../../docs/specs/native-shell-execution.md).
 
 Version 1.19 adds `NetworkPolicy::Allowlist` and the `SandboxEvent` vocabulary
-without a new member; see `docs/specs/contract-1-19.md`.
+without a new member; see `docs/specs/contract-1-19.md`. Version 1.20 adds
+`NativeJailConfig::deny_read`; see `docs/specs/contract-1-20.md`.
+
+Version 1.21 adds interactive piped stdio for long-lived children such as stdio
+MCP servers. `StartStdio` runs one unshelled program inside the native jail of a
+local passthrough directory resource; the `NativeJailConfig` is mandatory and
+goes through the same preflight as `StartJailedExec` (enforcement, process
+isolation floor, `deny_read`), so an unsuitable or unavailable backend refuses
+and nothing is spawned unconfined. The child starts from a safe environment
+snapshot plus the request's `env`, leads its own process group, and is killed as
+a group by `KillStdio`, resource `Close` and `Shutdown`. `WriteStdio` returns
+after the bytes are in the pipe, `ReadStdio` takes buffered stdout/stderr and
+waits up to `wait_ms`, and each stream is buffered up to
+`MAX_STDIO_BUFFER_BYTES` before the module stops reading its pipe, which
+backpressures the child instead of dropping bytes. `CloseStdin` delivers end of
+input, `StdioStatus` reports `running` and the exit, and `KillStdio` doubles as
+release (an unknown process is already gone). See
+`docs/specs/contract-1-21.md`.
+
+Version 1.22 adds optional `NativeJailConfig::resources` with the same CPU,
+memory, process and writable-disk fields as box resources. Omitted limits retain
+the previous request behavior. Supplying limits makes each one a hard
+preflight requirement; native jail backends currently declare those controls
+unsupported and refuse before starting the child. See
+`docs/specs/contract-1-22.md`.
+
+Version 2.0 removes TinyBox command classification and execution-policy results
+after the contract 1.22 deprecation window. Hosts must reject modules from a
+different contract major. See `docs/specs/contract-2-0.md`.

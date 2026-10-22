@@ -28,7 +28,7 @@ tokio = { workspace = true, features = ["process", "io-util", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 # Safe process-group signalling supervises descendants; access checks select executable shells.
-nix = { version = "0.30", default-features = false, features = ["signal", "process", "fs"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 # Job Objects keep supervised Windows descendants inside one killable process tree.

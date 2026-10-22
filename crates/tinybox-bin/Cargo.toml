@@ -1,0 +1,38 @@
+[package]
+name = "tinybox-bin"
+description = "The tinybox executable and local storage composition root."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+
+[[bin]]
+name = "tinybox"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+tinybox-cli = { path = "../tinybox-cli", version = "0.1.25" }
+tinybox-bus.workspace = true
+tinybox-core.workspace = true
+tinybox-drivers.workspace = true
+tinybox-host.workspace = true
+tinystoragedrivers = { workspace = true, features = ["file"] }
+tinystoragedrivers-api.workspace = true
+tinystoragedrivers-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile = "3"
+tinystoragedrivers-testkit.workspace = true
+
+[lints]
+workspace = true

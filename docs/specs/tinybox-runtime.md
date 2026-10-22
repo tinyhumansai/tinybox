@@ -98,6 +98,15 @@ that document would change its shape and stop an older store from loading,
 orphaning every box in it; a second file needs no migration and cannot break
 the first.
 
+The `tinybox` command composes the box and template stores over its selected
+TinyStorageDrivers backend. When it finds the legacy `boxes.json` or
+`templates.json` files, it imports validated records and leaves those files in
+place. Run only one CLI generation against a state directory during migration:
+the importer checks that each source still matches the bytes it read before it
+records completion, but that check does not lock out a concurrently running
+legacy writer. A changed source fails closed on the next open rather than being
+silently overwritten or deleted.
+
 ## Time and expiry
 
 Expiry needs to know when a box was created, so time enters the model through a

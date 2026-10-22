@@ -100,6 +100,7 @@ fn defaults_produce_the_pinned_command_line() {
     expected.extend(s(&[
         "-w",
         "/workspace",
+        "--",
         "alpine:3.20",
         "sh",
         "-c",
@@ -187,6 +188,7 @@ fn overrides_mounts_and_env_are_ordered() {
         "A=1",
         "-e",
         "REQ_KEY=req value=1",
+        "--",
         "debian:12",
         "sh",
         "-c",
@@ -332,4 +334,16 @@ async fn legacy_label_cleanup_keeps_its_best_effort_result() {
         "if [ \"$1\" = ps ]; then echo container-id; exit 0; fi; exit 1",
     );
     assert_eq!(cli.kill_labelled("l=1").await.unwrap(), 1);
+}
+
+#[test]
+fn an_image_that_looks_like_a_flag_stays_a_positional() {
+    let tmp = tempfile::tempdir().unwrap();
+    let argv = strings(
+        &OneShot::new(tmp.path(), "true")
+            .with_image("--privileged")
+            .argv(),
+    );
+    let image = argv.iter().position(|arg| arg == "--privileged").unwrap();
+    assert_eq!(argv[image - 1], "--", "{argv:?}");
 }

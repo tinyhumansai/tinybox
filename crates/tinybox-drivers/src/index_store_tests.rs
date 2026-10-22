@@ -2,14 +2,42 @@ use super::*;
 use crate::faulty::{Faults, Faulty};
 use tinybox_core::clock::FixedClock;
 use tinybox_jail::JailRegistry;
-use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+use tinystoragedrivers_api::DocumentStore;
+use tinystoragedrivers_testkit::memory_storage;
+use tinystoragedrivers_types::{Scope, StorageError, WriteOptions};
 
 fn documents() -> Arc<dyn DocumentStore> {
-    MemoryStorage::new()
-        .for_scope(&Scope::local())
-        .expect("scope")
+    memory_storage(&Scope::new("tinybox-index-tests").expect("scope"))
         .documents()
         .clone()
+}
+
+fn test_store(docs: Arc<dyn DocumentStore>, registry: &str) -> io::Result<DocumentIndexStore> {
+    let bridge = Blocking::new().expect("bridge");
+    let ensure_docs = Arc::clone(&docs);
+    bridge
+        .run(async move {
+            for spec in tinybox_bus::storage::collections() {
+                ensure_docs.ensure_collection(&spec).await?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .expect("bridge")
+        .map_err(|error| to_io(&error))?;
+    let key = Key::new(registry)
+        .map_err(|error| to_io(&error))?
+        .as_str()
+        .to_owned();
+    let index = Repo::new(&docs, JAIL_INDEX_COLLECTION)
+        .map_err(|error| to_io(&error))?
+        .with_options(WriteOptions::new().schema(BODY_VERSION));
+    drop(docs);
+    Ok(DocumentIndexStore {
+        index,
+        bridge,
+        key,
+        registry: registry.to_owned(),
+    })
 }
 
 fn clock() -> Arc<FixedClock> {
@@ -18,13 +46,13 @@ fn clock() -> Arc<FixedClock> {
 
 #[test]
 fn an_empty_index_loads_as_absent() {
-    let store = DocumentIndexStore::new(documents(), "main").expect("store");
+    let store = test_store(documents(), "main").expect("store");
     assert_eq!(store.load().expect("load"), None);
 }
 
 #[test]
 fn a_saved_index_loads_back_as_the_same_json() {
-    let store = DocumentIndexStore::new(documents(), "main").expect("store");
+    let store = test_store(documents(), "main").expect("store");
     store
         .save(br#"{"records":{},"schema_version":1}"#)
         .expect("save");
@@ -39,15 +67,15 @@ fn a_saved_index_loads_back_as_the_same_json() {
 #[test]
 fn registries_with_different_names_do_not_share_an_index() {
     let docs = documents();
-    let a = DocumentIndexStore::new(Arc::clone(&docs), "a").expect("store");
-    let b = DocumentIndexStore::new(docs, "b").expect("store");
+    let a = test_store(Arc::clone(&docs), "a").expect("store");
+    let b = test_store(docs, "b").expect("store");
     a.save(b"{}").expect("save");
     assert_eq!(b.load().expect("load"), None);
 }
 
 #[test]
 fn saving_something_that_is_not_json_is_invalid_data() {
-    let store = DocumentIndexStore::new(documents(), "main").expect("store");
+    let store = test_store(documents(), "main").expect("store");
     let error = store.save(b"not json").expect_err("rejected");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
@@ -56,7 +84,7 @@ fn saving_something_that_is_not_json_is_invalid_data() {
 fn a_registry_keeps_its_jails_across_reopen_without_an_index_file() {
     let base = tempfile::tempdir().expect("dir");
     let docs = documents();
-    let store = Arc::new(DocumentIndexStore::new(docs, "main").expect("store"));
+    let store = Arc::new(test_store(docs, "main").expect("store"));
 
     let registry =
         JailRegistry::open_with_store(base.path(), clock(), store.clone()).expect("open");
@@ -81,19 +109,9 @@ fn a_registry_keeps_its_jails_across_reopen_without_an_index_file() {
 
 #[test]
 fn backend_failures_surface_as_io_errors() {
-    let refusing = DocumentIndexStore::new(
-        Faulty::new(
-            documents(),
-            Faults {
-                ensure: true,
-                ..Faults::default()
-            },
-        ),
-        "main",
-    );
-    assert!(refusing.is_err());
+    assert!(test_store(documents(), "").is_err());
 
-    let reading = DocumentIndexStore::new(
+    let reading = test_store(
         Faulty::new(
             documents(),
             Faults {
@@ -109,7 +127,7 @@ fn backend_failures_surface_as_io_errors() {
         io::ErrorKind::Other
     );
 
-    let writing = DocumentIndexStore::new(
+    let writing = test_store(
         Faulty::new(
             documents(),
             Faults {
@@ -144,6 +162,29 @@ fn storage_error_kinds_map_to_io_kinds() {
 
 #[test]
 fn the_debug_form_names_the_registry() {
-    let store = DocumentIndexStore::new(documents(), "main").expect("store");
+    let store = test_store(documents(), "main").expect("store");
     assert!(format!("{store:?}").contains("main"));
+}
+
+#[test]
+fn a_saved_index_is_stored_with_millisecond_times_and_the_v2_schema() {
+    let docs = documents();
+    let store = test_store(Arc::clone(&docs), "main").expect("store");
+    store
+        .save(
+            br#"{"records":{"j1":{"id":"j1","created_at_unix":2,"updated_at_unix":3}},"schema_version":1}"#,
+        )
+        .expect("save");
+    let bridge = Blocking::new().expect("bridge");
+    let reader = Arc::clone(&docs);
+    let stored = bridge
+        .run(async move { reader.get(JAIL_INDEX_COLLECTION, "main").await })
+        .expect("bridge")
+        .expect("get")
+        .expect("stored");
+    assert_eq!(stored.meta.schema, 2);
+    assert_eq!(
+        stored.doc,
+        serde_json::json!({"records": {"j1": {"id": "j1", "created_ms": 2000, "updated_ms": 3000}}})
+    );
 }

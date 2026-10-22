@@ -12,7 +12,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use clap::CommandFactory;
 use tempfile::TempDir;
-use tinybox_core::{Error, ExecOutput, ExecRequest, Host, Result};
+use tinybox_core::{
+    BoxId, BoxInfo, BoxSpec, BoxState, Error, ExecOutput, ExecRequest, Host, HostRef, Lifecycle,
+    Placement, Result, SandboxRef, Store, WorkspaceSource,
+};
+use tinybox_host::LocalHost;
 
 use super::{Cli, EXIT_TINYBOX_ERROR, exit_code, run, run_with_host, workspace};
 
@@ -56,6 +60,10 @@ fn temp_dir() -> Result<TempDir> {
 
 /// Run `tinybox` with a store inside `dir`, capturing both streams.
 async fn invoke(dir: &Path, args: &[&str]) -> Invocation {
+    invoke_with_host(dir, Arc::new(LocalHost::new()), args).await
+}
+
+async fn invoke_with_host(dir: &Path, host: Arc<dyn Host>, args: &[&str]) -> Invocation {
     let store = dir.join("boxes.json");
     let mut line = vec!["tinybox".to_owned(), "--store".to_owned()];
     line.push(store.display().to_string());
@@ -63,12 +71,34 @@ async fn invoke(dir: &Path, args: &[&str]) -> Invocation {
 
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = run(line, &mut out, &mut err).await;
+    let code = run_with_host(line, host, &mut out, &mut err).await;
 
     Invocation {
         code,
         out: String::from_utf8_lossy(&out).into_owned(),
         err: String::from_utf8_lossy(&err).into_owned(),
+    }
+}
+
+#[derive(Debug)]
+struct TmpMappedHost {
+    root: std::path::PathBuf,
+    inner: LocalHost,
+}
+
+#[async_trait]
+impl Host for TmpMappedHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
+        let replacement = format!("{}/tinybox-", self.root.display());
+        let mut request = request.clone();
+        for argument in &mut request.argv {
+            *argument = argument.replace("/tmp/tinybox-", &replacement);
+        }
+        self.inner.run(&request).await
     }
 }
 
@@ -411,19 +441,6 @@ fn an_exit_status_outside_a_byte_becomes_the_tinybox_error_code() {
 }
 
 #[tokio::test]
-async fn a_corrupt_store_is_reported_rather_than_ignored() -> Result<()> {
-    let dir = temp_dir()?;
-    std::fs::write(dir.path().join("boxes.json"), "{ not json")
-        .map_err(|error| Error::io("write", &error))?;
-
-    let outcome = invoke(dir.path(), &["ls"]).await;
-
-    assert_eq!(outcome.code, EXIT_TINYBOX_ERROR);
-    assert!(outcome.err.contains("not a valid box store"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn a_closed_output_stream_is_reported_rather_than_panicking() -> Result<()> {
     let dir = temp_dir()?;
     // Seed a box so the read-only commands have something to print.
@@ -524,53 +541,6 @@ async fn a_boxs_sandbox_is_read_from_its_record_not_a_flag() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_store_written_before_ports_existed_still_loads() -> Result<()> {
-    let dir = temp_dir()?;
-    // Exactly the JSON an M3 build wrote: no `ports` field at all. Failing to
-    // read it would orphan every box a user already had.
-    std::fs::write(
-        dir.path().join("boxes.json"),
-        r#"{"box-0":{"id":"box-0","state":"Ready","spec":{
-            "runner":{"host":"local","sandbox":"passthrough"},
-            "workspace":{"host":"local","sandbox":"passthrough"},
-            "source":{"LocalDir":"/tmp"},
-            "resources":{"cpu_millis":2000,"memory_bytes":2147483648,"pids_max":512,"disk_bytes":8589934592},
-            "lifecycle":{"Ephemeral":{"ttl":{"secs":3600,"nanos":0}}},
-            "network":"Denied","env":{}}}}"#,
-    )
-    .map_err(|error| Error::io("write", &error))?;
-
-    let listed = invoke(dir.path(), &["ls"]).await;
-
-    assert_eq!(listed.code, 0);
-    assert!(listed.out.contains("box-0"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_record_naming_an_unknown_sandbox_is_refused() -> Result<()> {
-    let dir = temp_dir()?;
-    // A store written by a newer build, naming a backend this one lacks.
-    std::fs::write(
-        dir.path().join("boxes.json"),
-        r#"{"box-0":{"id":"box-0","state":"Ready","spec":{
-            "runner":{"host":"local","sandbox":"microvm"},
-            "workspace":{"host":"local","sandbox":"microvm"},
-            "source":{"LocalDir":"/tmp"},
-            "resources":{"cpu_millis":2000,"memory_bytes":2147483648,"pids_max":512,"disk_bytes":8589934592},
-            "lifecycle":{"Ephemeral":{"ttl":{"secs":3600,"nanos":0}}},
-            "network":"Denied","env":{}}}}"#,
-    )
-    .map_err(|error| Error::io("write", &error))?;
-
-    let outcome = invoke(dir.path(), &["inspect", "box-0"]).await;
-
-    assert_eq!(outcome.code, EXIT_TINYBOX_ERROR);
-    assert!(outcome.err.contains("microvm"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn inspect_lists_what_the_sandbox_declares() -> Result<()> {
     let dir = temp_dir()?;
     invoke(dir.path(), &["create", "--dir", "/tmp"]).await;
@@ -587,6 +557,24 @@ async fn inspect_lists_what_the_sandbox_declares() -> Result<()> {
         inspected.out
     );
     assert!(!inspected.out.contains("filesystem snapshots"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_record_naming_an_unknown_sandbox_is_refused() -> Result<()> {
+    let dir = temp_dir()?;
+    let spec = BoxSpec::new(
+        Placement::new(HostRef::new("local")?, SandboxRef::new("not-installed")?),
+        WorkspaceSource::LocalDir("/tmp".into()),
+    );
+    let record = BoxInfo::new(BoxId::new("box-0")?, BoxState::Ready, spec);
+    let (store, _) = super::test_stores(&dir.path().join("boxes.json"));
+    store.insert(&record)?;
+
+    let outcome = invoke(dir.path(), &["inspect", "box-0"]).await;
+
+    assert_eq!(outcome.code, EXIT_TINYBOX_ERROR);
+    assert!(outcome.err.contains("not-installed"));
     Ok(())
 }
 
@@ -1233,10 +1221,10 @@ async fn a_template_lives_beside_the_boxes_it_came_from() -> Result<()> {
     )
     .await;
 
-    // A separate file, so adding templates could not break a store written
-    // before they existed.
-    assert!(dir.path().join("templates.json").exists());
-    assert!(dir.path().join("boxes.json").exists());
+    let listed = invoke_scripted(dir.path(), host, &["template", "ls"]).await;
+    assert_eq!(listed.code, 0, "{}", listed.err);
+    assert!(listed.out.contains("ci"));
+    assert!(listed.out.contains("sha-9f2c0e1b7a4d"));
     Ok(())
 }
 
@@ -1313,38 +1301,24 @@ async fn a_box_with_no_recorded_creation_time_is_never_reaped() -> Result<()> {
     Ok(())
 }
 
-/// Write a box store containing the given boxes and creation times.
-///
-/// Written as JSON rather than created through the CLI, because the point is to
-/// control the timestamps exactly — including the case where there is none.
+/// Seed the in-process command harness with boxes at controlled creation times.
 fn write_boxes(dir: &Path, boxes: &[(&str, Option<std::time::SystemTime>)]) -> Result<()> {
-    let mut records = Vec::new();
+    let (store, _) = super::test_stores(&dir.join("boxes.json"));
     for (id, created) in boxes {
-        let created = match created {
-            Some(at) => {
-                let since = at
-                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default();
-                format!(
-                    r#","created_at":{{"secs_since_epoch":{},"nanos_since_epoch":{}}}"#,
-                    since.as_secs(),
-                    since.subsec_nanos()
-                )
-            }
-            None => String::new(),
-        };
-        records.push(format!(
-            r#""{id}":{{"id":"{id}","state":"Ready","spec":{{
-                "runner":{{"host":"local","sandbox":"passthrough"}},
-                "workspace":{{"host":"local","sandbox":"passthrough"}},
-                "source":{{"LocalDir":"/tmp"}},
-                "resources":{{"cpu_millis":2000,"memory_bytes":2147483648,"pids_max":512,"disk_bytes":8589934592}},
-                "lifecycle":{{"Ephemeral":{{"ttl":{{"secs":3600,"nanos":0}}}}}},
-                "network":"Denied","ports":[],"env":{{}}}}{created}}}"#
-        ));
+        let spec = BoxSpec::new(
+            Placement::new(HostRef::new("local")?, SandboxRef::new("passthrough")?),
+            WorkspaceSource::LocalDir("/tmp".into()),
+        )
+        .with_lifecycle(Lifecycle::Ephemeral {
+            ttl: Lifecycle::DEFAULT_TTL,
+        });
+        let mut record = BoxInfo::new(BoxId::new(*id)?, BoxState::Ready, spec);
+        if let Some(created) = created {
+            record = record.created_at(*created);
+        }
+        store.insert(&record)?;
     }
-    std::fs::write(dir.join("boxes.json"), format!("{{{}}}", records.join(",")))
-        .map_err(|error| Error::io("write", &error))
+    Ok(())
 }
 
 #[tokio::test]
@@ -1353,24 +1327,36 @@ async fn a_spawned_process_outlives_the_command_that_started_it() -> Result<()> 
     // in for a separate process, and the thing started by the first one is
     // still there for the second to ask about.
     let dir = temp_dir()?;
-    invoke(
+    let pid_dir = temp_dir()?;
+    let host: Arc<dyn Host> = Arc::new(TmpMappedHost {
+        root: pid_dir.path().to_owned(),
+        inner: LocalHost::new(),
+    });
+    invoke_with_host(
         dir.path(),
+        Arc::clone(&host),
         &["create", "--dir", &dir.path().display().to_string()],
     )
     .await;
 
-    let spawned = invoke(dir.path(), &["spawn", "box-0", "sleep", "30"]).await;
-    assert_eq!(spawned.code, 0);
+    let spawned = invoke_with_host(
+        dir.path(),
+        Arc::clone(&host),
+        &["spawn", "box-0", "sleep", "30"],
+    )
+    .await;
+    assert_eq!(spawned.code, 0, "{}", spawned.err);
     let process = spawned.out.trim().to_owned();
     assert!(!process.is_empty(), "spawn prints an identifier");
 
-    let running = invoke(dir.path(), &["ps", "box-0", &process]).await;
+    let running = invoke_with_host(dir.path(), Arc::clone(&host), &["ps", "box-0", &process]).await;
     assert_eq!(running.out.trim(), "running");
 
-    let killed = invoke(dir.path(), &["kill", "box-0", &process]).await;
+    let killed =
+        invoke_with_host(dir.path(), Arc::clone(&host), &["kill", "box-0", &process]).await;
     assert_eq!(killed.code, 0);
 
-    let gone = invoke(dir.path(), &["ps", "box-0", &process]).await;
+    let gone = invoke_with_host(dir.path(), host, &["ps", "box-0", &process]).await;
     // `gone` on stdout with a zero exit: the process finishing is an answer,
     // not a failure, and reporting it as one would be indistinguishable from
     // an unreachable box.
