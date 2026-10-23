@@ -17,7 +17,11 @@ pub(super) fn prepare(
     if !cfg!(unix) || !backend.is_available() || backend.name() == tinybox_jail::NOOP_BACKEND_NAME {
         return Err(unavailable());
     }
-    if config.read_only.len() + config.read_write.len() + config.deny_read.len()
+    if config.read_only.len()
+        + config.read_write.len()
+        + config.deny_read.len()
+        + config.unix_paths.read_only.len()
+        + config.unix_paths.read_write.len()
         > tinybox_bus::MAX_NATIVE_JAIL_GRANTS
     {
         return Err(invalid());
@@ -53,54 +57,11 @@ pub(super) fn prepare(
     jail.allow_subprocess = config.allow_subprocess;
     jail.read_only = grants(&config.read_only)?;
     jail.read_write = grants(&config.read_write)?;
-    jail.deny_read = denials(&config.deny_read)?;
-    jail.resources = config.resources.map(|limits| tinybox_core::Resources {
-        cpu_millis: limits.cpu_millis,
-        memory_bytes: limits.memory_bytes,
-        pids_max: limits.pids_max,
-        disk_bytes: limits.disk_bytes,
-    });
-    if jail
-        .resources
-        .is_some_and(|limits| limits.validate().is_err())
-    {
-        return Err(invalid());
-    }
-    // A denial over the root or a writable grant would leave the command no
-    // workspace; a denial nested inside a writable grant is safe only for a
-    // backend that applies denials after its write allows.
-    if jail.deny_read.iter().any(|denied| {
-        jail.root.starts_with(denied)
-            || jail.read_write.iter().any(|granted| {
-                granted.starts_with(denied)
-                    || (!backend.carves_denials() && denied.starts_with(granted))
-            })
-    }) {
-        return Err(invalid());
-    }
-    // A carving backend may still be unable to hold a deeply nested denial.
-    backend
-        .validate_carved_denials(&jail)
-        .map_err(|_| invalid())?;
-    if !backend.carves_denials() {
-        let mut implicit_grants = Vec::new();
-        for grant in backend.implicit_grants() {
-            match canonicalize_prospective(&grant) {
-                Ok(canonical) => implicit_grants.push(canonical),
-                Err(_) => return Err(unavailable()),
-            }
-        }
-        if jail.deny_read.iter().any(|denied| {
-            std::iter::once(&jail.root)
-                .chain(&jail.read_only)
-                .chain(&implicit_grants)
-                .any(|granted| overlaps(denied, granted))
-        }) {
-            return Err(unavailable());
-        }
-    }
-    // Per-jail, never per-backend: a backend's isolation can depend on the
-    // configuration (a shared network namespace under `allow_net`).
+    jail.read_only
+        .extend(unix_grants(&config.unix_paths.read_only)?);
+    jail.read_write
+        .extend(unix_grants(&config.unix_paths.read_write)?);
+    configure_denials_and_resources(&mut jail, config, backend)?;
     if config.require_process_isolation && !backend.is_suitable_for_untrusted_jail(&jail) {
         return Err(unavailable());
     }
@@ -122,7 +83,88 @@ pub(super) fn prepare(
     }
     Ok(jail)
 }
-/// Validate and canonicalize each existing absolute grant path.
+
+fn configure_denials_and_resources(
+    jail: &mut Jail,
+    config: &NativeJailConfig,
+    backend: &dyn JailBackend,
+) -> Result<()> {
+    jail.deny_read = denials(&config.deny_read)?;
+    jail.resources = config.resources.map(|limits| tinybox_core::Resources {
+        cpu_millis: limits.cpu_millis,
+        memory_bytes: limits.memory_bytes,
+        pids_max: limits.pids_max,
+        disk_bytes: limits.disk_bytes,
+    });
+    if jail
+        .resources
+        .is_some_and(|limits| limits.validate().is_err())
+    {
+        return Err(invalid());
+    }
+    if jail.deny_read.iter().any(|denied| {
+        jail.root.starts_with(denied)
+            || jail.read_write.iter().any(|granted| {
+                granted.starts_with(denied)
+                    || (!backend.carves_denials() && denied.starts_with(granted))
+            })
+    }) {
+        return Err(invalid());
+    }
+    backend
+        .validate_carved_denials(jail)
+        .map_err(|_| invalid())?;
+    if !backend.carves_denials() {
+        let mut implicit_grants = Vec::new();
+        for grant in backend.implicit_grants() {
+            match canonicalize_prospective(&grant) {
+                Ok(canonical) => implicit_grants.push(canonical),
+                Err(_) => return Err(unavailable()),
+            }
+        }
+        if jail.deny_read.iter().any(|denied| {
+            std::iter::once(&jail.root)
+                .chain(&jail.read_only)
+                .chain(&implicit_grants)
+                .any(|granted| overlaps(denied, granted))
+        }) {
+            return Err(unavailable());
+        }
+    }
+    Ok(())
+}
+
+/// Validate and canonicalize byte-preserving Unix grant paths.
+fn unix_grants(paths: &[Vec<u8>]) -> Result<Vec<std::path::PathBuf>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        paths
+            .iter()
+            .map(|bytes| {
+                let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(bytes.clone()));
+                if bytes.len() > tinybox_bus::MAX_FILE_PATH_BYTES
+                    || bytes.contains(&0)
+                    || !path.is_absolute()
+                    || path
+                        .components()
+                        .any(|part| matches!(part, Component::ParentDir))
+                {
+                    return Err(invalid());
+                }
+                path.canonicalize().map_err(|_| invalid())
+            })
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        Err(unavailable())
+    }
+}
+
 fn grants(paths: &[String]) -> Result<Vec<std::path::PathBuf>> {
     paths
         .iter()

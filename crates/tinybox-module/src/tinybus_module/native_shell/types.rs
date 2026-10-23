@@ -2,7 +2,7 @@
 use tinybox_bus::ShellExecRequest;
 pub(in crate::tinybus_module) struct ShellContext {
     pub(super) request: ShellExecRequest,
-    pub(super) environment: std::collections::BTreeMap<String, String>,
+    pub(super) environment: std::collections::BTreeMap<String, std::ffi::OsString>,
     pub(super) scratch: std::sync::Arc<std::sync::Mutex<Option<tempfile::TempDir>>>,
     pub(super) scratch_cleanup_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(super) host: ShellHost,

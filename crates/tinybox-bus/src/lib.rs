@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod grants;
-pub use grants::{LocalGrantConfig, LocalGrants, ProtectedPaths, ResolveLocalGrantsRequest};
+pub use grants::{
+    LocalGrantConfig, LocalGrants, ProtectedPaths, ResolveLocalGrantsRequest, UnixPathGrants,
+};
 
 mod jail;
 pub use jail::{JailEnforcement, NativeJailConfig};
@@ -74,14 +76,9 @@ pub use files::{
 /// 1.19 adds `NetworkPolicy::Allowlist` and the observational
 /// [`SandboxEvent`] vocabulary (`Started`, `Denied`, `LimitHit`, `Exited`).
 /// 1.20 adds `deny_read` to [`NativeJailConfig`].
-/// 1.21 adds the interactive piped-stdio members `StartStdio`, `WriteStdio`,
-/// `ReadStdio`, `CloseStdin`, `KillStdio` and `StdioStatus`, which run one
-/// program inside a mandatory native jail and stream its stdin, stdout and
-/// stderr over the bus. 1.22 adds optional hard resource limits to
-/// [`NativeJailConfig`].
-/// 2.0 removes TinyBox-owned command policy classification and the
-/// `AnalyzeShell.hidden_execution` policy signal. Generic shell structure facts
-/// and transport helpers remain.
+/// 1.21 adds interactive piped-stdio members. 1.22 adds optional hard resource
+/// limits. The merged 2.0 surface also carries opted-in byte-preserving Unix
+/// grant transport and removes TinyBox-owned command policy classification.
 pub const CONTRACT_VERSION: (u32, u32) = (2, 0);
 
 /// Whether this host vocabulary can bind to a module's advertised version.

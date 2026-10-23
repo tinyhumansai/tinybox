@@ -283,6 +283,7 @@ async fn jailed_start_rejects_missing_grants_without_consuming_reservation() -> 
     let config = tinybox_bus::NativeJailConfig {
         read_only: vec!["/tinybox-nonexistent-grant-fixture".into()],
         read_write: vec![],
+        unix_paths: tinybox_bus::UnixPathGrants::default(),
         allow_net: true,
         allow_subprocess: true,
         enforcement: tinybox_bus::JailEnforcement::Declared,

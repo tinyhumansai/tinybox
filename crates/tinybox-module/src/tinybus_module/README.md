@@ -61,20 +61,13 @@ module minor at least as new as their vocabulary, using
 surface; 1.1 added reserved resource/process ownership and terminal shutdown;
 1.2 added host selection, sandbox networking/resource/port inputs, effective
 published-port facts, and module-owned forwarding. Version 1.3 adds
-`JailStatus`, which reports the detected native directory-jail backend's
-availability, process isolation, and filesystem, network, and subprocess
-enforcement. The module probes the backend; the host applies its own policy to
-the returned facts. This version is independent of package/artifact releases.
-
-Contract 1.22 was the one-release deprecation window for `AnalyzeCommand`,
-`CommandClass`, command classification fields, executor/environment-guard
-signals, and `AnalyzeShell.hidden_execution`. Contract 2.0 removes those policy
-results. `AnalyzeShell` retains only generic shell structure: live segments
-after quoted heredoc bodies are removed and whether an unquoted output redirect
-occurs outside heredoc data. TinySecurity owns command classification and
-execution policy. Old 1.x hosts must reject a 2.x module; there is no fallback
-that applies or reconstructs command policy in TinyBox. Describe remains
-unchanged.
+`JailStatus`, which reports native jail availability and enforcement facts.
+Contract 1.20 added `deny_read`; 1.21 added piped stdio and 1.22 added optional
+hard resource limits. The 2.0 contract includes opted-in byte-preserving Unix
+grant transport and removes TinyBox-owned command policy classification and
+the `AnalyzeShell.hidden_execution` signal. `AnalyzeShell` retains only generic
+shell structure. TinySecurity owns command classification and execution policy;
+old 1.x hosts must reject a 2.x module. Describe remains unchanged.
 
 Version 1.5 adds bounded file transfer for mounted directory workspaces.
 Reserve `FileRead(resource)` or `FileWrite(resource)` before opening a transfer.
@@ -113,6 +106,14 @@ existing callers; when true, the command runs through `sh -lc` rather than
 `sh -c`, preserving login-shell runtime behavior. All other image, network,
 resource, rootfs, read-only mount, capability-drop, environment, label, output,
 and timeout behavior remains shared with `RunDocker`.
+
+Version 1.20 adds optional `allow_unix_paths` to `ResolveLocalGrantsRequest`
+and `unix_paths` to `LocalGrants` and `NativeJailConfig`. Unix callers can
+preserve canonical non-UTF8 paths as raw bytes after host approval. Empty
+byte groups retain established wire payloads. Module validation checks all
+string and byte grants against the same total limit and enforcement policy.
+Configured Rustup and selective Cargo state remain read-only; native shell
+execution preserves nonempty `RUSTUP_HOME` and `CARGO_HOME` as OS values.
 
 Version 1.18 adds `ValidateDockerPolicy(DockerPolicyRequest) -> DockerPolicyReport`,
 the standalone form of the 1.17 check: it lists every way a run's network mode,

@@ -30,6 +30,7 @@ fn request() -> StdioStartRequest {
         jail: NativeJailConfig {
             read_only: Vec::new(),
             read_write: Vec::new(),
+            unix_paths: tinybox_bus::UnixPathGrants::default(),
             allow_net: true,
             allow_subprocess: true,
             enforcement: JailEnforcement::Declared,

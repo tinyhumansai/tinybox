@@ -6,6 +6,7 @@ fn jail() -> NativeJailConfig {
     NativeJailConfig {
         read_only: Vec::new(),
         read_write: Vec::new(),
+        unix_paths: crate::UnixPathGrants::default(),
         allow_net: false,
         allow_subprocess: false,
         enforcement: crate::JailEnforcement::Enforced,

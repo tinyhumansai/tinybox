@@ -131,6 +131,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
     assert_eq!(CONTRACT_VERSION, (2, 0));
     assert!(is_compatible(CONTRACT_VERSION));
+    assert!(!is_compatible((1, 22)));
     assert!(!is_compatible((1, 21)));
     assert!(!is_compatible((1, 8)));
     assert!(!is_compatible((1, 7)));
@@ -246,11 +247,14 @@ fn local_grant_configuration_defaults_and_floor_round_trip() -> Result<(), serde
             prefixes: vec!["/etc".into()],
             credential_roots: vec!["/operator/.ssh".into()],
         },
+        allow_unix_paths: false,
     };
     assert_eq!(
         serde_json::from_value::<ResolveLocalGrantsRequest>(serde_json::to_value(&request)?)?,
         request
     );
+    let wire = serde_json::to_value(&request)?;
+    assert_eq!(wire.get("allow_unix_paths"), None);
     Ok(())
 }
 

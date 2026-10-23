@@ -19,6 +19,9 @@ pub struct NativeJailConfig {
     pub read_only: Vec<String>,
     /// Existing absolute paths additionally granted write access.
     pub read_write: Vec<String>,
+    /// Approved non-UTF-8 Unix grant paths, represented by their OS bytes.
+    #[serde(default, skip_serializing_if = "crate::UnixPathGrants::is_empty")]
+    pub unix_paths: crate::UnixPathGrants,
     /// Whether outgoing network access is permitted.
     pub allow_net: bool,
     /// Whether child processes are permitted.
