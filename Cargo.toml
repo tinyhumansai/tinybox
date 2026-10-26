@@ -37,13 +37,13 @@ categories = ["development-tools", "virtualization"]
 [workspace.dependencies]
 # TinyBus defines the message types, interface macro, and frozen module ABI used
 # by the bus adapter. Socket and CLI features are unnecessary here.
-tinybus = { version = ">=0.1.3, <0.2", default-features = false, features = [
+tinybus = { version = ">=0.3.6, <0.4", default-features = false, features = [
     "macros",
     "modules",
 ] }
 # The module-side SDK owns the isolated runtime and exports the ABI entrypoints
 # required by TinyBus's dynamic loader.
-tinybus-module = ">=0.1.3, <0.2"
+tinybus-module = ">=0.3.6, <0.4"
 
 # Derive macros for the crate-wide error type in `tinybox-core`.
 thiserror = "2"
@@ -68,12 +68,12 @@ tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.2" }
 tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.2" }
 tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.2" }
 # Pin the storage contract crates to the canonical TSD v2.1 release commit.
-tinystoragedrivers-types = { version = "2.1.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "05eaada962decbab33bafa4763d2bd1a67f6b456" }
-tinystoragedrivers-api = { version = "2.1.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "05eaada962decbab33bafa4763d2bd1a67f6b456" }
-tinystoragedrivers-busproxy = { version = "2.1.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "05eaada962decbab33bafa4763d2bd1a67f6b456" }
-tinystoragedrivers = { version = "2.1.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "05eaada962decbab33bafa4763d2bd1a67f6b456", default-features = false }
-tinystoragedrivers-testkit = { version = "2.1.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "05eaada962decbab33bafa4763d2bd1a67f6b456" }
-tinystoragedrivers-document = { version = "2.1.0", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "05eaada962decbab33bafa4763d2bd1a67f6b456" }
+tinystoragedrivers-types = { version = "2.1.1", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "bf1f0a97fbe6165a6edd9521659c7f6859700761" }
+tinystoragedrivers-api = { version = "2.1.1", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "bf1f0a97fbe6165a6edd9521659c7f6859700761" }
+tinystoragedrivers-busproxy = { version = "2.1.1", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "bf1f0a97fbe6165a6edd9521659c7f6859700761" }
+tinystoragedrivers = { version = "2.1.1", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "bf1f0a97fbe6165a6edd9521659c7f6859700761", default-features = false }
+tinystoragedrivers-testkit = { version = "2.1.1", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "bf1f0a97fbe6165a6edd9521659c7f6859700761" }
+tinystoragedrivers-document = { version = "2.1.1", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "bf1f0a97fbe6165a6edd9521659c7f6859700761" }
 tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.2.2" }
 
 # Lints apply to every crate in the workspace via `[lints] workspace = true`.
