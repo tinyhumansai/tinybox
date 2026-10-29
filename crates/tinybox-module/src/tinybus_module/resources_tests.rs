@@ -3190,7 +3190,10 @@ async fn openshell_refuses_spawn_rather_than_detaching_a_process() -> Result<()>
         })
         .await;
     assert!(refused.is_err(), "OpenShell declares no detached processes");
-    assert!(!host.ran("exec"), "nothing may run in place of a refused spawn");
+    assert!(
+        !host.ran("exec"),
+        "nothing may run in place of a refused spawn"
+    );
     resources.close(&resource).await?;
     Ok(())
 }

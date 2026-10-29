@@ -91,13 +91,22 @@ fn backend_capabilities_match_supervision_and_confinement_platforms() {
     assert_eq!(other.spawn_backends, Vec::<String>::new());
 
     let macos = capabilities_for(Platform::Unix);
-    assert_eq!(macos.create_backends, ["passthrough", "docker", "openshell"]);
+    assert_eq!(
+        macos.create_backends,
+        ["passthrough", "docker", "openshell"]
+    );
     assert_eq!(macos.exec_backends, ["passthrough", "docker", "openshell"]);
     assert_eq!(macos.spawn_backends, ["passthrough", "docker"]);
 
     let windows = capabilities_for(Platform::Windows);
-    assert_eq!(windows.create_backends, ["passthrough", "docker", "openshell"]);
-    assert_eq!(windows.exec_backends, ["passthrough", "docker", "openshell"]);
+    assert_eq!(
+        windows.create_backends,
+        ["passthrough", "docker", "openshell"]
+    );
+    assert_eq!(
+        windows.exec_backends,
+        ["passthrough", "docker", "openshell"]
+    );
     assert_eq!(windows.spawn_backends, ["passthrough", "docker"]);
 
     let linux = capabilities_for(Platform::Linux);
@@ -147,7 +156,10 @@ fn openshell_is_offered_wherever_docker_is_and_never_for_spawn() {
                 .any(|backend| backend == "openshell")
         );
     }
-    assert!(!super::supports_create_backend(Platform::Other, "openshell"));
+    assert!(!super::supports_create_backend(
+        Platform::Other,
+        "openshell"
+    ));
     assert!(!super::resources::supports_execution(
         Platform::Other,
         "openshell"
