@@ -293,6 +293,8 @@ crates/
 │   └── tests/live_ssh.rs    # gated behind TINYBOX_LIVE_SSH
 ├── tinybox-linux/           # confinement: rootless namespaces, no daemon
 │   └── tests/live_namespaces.rs # gated behind TINYBOX_LIVE_NAMESPACES
+├── tinybox-openshell/       # confinement: NVIDIA OpenShell sandboxes behind a gateway
+│   └── src/sandbox/args.rs  # pure `openshell sandbox` command construction
 ├── tinybox-sync/            # fingerprinting, exclusions, tar-over-stdin transfer
 ├── tinybox-cli/             # the `tinybox` binary
 │   ├── src/command/         # argument parsing and dispatch
