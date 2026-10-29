@@ -1,0 +1,26 @@
+[package]
+name = "tinybox-openshell"
+description = "A tinybox sandbox backed by NVIDIA OpenShell sandboxes."
+documentation = "https://docs.rs/tinybox-openshell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+tinybox-core.workspace = true
+async-trait.workspace = true
+# `openshell sandbox get -o json` is the one structured answer this backend
+# reads: the sandbox's lifecycle phase.
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
