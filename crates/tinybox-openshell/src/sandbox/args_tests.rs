@@ -30,7 +30,24 @@ fn accepts_only_dns_label_namespaces() {
     assert!(!is_valid_namespace("chottu_prod"));
     assert!(!is_valid_namespace("-chottu"));
     assert!(!is_valid_namespace("chottu-"));
-    assert!(!is_valid_namespace(&"a".repeat(33)));
+    assert!(is_valid_namespace(&"a".repeat(49)));
+    assert!(!is_valid_namespace(&"a".repeat(50)));
+}
+
+#[test]
+fn accepts_a_uuid_namespace_and_still_fits_a_box_name() -> Result<()> {
+    let namespace = "0f8fad5b-d9cb-469f-a165-70867728950e-1";
+    assert!(is_valid_namespace(namespace));
+    let argv = create(namespace, &BoxId::new("box-12")?, &spec()?)?;
+    assert!(argv.iter().any(|part| part == "tinybox-0f8fad5b-d9cb-469f-a165-70867728950e-1-box-12"));
+    Ok(())
+}
+
+#[test]
+fn refuses_a_box_that_pushes_a_long_namespace_past_the_name_limit() -> Result<()> {
+    let refused = create(&"a".repeat(49), &BoxId::new("box-10")?, &spec()?);
+    assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
+    Ok(())
 }
 
 #[test]
