@@ -117,10 +117,10 @@ fn enforces_filesystem_network_cpu_and_memory_only() {
         Constraint::Cpu,
         Constraint::Memory,
     ] {
-        assert_eq!(support.of(enforced), Enforcement::Enforced, "{enforced}");
+        assert_eq!(support.enforcement(enforced), Enforcement::Enforced, "{enforced}");
     }
     for unsupported in [Constraint::Pids, Constraint::Disk, Constraint::Subprocess] {
-        assert_eq!(support.of(unsupported), Enforcement::Unsupported, "{unsupported}");
+        assert_eq!(support.enforcement(unsupported), Enforcement::Unsupported, "{unsupported}");
     }
     assert_eq!(sandbox.name(), NAME);
 }
