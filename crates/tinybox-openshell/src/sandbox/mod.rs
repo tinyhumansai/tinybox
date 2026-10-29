@@ -211,9 +211,10 @@ impl Sandbox for OpenShellSandbox {
         self.host.run(&exec).await
     }
 
+    // OpenShell has no filesystem snapshot, so neither is declared and both
+    // refuse; copying the workspace out instead would be the emulation rule 1
+    // forbids.
     async fn snapshot(&self, _id: &BoxId) -> Result<SnapshotId> {
-        self.capabilities()
-            .require(NAME, Capability::FilesystemSnapshot)?;
         Err(Error::Unsupported {
             sandbox: NAME.to_owned(),
             capability: Capability::FilesystemSnapshot,
@@ -221,7 +222,6 @@ impl Sandbox for OpenShellSandbox {
     }
 
     async fn fork(&self, _snapshot: &SnapshotId, _spec: &BoxSpec) -> Result<BoxInfo> {
-        self.capabilities().require(NAME, Capability::Fork)?;
         Err(Error::Unsupported {
             sandbox: NAME.to_owned(),
             capability: Capability::Fork,
