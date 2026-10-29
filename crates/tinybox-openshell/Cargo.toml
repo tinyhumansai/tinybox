@@ -13,13 +13,17 @@ categories.workspace = true
 publish = false
 
 [dependencies]
+# The `Sandbox`, `Host` and `Store` traits this backend implements and the
+# model types (`BoxSpec`, `ExecRequest`) it exchanges.
 tinybox-core.workspace = true
+# `Sandbox` is an async trait; its methods are declared with this macro.
 async-trait.workspace = true
 # `openshell sandbox get -o json` is the one structured answer this backend
 # reads: the sandbox's lifecycle phase.
 serde_json.workspace = true
 
 [dev-dependencies]
+# The async runtime the `#[tokio::test]` tests run on.
 tokio.workspace = true
 
 [lints]

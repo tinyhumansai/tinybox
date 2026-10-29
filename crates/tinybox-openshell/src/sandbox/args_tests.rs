@@ -35,7 +35,7 @@ fn accepts_only_dns_label_namespaces() {
 
 #[test]
 fn creates_from_the_image_with_limits_labels_and_no_prompts() -> Result<()> {
-    let argv = create("chottu", &id()?, &spec()?, None)?;
+    let argv = create("chottu", &id()?, &spec()?)?;
     assert_eq!(
         argv,
         [
@@ -65,43 +65,47 @@ fn creates_from_the_image_with_limits_labels_and_no_prompts() -> Result<()> {
 }
 
 #[test]
-fn rounds_memory_up_to_whole_mebibytes() -> Result<()> {
+fn passes_whole_mebibyte_memory_exactly() -> Result<()> {
     let resources = Resources {
         cpu_millis: 250,
+        memory_bytes: 100 * 1024 * 1024,
+        ..Resources::DEFAULT
+    };
+    let argv = create("chottu", &id()?, &spec()?.with_resources(resources))?;
+    assert!(argv.windows(2).any(|pair| pair == ["--cpu", "250m"]));
+    assert!(argv.windows(2).any(|pair| pair == ["--memory", "100Mi"]));
+    Ok(())
+}
+
+#[test]
+fn refuses_memory_that_is_not_whole_mebibytes() -> Result<()> {
+    let resources = Resources {
         memory_bytes: 100 * 1024 * 1024 + 1,
         ..Resources::DEFAULT
     };
-    let argv = create("chottu", &id()?, &spec()?.with_resources(resources), None)?;
-    assert!(argv.windows(2).any(|pair| pair == ["--cpu", "250m"]));
-    assert!(argv.windows(2).any(|pair| pair == ["--memory", "101Mi"]));
+    let refused = create("chottu", &id()?, &spec()?.with_resources(resources));
+    assert!(matches!(
+        refused,
+        Err(Error::ConstraintNotEnforced {
+            constraint: Constraint::Memory,
+            ..
+        })
+    ));
     Ok(())
 }
 
 #[test]
 fn passes_environment_by_name_only() -> Result<()> {
-    let argv = create(
-        "chottu",
-        &id()?,
-        &spec()?.with_env("TOKEN", "secret-value"),
-        None,
-    )?;
+    let argv = create("chottu", &id()?, &spec()?.with_env("TOKEN", "secret-value"))?;
     assert!(argv.windows(2).any(|pair| pair == ["--env-from", "TOKEN"]));
     assert!(!argv.iter().any(|part| part.contains("secret-value")));
     Ok(())
 }
 
 #[test]
-fn names_a_policy_file_when_given() -> Result<()> {
-    let argv = create(
-        "chottu",
-        &id()?,
-        &spec()?,
-        Some("/etc/openshell/agent.yaml"),
-    )?;
-    assert!(
-        argv.windows(2)
-            .any(|pair| pair == ["--policy", "/etc/openshell/agent.yaml"])
-    );
+fn passes_no_policy_so_the_gateway_default_applies() -> Result<()> {
+    let argv = create("chottu", &id()?, &spec()?)?;
+    assert!(!argv.contains(&"--policy".to_owned()));
     Ok(())
 }
 
@@ -116,7 +120,7 @@ fn refuses_every_source_but_an_image() -> Result<()> {
         },
     ];
     for source in sources {
-        let refused = create("chottu", &id()?, &spec()?.with_source(source), None);
+        let refused = create("chottu", &id()?, &spec()?.with_source(source));
         assert!(matches!(
             refused,
             Err(Error::UnsupportedWorkspaceSource { .. })
@@ -133,7 +137,7 @@ fn refuses_any_network_but_denied() -> Result<()> {
         NetworkPolicy::Allowlist(EgressAllowlist::new(["pypi.org"], [443])),
     ];
     for policy in policies {
-        let refused = create("chottu", &id()?, &spec()?.with_network(policy), None);
+        let refused = create("chottu", &id()?, &spec()?.with_network(policy));
         assert!(matches!(
             refused,
             Err(Error::ConstraintNotEnforced {
@@ -152,7 +156,6 @@ fn refuses_published_ports() -> Result<()> {
         "chottu",
         &id()?,
         &spec()?.with_port(PortMapping::dynamic(8080)),
-        None,
     );
     assert!(matches!(
         refused,
@@ -166,10 +169,10 @@ fn refuses_published_ports() -> Result<()> {
 
 #[test]
 fn refuses_a_box_name_that_is_not_a_dns_label() -> Result<()> {
-    let refused = create("chottu", &BoxId::new("Box_0")?, &spec()?, None);
+    let refused = create("chottu", &BoxId::new("Box_0")?, &spec()?);
     assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
     let long = BoxId::new("b".repeat(60))?;
-    let refused = create("chottu", &long, &spec()?, None);
+    let refused = create("chottu", &long, &spec()?);
     assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
     Ok(())
 }
@@ -258,6 +261,19 @@ fn maps_every_phase_to_a_box_state() -> Result<()> {
         assert_eq!(state_of(&json)?, state, "phase {phase}");
     }
     Ok(())
+}
+
+#[test]
+fn reads_the_phase_nested_under_provisioning() -> Result<()> {
+    let json = r#"{"name":"tinybox-chottu-box-0","provisioning":{"phase":"Ready"}}"#;
+    assert_eq!(state_of(json)?, BoxState::Ready);
+    Ok(())
+}
+
+#[test]
+fn recognises_a_name_collision() {
+    assert!(is_already_exists("Error: sandbox already exists"));
+    assert!(!is_already_exists("timed out"));
 }
 
 #[test]

@@ -24,6 +24,8 @@
 //! - **Network:** only [`NetworkPolicy::Denied`](tinybox_core::NetworkPolicy::Denied).
 //!   `OpenShell` denies egress by default; any other policy is refused rather
 //!   than approximated, because widening it is a gateway policy decision.
+//!   No policy file is passed, so the gateway's default applies; keeping that
+//!   default deny-all is the operator's job, as the CLI cannot report it back.
 //! - **CPU and memory:** passed as the sandbox's limits.
 //! - **Disk:** not per box. Workspace size is the gateway's (or its workload
 //!   template's) to set, so `Disk` is declared unsupported.

@@ -126,11 +126,7 @@ fn unsupported_source(kind: &'static str) -> Error {
 ///
 /// Everything [`check_spec`] and [`resource_flags`] refuse, and [`Error::InvalidIdentifier`] when
 /// the box's name is not a DNS label.
-pub(super) fn create(
-    namespace: &str,
-    id: &BoxId,
-    spec: &BoxSpec,
-) -> Result<Vec<String>> {
+pub(super) fn create(namespace: &str, id: &BoxId, spec: &BoxSpec) -> Result<Vec<String>> {
     let image = check_spec(spec)?;
     let mut argv = openshell(["sandbox", "create", "--name"]);
     argv.push(checked_name(namespace, id)?);

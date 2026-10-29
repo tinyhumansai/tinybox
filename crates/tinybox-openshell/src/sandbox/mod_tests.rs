@@ -97,8 +97,8 @@ fn declares_kernel_isolation_and_nothing_it_cannot_do() {
     let capabilities = OpenShellSandbox::declared_capabilities();
     assert_eq!(capabilities.isolation, IsolationLevel::Kernel);
     assert!(capabilities.is_suitable_for_untrusted_code());
-    assert!(capabilities.supports(Capability::ResourceLimits));
     for absent in [
+        Capability::ResourceLimits,
         Capability::FilesystemSnapshot,
         Capability::Fork,
         Capability::PortForward,
@@ -148,8 +148,7 @@ async fn creates_a_labelled_sandbox_and_records_the_box() -> Result<()> {
     let store = Arc::new(MemoryStore::new());
     let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
     let sandbox = OpenShellSandbox::with_namespace(host.clone(), store.clone(), "chottu")?
-        .with_clock(Arc::new(FixedClock::at(created_at)))
-        .with_policy("/etc/openshell/agent.yaml");
+        .with_clock(Arc::new(FixedClock::at(created_at)));
 
     let info = sandbox
         .create(&spec()?.with_env("TOKEN", "secret-value"))
@@ -162,11 +161,7 @@ async fn creates_a_labelled_sandbox_and_records_the_box() -> Result<()> {
     assert_eq!(runs.len(), 1);
     let create = &runs[0];
     assert!(create.argv.contains(&"tinybox-chottu-box-0".to_owned()));
-    assert!(
-        create
-            .argv
-            .contains(&"/etc/openshell/agent.yaml".to_owned())
-    );
+    assert!(!create.argv.contains(&"--policy".to_owned()));
     // The value rides in the CLI's environment, never its argv.
     assert_eq!(
         create.env.get("TOKEN").map(String::as_str),
@@ -241,6 +236,40 @@ async fn a_failed_cleanup_after_a_failed_create_is_reported() -> Result<()> {
         Err(Error::Backend { operation, .. }) => assert_eq!(operation, "delete the sandbox"),
         other => return Err(unexpected(&other)),
     }
+    // The sandbox may still exist, so its record stays, failed, for `destroy`.
+    let records = store.list()?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, BoxState::Failed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_cleanup_leaves_a_record_destroy_can_retry() -> Result<()> {
+    let host = ScriptedHost::new([
+        Ok(failed(1, "timed out")),
+        Ok(failed(1, "connection refused")),
+        Ok(ok("")),
+    ]);
+    let (sandbox, store) = sandbox(&host);
+    let _ = sandbox.create(&spec()?).await;
+    let id = store.list()?[0].id.clone();
+
+    sandbox.destroy(&id).await?;
+
+    assert_eq!(host.subcommands(), ["create", "delete", "delete"]);
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_name_collision_never_deletes_the_existing_sandbox() -> Result<()> {
+    let host = ScriptedHost::new([Ok(failed(1, "Error: sandbox already exists"))]);
+    let (sandbox, store) = sandbox(&host);
+
+    let refused = sandbox.create(&spec()?).await;
+
+    assert!(matches!(refused, Err(Error::Backend { .. })));
+    assert_eq!(host.subcommands(), ["create"]);
     assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
