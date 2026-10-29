@@ -1407,6 +1407,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinybox-openshell"
+version = "0.2.3"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tinybox-core",
+ "tokio",
+]
+
+[[package]]
 name = "tinybox-ssh"
 version = "0.2.3"
 dependencies = [
