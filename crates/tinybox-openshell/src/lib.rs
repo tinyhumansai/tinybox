@@ -30,6 +30,14 @@
 //! - **Disk:** not per box. Workspace size is the gateway's (or its workload
 //!   template's) to set, so `Disk` is declared unsupported.
 //!
+//! # Over the bus
+//!
+//! The tinybox module serves this backend as `openshell` wherever it serves
+//! Docker: `Create` and `Exec` accept it, and `Spawn` does not, because a
+//! sandbox has no detached processes. The module names each sandbox after its
+//! resource identifier, so sandboxes from different module instances sharing a
+//! gateway never collide.
+//!
 //! ```no_run
 //! use std::sync::Arc;
 //! use tinybox_core::{BoxSpec, HostRef, MemoryStore, Placement, Sandbox, SandboxRef, WorkspaceSource};
