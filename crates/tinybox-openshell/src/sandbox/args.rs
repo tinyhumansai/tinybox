@@ -47,9 +47,9 @@ pub(super) fn is_valid_namespace(value: &str) -> bool {
         && value.len() <= 32
         && !value.starts_with('-')
         && !value.ends_with('-')
-        && value
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 /// Check that a box's sandbox name is a DNS label.
@@ -63,9 +63,9 @@ fn checked_name(namespace: &str, id: &BoxId) -> Result<String> {
     let name = sandbox_name(namespace, id);
     let valid = name.len() <= MAX_NAME_LENGTH
         && !name.ends_with('-')
-        && name
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-');
+        && name.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        });
     if valid {
         Ok(name)
     } else {
@@ -153,9 +153,7 @@ pub(super) fn create(
     }
     // A host has no person at the prompt, so a missing provider must fail the
     // create rather than wait for an answer.
-    argv.extend(
-        ["--no-auto-providers", "--no-tty", "--detach", "-o", "json"].map(str::to_owned),
-    );
+    argv.extend(["--no-auto-providers", "--no-tty", "--detach", "-o", "json"].map(str::to_owned));
     Ok(argv)
 }
 

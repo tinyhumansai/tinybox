@@ -75,7 +75,9 @@ fn failed(code: i32, stderr: &str) -> ExecOutput {
 }
 
 fn phase(phase: &str) -> ExecOutput {
-    ok(&format!(r#"{{"name":"tinybox-default-box-0","phase":"{phase}"}}"#))
+    ok(&format!(
+        r#"{{"name":"tinybox-default-box-0","phase":"{phase}"}}"#
+    ))
 }
 
 fn spec() -> Result<BoxSpec> {
@@ -117,10 +119,18 @@ fn enforces_filesystem_network_cpu_and_memory_only() {
         Constraint::Cpu,
         Constraint::Memory,
     ] {
-        assert_eq!(support.enforcement(enforced), Enforcement::Enforced, "{enforced}");
+        assert_eq!(
+            support.enforcement(enforced),
+            Enforcement::Enforced,
+            "{enforced}"
+        );
     }
     for unsupported in [Constraint::Pids, Constraint::Disk, Constraint::Subprocess] {
-        assert_eq!(support.enforcement(unsupported), Enforcement::Unsupported, "{unsupported}");
+        assert_eq!(
+            support.enforcement(unsupported),
+            Enforcement::Unsupported,
+            "{unsupported}"
+        );
     }
     assert_eq!(sandbox.name(), NAME);
 }
@@ -128,8 +138,7 @@ fn enforces_filesystem_network_cpu_and_memory_only() {
 #[test]
 fn refuses_a_namespace_that_is_not_a_dns_label() {
     let host = ScriptedHost::new([]);
-    let refused =
-        OpenShellSandbox::with_namespace(host, Arc::new(MemoryStore::new()), "Not_Valid");
+    let refused = OpenShellSandbox::with_namespace(host, Arc::new(MemoryStore::new()), "Not_Valid");
     assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
 }
 
@@ -153,7 +162,11 @@ async fn creates_a_labelled_sandbox_and_records_the_box() -> Result<()> {
     assert_eq!(runs.len(), 1);
     let create = &runs[0];
     assert!(create.argv.contains(&"tinybox-chottu-box-0".to_owned()));
-    assert!(create.argv.contains(&"/etc/openshell/agent.yaml".to_owned()));
+    assert!(
+        create
+            .argv
+            .contains(&"/etc/openshell/agent.yaml".to_owned())
+    );
     // The value rides in the CLI's environment, never its argv.
     assert_eq!(
         create.env.get("TOKEN").map(String::as_str),
@@ -252,7 +265,10 @@ async fn execs_in_a_ready_box_and_returns_the_commands_own_status() -> Result<()
     assert_eq!(output.exit_code, 3);
     assert_eq!(output.stderr_lossy(), "boom");
     assert_eq!(host.subcommands(), ["create", "get", "exec"]);
-    let exec = host.runs().pop().ok_or_else(|| unexpected(&Ok::<(), Error>(())))?;
+    let exec = host
+        .runs()
+        .pop()
+        .ok_or_else(|| unexpected(&Ok::<(), Error>(())))?;
     assert_eq!(exec.stdin.as_deref(), Some(&b"input"[..]));
     Ok(())
 }
@@ -278,7 +294,10 @@ async fn refuses_to_exec_in_a_box_that_is_not_ready() -> Result<()> {
 
 #[tokio::test]
 async fn reports_a_vanished_sandbox_as_archived() -> Result<()> {
-    let host = ScriptedHost::new([Ok(phase("Ready")), Ok(failed(1, "Error: sandbox not found"))]);
+    let host = ScriptedHost::new([
+        Ok(phase("Ready")),
+        Ok(failed(1, "Error: sandbox not found")),
+    ]);
     let (sandbox, _) = sandbox(&host);
     let info = sandbox.create(&spec()?).await?;
 

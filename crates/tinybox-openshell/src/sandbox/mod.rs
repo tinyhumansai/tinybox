@@ -244,9 +244,7 @@ impl Sandbox for OpenShellSandbox {
             Ok(json) => args::state_of(&json)?,
             // The record exists but the sandbox does not: a real state to
             // report rather than an error.
-            Err(Error::Backend { message, .. }) if args::is_missing(&message) => {
-                BoxState::Archived
-            }
+            Err(Error::Backend { message, .. }) if args::is_missing(&message) => BoxState::Archived,
             Err(other) => return Err(other),
         };
         Ok(info)

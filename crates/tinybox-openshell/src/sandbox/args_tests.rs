@@ -2,9 +2,7 @@
 
 use super::*;
 
-use tinybox_core::{
-    EgressAllowlist, HostRef, Placement, PortMapping, SandboxRef, SnapshotId,
-};
+use tinybox_core::{EgressAllowlist, HostRef, Placement, PortMapping, SandboxRef, SnapshotId};
 
 fn spec() -> Result<BoxSpec> {
     Ok(BoxSpec::new(
@@ -94,7 +92,12 @@ fn passes_environment_by_name_only() -> Result<()> {
 
 #[test]
 fn names_a_policy_file_when_given() -> Result<()> {
-    let argv = create("chottu", &id()?, &spec()?, Some("/etc/openshell/agent.yaml"))?;
+    let argv = create(
+        "chottu",
+        &id()?,
+        &spec()?,
+        Some("/etc/openshell/agent.yaml"),
+    )?;
     assert!(
         argv.windows(2)
             .any(|pair| pair == ["--policy", "/etc/openshell/agent.yaml"])
@@ -211,7 +214,14 @@ fn refuses_to_exec_an_empty_command() -> Result<()> {
 fn gets_and_deletes_by_sandbox_name() -> Result<()> {
     assert_eq!(
         get("chottu", &id()?),
-        ["openshell", "sandbox", "get", "tinybox-chottu-box-0", "-o", "json"]
+        [
+            "openshell",
+            "sandbox",
+            "get",
+            "tinybox-chottu-box-0",
+            "-o",
+            "json"
+        ]
     );
     assert_eq!(
         delete("chottu", &id()?),
