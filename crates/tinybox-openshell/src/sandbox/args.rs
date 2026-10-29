@@ -164,7 +164,7 @@ pub(super) fn create(namespace: &str, id: &BoxId, spec: &BoxSpec) -> Result<Vec<
 /// whole number of mebibytes.
 fn resource_flags(resources: &Resources) -> Result<Vec<String>> {
     const MEBIBYTE: u64 = 1024 * 1024;
-    if resources.memory_bytes % MEBIBYTE != 0 {
+    if !resources.memory_bytes.is_multiple_of(MEBIBYTE) {
         return Err(Error::ConstraintNotEnforced {
             sandbox: NAME.to_owned(),
             constraint: Constraint::Memory,
