@@ -124,19 +124,18 @@ fn unsupported_source(kind: &'static str) -> Error {
 ///
 /// # Errors
 ///
-/// Everything [`check_spec`] refuses, and [`Error::InvalidIdentifier`] when
+/// Everything [`check_spec`] and [`resource_flags`] refuse, and [`Error::InvalidIdentifier`] when
 /// the box's name is not a DNS label.
 pub(super) fn create(
     namespace: &str,
     id: &BoxId,
     spec: &BoxSpec,
-    policy: Option<&str>,
 ) -> Result<Vec<String>> {
     let image = check_spec(spec)?;
     let mut argv = openshell(["sandbox", "create", "--name"]);
     argv.push(checked_name(namespace, id)?);
     argv.extend(["--from".to_owned(), image]);
-    argv.extend(resource_flags(&spec.resources));
+    argv.extend(resource_flags(&spec.resources)?);
     argv.extend([
         "--label".to_owned(),
         format!("{BOX_LABEL}={id}"),
@@ -147,10 +146,6 @@ pub(super) fn create(
         argv.push("--env-from".to_owned());
         argv.push(key.clone());
     }
-    if let Some(policy) = policy {
-        argv.push("--policy".to_owned());
-        argv.push(policy.to_owned());
-    }
     // A host has no person at the prompt, so a missing provider must fail the
     // create rather than wait for an answer.
     argv.extend(["--no-auto-providers", "--no-tty", "--detach", "-o", "json"].map(str::to_owned));
@@ -159,18 +154,33 @@ pub(super) fn create(
 
 /// Translate tinybox resources into `OpenShell`'s limit flags.
 ///
-/// `OpenShell` takes Kubernetes quantities. CPU is exact in millicores; memory
-/// rounds *up* to whole mebibytes, so a box never gets less than it asked for.
-/// There is no per-sandbox process limit, which is why `Pids` is declared
-/// unsupported rather than dropped here silently.
-fn resource_flags(resources: &Resources) -> Vec<String> {
+/// `OpenShell` takes Kubernetes quantities. CPU is exact in millicores. Memory
+/// is a whole number of mebibytes: a byte count that is not one is refused
+/// rather than rounded, because rounding up would exceed the maximum the
+/// caller asked for and rounding down would give less than it needs. There is
+/// no per-sandbox process or disk limit, which is why `pids_max` and
+/// `disk_bytes` are not applied and the backend declares neither
+/// `Capability::ResourceLimits` nor the `Pids` and `Disk` constraints.
+///
+/// # Errors
+///
+/// Returns [`Error::ConstraintNotEnforced`] for a memory limit that is not a
+/// whole number of mebibytes.
+fn resource_flags(resources: &Resources) -> Result<Vec<String>> {
     const MEBIBYTE: u64 = 1024 * 1024;
-    vec![
+    if resources.memory_bytes % MEBIBYTE != 0 {
+        return Err(Error::ConstraintNotEnforced {
+            sandbox: NAME.to_owned(),
+            constraint: Constraint::Memory,
+            enforcement: Enforcement::Unsupported,
+        });
+    }
+    Ok(vec![
         "--cpu".to_owned(),
         format!("{}m", resources.cpu_millis),
         "--memory".to_owned(),
-        format!("{}Mi", resources.memory_bytes.div_ceil(MEBIBYTE)),
-    ]
+        format!("{}Mi", resources.memory_bytes / MEBIBYTE),
+    ])
 }
 
 /// The `openshell sandbox exec` command that runs `request` inside a box.
@@ -231,16 +241,29 @@ pub(super) fn is_missing(stderr: &str) -> bool {
     stderr.to_ascii_lowercase().contains("not found")
 }
 
+/// Whether a failed `sandbox create` failed because the name is taken.
+///
+/// Then the sandbox is someone else's, so a failed create must not delete it.
+pub(super) fn is_already_exists(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("already exists")
+}
+
 /// The box state a `sandbox get -o json` answer describes.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Backend`] when the output is not JSON or has no string
-/// `phase`, rather than guessing a state from a shape this code does not know.
+/// phase (`provisioning.phase`, or a top-level `phase`), rather than guessing a state from a shape this code does not know.
 pub(super) fn state_of(json: &str) -> Result<BoxState> {
     let phase = serde_json::from_str::<serde_json::Value>(json)
         .ok()
-        .and_then(|value| value.get("phase")?.as_str().map(str::to_owned))
+        .and_then(|value| {
+            value
+                .pointer("/provisioning/phase")
+                .or_else(|| value.get("phase"))?
+                .as_str()
+                .map(str::to_owned)
+        })
         .ok_or_else(|| Error::Backend {
             sandbox: NAME.to_owned(),
             operation: "read the sandbox phase",

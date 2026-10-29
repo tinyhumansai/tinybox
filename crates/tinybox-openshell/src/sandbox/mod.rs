@@ -32,16 +32,17 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 ///
 /// The gateway decides where a sandbox runs and how big its workspace is.
 /// tinybox asks for an image, CPU and memory, labels the sandbox with its box
-/// and namespace, and optionally names a policy file. Egress beyond `OpenShell`'s
-/// default-deny, credential providers, and disk size are configured on the
-/// gateway, which is why this backend refuses specs that ask for them.
+/// and namespace. It passes no policy: the sandbox gets the gateway's default,
+/// which `OpenShell` makes deny-all, and the operator must keep it so, because
+/// this backend cannot read the effective policy back. Egress beyond that,
+/// credential providers, and disk size are configured on the gateway, which is
+/// why this backend refuses specs that ask for them.
 #[derive(Debug, Clone)]
 pub struct OpenShellSandbox {
     host: Arc<dyn Host>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     namespace: String,
-    policy: Option<String>,
 }
 
 impl OpenShellSandbox {
@@ -58,7 +59,6 @@ impl OpenShellSandbox {
             store,
             clock: Arc::new(SystemClock::new()),
             namespace: DEFAULT_NAMESPACE.to_owned(),
-            policy: None,
         }
     }
 
@@ -94,21 +94,10 @@ impl OpenShellSandbox {
         self
     }
 
-    /// Create every sandbox with the `OpenShell` policy file at `path`.
-    ///
-    /// The path is read by the `openshell` CLI, so it names a file on the
-    /// sandbox's host. Without one, the gateway's default policy applies.
-    #[must_use]
-    pub fn with_policy(mut self, path: impl Into<String>) -> Self {
-        self.policy = Some(path.into());
-        self
-    }
-
     /// What this backend can do, independent of any instance.
     #[must_use]
     pub const fn declared_capabilities() -> SandboxCapabilities {
         SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None)
-            .with_resource_limits()
     }
 
     /// Run an `openshell` command, treating a non-zero exit as a failure.
@@ -171,7 +160,7 @@ impl Sandbox for OpenShellSandbox {
         // this backend refuses leaves no sandbox, and only a record to drop.
         let info =
             tinybox_core::insert_new(self.store.as_ref(), BoxState::Ready, spec, self.clock.now())?;
-        let argv = match args::create(&self.namespace, &info.id, spec, self.policy.as_deref()) {
+        let argv = match args::create(&self.namespace, &info.id, spec) {
             Ok(argv) => argv,
             Err(error) => {
                 self.store.remove(&info.id)?;
@@ -182,12 +171,23 @@ impl Sandbox for OpenShellSandbox {
         let mut request = ExecRequest::new(argv);
         request.env.clone_from(&spec.env);
         if let Err(error) = self.openshell("create the sandbox", request).await {
+            if matches!(&error, Error::Backend { message, .. } if args::is_already_exists(message))
+            {
+                // The name belongs to a sandbox this call did not create, so
+                // it is not ours to delete; only the record goes.
+                self.store.remove(&info.id)?;
+                return Err(error);
+            }
             // The gateway may have created the sandbox before the CLI failed
-            // (a timeout waiting for Ready, say). Removing it keeps a failed
-            // create from leaking a running pod; the record goes either way.
-            let cleanup = self.delete_sandbox(&info.id).await;
+            // (a timeout waiting for Ready, say). Delete it so a failed create
+            // does not leak a running pod. If the delete fails too, keep the
+            // record marked failed: it holds the identifier, so `destroy` can
+            // retry and no later create reuses the name.
+            if let Err(cleanup) = self.delete_sandbox(&info.id).await {
+                self.store.set_state(&info.id, BoxState::Failed)?;
+                return Err(cleanup);
+            }
             self.store.remove(&info.id)?;
-            cleanup?;
             return Err(error);
         }
         Ok(info)
