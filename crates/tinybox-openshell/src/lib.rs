@@ -1,9 +1,9 @@
-//! A tinybox sandbox backed by NVIDIA OpenShell sandboxes.
+//! A tinybox sandbox backed by NVIDIA `OpenShell` sandboxes.
 //!
 //! [OpenShell](https://github.com/NVIDIA/OpenShell) runs each sandbox behind a
 //! gateway, as a container, a Kubernetes pod or a microVM, and confines the
 //! process inside it with Landlock, seccomp and a default-deny egress proxy.
-//! This backend turns tinybox boxes into OpenShell sandboxes, so a host can
+//! This backend turns tinybox boxes into `OpenShell` sandboxes, so a host can
 //! hand untrusted commands to a gateway in a cluster instead of running them on
 //! its own machine.
 //!
@@ -19,10 +19,10 @@
 //! # What it enforces
 //!
 //! - **Isolation:** [`IsolationLevel::Kernel`](tinybox_core::IsolationLevel::Kernel).
-//!   The gateway's compute driver supplies the outer fence and OpenShell's
+//!   The gateway's compute driver supplies the outer fence and `OpenShell`'s
 //!   in-sandbox runtime adds Landlock and seccomp.
 //! - **Network:** only [`NetworkPolicy::Denied`](tinybox_core::NetworkPolicy::Denied).
-//!   OpenShell denies egress by default; any other policy is refused rather
+//!   `OpenShell` denies egress by default; any other policy is refused rather
 //!   than approximated, because widening it is a gateway policy decision.
 //! - **CPU and memory:** passed as the sandbox's limits.
 //! - **Disk:** not per box. Workspace size is the gateway's (or its workload

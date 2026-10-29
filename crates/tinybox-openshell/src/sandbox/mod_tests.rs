@@ -1,4 +1,4 @@
-//! Tests for the OpenShell sandbox.
+//! Tests for the `OpenShell` sandbox.
 //!
 //! [`ScriptedHost`] records every command it is handed and replies from a
 //! queue, so the whole backend runs without a gateway. Behavior that needs a
@@ -185,8 +185,8 @@ async fn a_refused_spec_runs_nothing_and_keeps_no_record() -> Result<()> {
         .await;
 
     assert!(matches!(refused, Err(Error::ConstraintNotEnforced { .. })));
-    assert!(host.runs().is_empty());
-    assert!(store.list()?.is_empty());
+    assert_eq!(host.runs().len(), 0);
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 
@@ -202,7 +202,7 @@ async fn an_invalid_spec_is_refused_before_any_record() -> Result<()> {
     let refused = sandbox.create(&spec()?.with_resources(zero_cpu)).await;
 
     assert!(matches!(refused, Err(Error::ZeroResourceLimit { .. })));
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 
@@ -223,7 +223,7 @@ async fn a_failed_create_deletes_the_sandbox_and_the_record() -> Result<()> {
         other => return Err(unexpected(&other)),
     }
     assert_eq!(host.subcommands(), ["create", "delete"]);
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 
@@ -241,7 +241,7 @@ async fn a_failed_cleanup_after_a_failed_create_is_reported() -> Result<()> {
         Err(Error::Backend { operation, .. }) => assert_eq!(operation, "delete the sandbox"),
         other => return Err(unexpected(&other)),
     }
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 
@@ -345,7 +345,7 @@ async fn destroys_the_sandbox_then_the_record() -> Result<()> {
     sandbox.destroy(&info.id).await?;
 
     assert_eq!(host.subcommands(), ["create", "delete"]);
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 
@@ -357,7 +357,7 @@ async fn destroying_an_already_deleted_sandbox_succeeds() -> Result<()> {
 
     sandbox.destroy(&info.id).await?;
 
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
 
@@ -389,7 +389,7 @@ async fn an_unknown_box_never_reaches_the_gateway() -> Result<()> {
         sandbox.inspect(&unknown).await,
         Err(Error::UnknownBox { .. })
     ));
-    assert!(host.runs().is_empty());
+    assert_eq!(host.runs().len(), 0);
     Ok(())
 }
 
@@ -412,7 +412,7 @@ async fn refuses_snapshots_and_forks() -> Result<()> {
             ..
         })
     ));
-    assert!(host.runs().is_empty());
+    assert_eq!(host.runs().len(), 0);
     Ok(())
 }
 

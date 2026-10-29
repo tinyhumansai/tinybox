@@ -1,4 +1,4 @@
-//! A sandbox backed by NVIDIA OpenShell sandboxes.
+//! A sandbox backed by NVIDIA `OpenShell` sandboxes.
 
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ pub const NAME: &str = "openshell";
 /// The namespace a sandbox uses when none is given.
 pub const DEFAULT_NAMESPACE: &str = "default";
 
-/// A sandbox that runs each box as an OpenShell sandbox.
+/// A sandbox that runs each box as an `OpenShell` sandbox.
 ///
 /// # Why it drives the CLI through a [`Host`]
 ///
@@ -32,7 +32,7 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 ///
 /// The gateway decides where a sandbox runs and how big its workspace is.
 /// tinybox asks for an image, CPU and memory, labels the sandbox with its box
-/// and namespace, and optionally names a policy file. Egress beyond OpenShell's
+/// and namespace, and optionally names a policy file. Egress beyond `OpenShell`'s
 /// default-deny, credential providers, and disk size are configured on the
 /// gateway, which is why this backend refuses specs that ask for them.
 #[derive(Debug, Clone)]
@@ -94,7 +94,7 @@ impl OpenShellSandbox {
         self
     }
 
-    /// Create every sandbox with the OpenShell policy file at `path`.
+    /// Create every sandbox with the `OpenShell` policy file at `path`.
     ///
     /// The path is read by the `openshell` CLI, so it names a file on the
     /// sandbox's host. Without one, the gateway's default policy applies.

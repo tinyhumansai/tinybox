@@ -1,7 +1,7 @@
 //! The `openshell sandbox` commands this backend issues, as pure functions.
 //!
 //! Nothing here runs a process. Every decision about how a box becomes an
-//! OpenShell sandbox — its name, labels, limits, and which specs are refused —
+//! `OpenShell` sandbox — its name, labels, limits, and which specs are refused —
 //! is a value returned from this module, so it can be asserted without a
 //! gateway.
 
@@ -23,13 +23,13 @@ pub const NAMESPACE_LABEL: &str = "tinybox-namespace";
 
 /// The longest sandbox name this backend produces.
 ///
-/// OpenShell's Kubernetes driver names pods and services after the sandbox,
+/// `OpenShell`'s Kubernetes driver names pods and services after the sandbox,
 /// and a Kubernetes name is a DNS label: at most 63 characters.
 const MAX_NAME_LENGTH: usize = 63;
 
-/// The OpenShell sandbox name for a box.
+/// The `OpenShell` sandbox name for a box.
 ///
-/// Box identifiers are unique within a store; OpenShell names are unique
+/// Box identifiers are unique within a store; `OpenShell` names are unique
 /// within a gateway workspace. The namespace bridges those scopes, as it does
 /// for Docker container names, and the `tinybox-` prefix says where the
 /// sandbox came from.
@@ -76,7 +76,7 @@ fn checked_name(namespace: &str, id: &BoxId) -> Result<String> {
     }
 }
 
-/// Refuse what OpenShell cannot honor for this spec, before anything runs.
+/// Refuse what `OpenShell` cannot honor for this spec, before anything runs.
 ///
 /// # Errors
 ///
@@ -157,9 +157,9 @@ pub(super) fn create(
     Ok(argv)
 }
 
-/// Translate tinybox resources into OpenShell's limit flags.
+/// Translate tinybox resources into `OpenShell`'s limit flags.
 ///
-/// OpenShell takes Kubernetes quantities. CPU is exact in millicores; memory
+/// `OpenShell` takes Kubernetes quantities. CPU is exact in millicores; memory
 /// rounds *up* to whole mebibytes, so a box never gets less than it asked for.
 /// There is no per-sandbox process limit, which is why `Pids` is declared
 /// unsupported rather than dropped here silently.
@@ -179,7 +179,7 @@ fn resource_flags(resources: &Resources) -> Vec<String> {
 /// no terminal emulation in the output, and no profile scripts in the sandbox
 /// that could run before the command. Unlike create, exec has no way to read
 /// values from the CLI's environment, so environment values do appear on the
-/// CLI's argv; OpenShell's own guidance is to pass secrets as providers, never
+/// CLI's argv; `OpenShell`'s own guidance is to pass secrets as providers, never
 /// as environment.
 ///
 /// # Errors
