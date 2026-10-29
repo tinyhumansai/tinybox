@@ -38,6 +38,8 @@ tinybox-core.workspace = true
 tinybox-docker.workspace = true
 tinybox-linux.workspace = true
 tinybox-microvm.workspace = true
+# OpenShell sandboxes are driven through the same host the module already owns.
+tinybox-openshell.workspace = true
 tinybus.workspace = true
 tinybus-module.workspace = true
 # Box records live on the host's storage ports, reached over the storage bus;

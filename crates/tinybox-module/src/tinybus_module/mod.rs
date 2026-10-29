@@ -471,12 +471,20 @@ fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
     } else {
         Vec::new()
     };
+    // OpenShell runs commands through the `openshell` CLI on the same owned
+    // host as Docker, so it collects output wherever Docker does. It has no
+    // detached processes, so Spawn never lists it.
+    let mut exec_backends = supervised.clone();
+    if !supervised.is_empty() {
+        exec_backends.push("openshell".into());
+    }
     let mut create_backends = vec!["passthrough".into()];
     if matches!(
         platform,
         Platform::Linux | Platform::Unix | Platform::Windows
     ) {
         create_backends.push("docker".into());
+        create_backends.push("openshell".into());
     }
     if platform == Platform::Linux {
         create_backends.push("namespace".into());
@@ -484,7 +492,7 @@ fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
     tinybox_bus::ModuleCapabilities {
         contract_version: tinybox_bus::CONTRACT_VERSION,
         create_backends,
-        exec_backends: supervised.clone(),
+        exec_backends,
         spawn_backends: supervised,
     }
 }
@@ -494,7 +502,7 @@ fn supports_create_backend(platform: Platform, backend: &str) -> bool {
         // Passthrough only records the caller's workspace; execution remains
         // unadvertised on hosts where TinyBox cannot supervise native children.
         "passthrough" => true,
-        "docker" => matches!(
+        "docker" | "openshell" => matches!(
             platform,
             Platform::Linux | Platform::Unix | Platform::Windows
         ),
@@ -571,6 +579,10 @@ fn registered_sandboxes() -> Vec<(&'static str, SandboxCapabilities)> {
         (
             tinybox_microvm::NAME,
             tinybox_microvm::MicroVmSandbox::declared_capabilities(),
+        ),
+        (
+            tinybox_openshell::NAME,
+            tinybox_openshell::OpenShellSandbox::declared_capabilities(),
         ),
     ]
 }
