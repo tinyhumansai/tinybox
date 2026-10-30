@@ -1292,7 +1292,7 @@ dependencies = [
  "async-trait",
  "ipnet",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "tempfile",
  "tinybox-core",
  "tinybox-host",

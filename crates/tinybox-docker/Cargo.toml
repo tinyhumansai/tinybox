@@ -21,7 +21,7 @@ serde_json.workspace = true
 # Keep workload Docker client credentials out of host CLI environment and argv.
 tempfile = "3"
 # SHA-256 keeps firewall cleanup ownership markers collision-resistant.
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 # `DockerCli` runs the local `docker` client; one-shot runs need process spawning
 # and a deadline.
 tokio = { workspace = true, features = ["process"] }
