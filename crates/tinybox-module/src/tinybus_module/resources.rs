@@ -382,11 +382,12 @@ impl Resources {
             let info = match sandbox.create(&spec).await {
                 Ok(info) => info,
                 Err(error) => {
-                    // Docker may have created the named container even if its
-                    // reply was lost. The backend retains its store record only
-                    // when named cleanup failed; keep the sandbox and id in
-                    // this caller-known slot so Close/Shutdown can retry it.
-                    if request.backend == "docker"
+                    // Docker and OpenShell may have created the named
+                    // container or sandbox even if the reply was lost. The
+                    // backend retains its store record only when named cleanup
+                    // failed; keep the sandbox and id in this caller-known slot
+                    // so Close/Shutdown can retry it.
+                    if matches!(request.backend.as_str(), "docker" | "openshell")
                         && let Some(id) = recording.first_inserted()
                     {
                         *slot_guard = Some(Resource::new(
@@ -977,6 +978,7 @@ impl Resources {
         if entry.collector.is_some()
             && entry.local_sandbox.is_none()
             && entry.sandbox.name() != tinybox_docker::NAME
+            && entry.sandbox.name() != tinybox_openshell::NAME
         {
             return Err(failure(
                 tinybox_bus::UNSUPPORTED_OPERATION,
@@ -1592,6 +1594,14 @@ fn make_sandbox(
                 local_sandbox: None,
             })
         }
+        "openshell" => Ok(SandboxSelection {
+            sandbox: Arc::new(
+                tinybox_openshell::OpenShellSandbox::with_namespace(host, store, namespace)
+                    .map_err(|error| backend_error(&error))?,
+            ),
+            docker_sandbox: None,
+            local_sandbox: None,
+        }),
         "namespace" => Ok(SandboxSelection {
             sandbox: Arc::new(tinybox_linux::NamespaceSandbox::new(host, store)),
             docker_sandbox: None,
@@ -1701,7 +1711,7 @@ pub(super) fn supports_execution(platform: super::Platform, backend: &str) -> bo
     matches!(
         platform,
         super::Platform::Linux | super::Platform::Unix | super::Platform::Windows
-    ) && matches!(backend, "passthrough" | "docker")
+    ) && matches!(backend, "passthrough" | "docker" | "openshell")
 }
 
 async fn stop_process(

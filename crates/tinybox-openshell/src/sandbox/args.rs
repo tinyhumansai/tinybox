@@ -27,6 +27,15 @@ pub const NAMESPACE_LABEL: &str = "tinybox-namespace";
 /// and a Kubernetes name is a DNS label: at most 63 characters.
 const MAX_NAME_LENGTH: usize = 63;
 
+/// The longest namespace this backend accepts.
+///
+/// What is left of a sandbox name once the `tinybox-` prefix and the shortest
+/// box suffix (`-box-0`) are taken out, so a valid namespace always leaves room
+/// for a box. Long enough for a UUID-based namespace, such as the resource
+/// identifiers the tinybox module uses. [`checked_name`] still refuses a name
+/// that a long box identifier pushes past the limit.
+const MAX_NAMESPACE_LENGTH: usize = MAX_NAME_LENGTH - "tinybox-".len() - "-box-0".len();
+
 /// The `OpenShell` sandbox name for a box.
 ///
 /// Box identifiers are unique within a store; `OpenShell` names are unique
@@ -44,7 +53,7 @@ pub fn sandbox_name(namespace: &str, id: &BoxId) -> String {
 /// lowercase ASCII letters, digits and `-`, not starting or ending with `-`.
 pub(super) fn is_valid_namespace(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 32
+        && value.len() <= MAX_NAMESPACE_LENGTH
         && !value.starts_with('-')
         && !value.ends_with('-')
         && value.chars().all(|character| {

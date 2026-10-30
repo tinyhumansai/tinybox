@@ -66,7 +66,7 @@ impl OpenShellSandbox {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidIdentifier`] unless `namespace` is 1–32
+    /// Returns [`Error::InvalidIdentifier`] unless `namespace` is 1–49
     /// characters of lowercase ASCII letters, digits and `-`, neither starting
     /// nor ending with `-`; it becomes part of a DNS label.
     pub fn with_namespace(

@@ -28,6 +28,15 @@ fn sandbox_selection_and_spec_mapping_preserve_host_policy() -> Result<()> {
             .local_sandbox
             .is_none()
     );
+    assert!(
+        make_sandbox("openshell", host.clone(), store.clone(), "fixture")?
+            .local_sandbox
+            .is_none()
+    );
+    assert!(
+        make_sandbox("openshell", host.clone(), store.clone(), "Not_A_Label").is_err(),
+        "an OpenShell namespace must be a DNS label"
+    );
     assert!(make_sandbox("unknown", host, store, "fixture").is_err());
 
     for (policy, expected) in [
@@ -3042,6 +3051,182 @@ async fn cancelling_one_live_execution_does_not_wait_for_another_running_stream(
     assert!(
         first.is_ok_and(|result| result.is_ok()),
         "cancel must acknowledge only its own execution cleanup"
+    );
+    Ok(())
+}
+
+/// A stand-in `openshell` CLI: creates and deletes succeed unless told
+/// otherwise, every sandbox reports `Ready`, and exec prints a fixed line.
+#[derive(Debug, Default)]
+struct OpenShellHost {
+    commands: std::sync::Mutex<Vec<Vec<String>>>,
+    fail_create: bool,
+    failed_deletes: std::sync::atomic::AtomicUsize,
+    deletes: std::sync::atomic::AtomicUsize,
+}
+
+impl OpenShellHost {
+    fn ran(&self, verb: &str) -> bool {
+        self.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|argv| argv.get(2).is_some_and(|part| part == verb))
+    }
+}
+
+#[async_trait::async_trait]
+impl Host for OpenShellHost {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        self.commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.argv.clone());
+        Ok(match request.argv.get(2).map(String::as_str) {
+            Some("create") if self.fail_create => {
+                NativeOutput::new(1, Vec::new(), b"timed out waiting for Ready".to_vec())
+            }
+            Some("get") => NativeOutput::new(0, br#"{"phase":"Ready"}"#.to_vec(), Vec::new()),
+            Some("exec") => NativeOutput::new(0, b"hello from openshell\n".to_vec(), Vec::new()),
+            Some("delete") => {
+                self.deletes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let pending = self
+                    .failed_deletes
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if pending > 0 {
+                    self.failed_deletes
+                        .store(pending - 1, std::sync::atomic::Ordering::SeqCst);
+                    NativeOutput::new(1, Vec::new(), b"gateway unavailable".to_vec())
+                } else {
+                    NativeOutput::new(0, Vec::new(), Vec::new())
+                }
+            }
+            _ => NativeOutput::new(0, b"{}".to_vec(), Vec::new()),
+        })
+    }
+}
+
+fn openshell_request(resource: &ResourceId) -> CreateRequest {
+    CreateRequest {
+        resource: resource.clone(),
+        backend: "openshell".into(),
+        workspace: Workspace::Image("ghcr.io/example/agent:1".into()),
+        env: BTreeMap::new(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openshell_creates_execs_through_the_owned_collector_and_closes() -> Result<()> {
+    let resources = Resources::test_resources();
+    let host = Arc::new(OpenShellHost::default());
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    // Production always passes the owned collector; Exec must accept
+    // OpenShell under it the way it accepts Docker.
+    let collector = Arc::new(tinybox_host::LimitedLocalHost::new(
+        tinybox_bus::MAX_OUTPUT_BYTES,
+    ));
+
+    let created = resources
+        .create_with_platform(
+            openshell_request(&resource),
+            host.clone(),
+            Some(collector),
+            super::super::Platform::Linux,
+        )
+        .await?;
+    assert_eq!(created.backend, "openshell");
+    assert!(host.ran("create"));
+
+    let output = resources
+        .exec(ExecRequest {
+            resource: resource.clone(),
+            argv: vec!["echo".into(), "hello".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            stdin: None,
+        })
+        .await?;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, b"hello from openshell\n");
+
+    resources.close(&resource).await?;
+    assert_eq!(host.deletes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(resources.slot(&resource).await.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openshell_refuses_spawn_rather_than_detaching_a_process() -> Result<()> {
+    let resources = Resources::test_resources();
+    let host = Arc::new(OpenShellHost::default());
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on_for_platform(
+            openshell_request(&resource),
+            host.clone(),
+            super::super::Platform::Linux,
+        )
+        .await?;
+    let process = resources
+        .reserve(ReserveRequest::Process(resource.clone()))
+        .await?;
+
+    let refused = resources
+        .spawn(SpawnRequest {
+            process,
+            command: ExecRequest {
+                resource: resource.clone(),
+                argv: vec!["sleep".into(), "60".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+            },
+        })
+        .await;
+    assert!(refused.is_err(), "OpenShell declares no detached processes");
+    assert!(
+        !host.ran("exec"),
+        "nothing may run in place of a refused spawn"
+    );
+    resources.close(&resource).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uncertain_openshell_create_keeps_sandbox_cleanup_retryable() -> Result<()> {
+    let resources = Resources::test_resources();
+    let host = Arc::new(OpenShellHost {
+        fail_create: true,
+        failed_deletes: std::sync::atomic::AtomicUsize::new(1),
+        ..OpenShellHost::default()
+    });
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+
+    let created = resources
+        .create_on_for_platform(
+            openshell_request(&resource),
+            host.clone(),
+            super::super::Platform::Linux,
+        )
+        .await;
+    assert!(created.is_err(), "the failed create must reach the caller");
+    assert_eq!(host.deletes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        resources.slot(&resource).await.is_ok(),
+        "module must retain cleanup ownership"
+    );
+
+    resources.close(&resource).await?;
+    assert_eq!(host.deletes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(
+        resources.slot(&resource).await.is_err(),
+        "successful retry releases the slot"
     );
     Ok(())
 }

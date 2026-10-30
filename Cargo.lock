@@ -1395,6 +1395,7 @@ dependencies = [
  "tinybox-jail",
  "tinybox-linux",
  "tinybox-microvm",
+ "tinybox-openshell",
  "tinybox-ssh",
  "tinybus",
  "tinybus-module",
