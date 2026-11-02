@@ -69,13 +69,14 @@ tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.4" }
 tinybox-openshell = { path = "crates/tinybox-openshell", version = "0.2.4" }
 tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.4" }
 tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.4" }
-# Pin the storage contract crates to the zstd advisory fix on the fork's security epic.
-tinystoragedrivers-types = { version = "2.1.2", git = "https://github.com/senamakel/tinystoragedrivers", rev = "16a4c521aaf2ab9e3756bbaecc32a6563dda2440" }
-tinystoragedrivers-api = { version = "2.1.2", git = "https://github.com/senamakel/tinystoragedrivers", rev = "16a4c521aaf2ab9e3756bbaecc32a6563dda2440" }
-tinystoragedrivers-busproxy = { version = "2.1.2", git = "https://github.com/senamakel/tinystoragedrivers", rev = "16a4c521aaf2ab9e3756bbaecc32a6563dda2440" }
-tinystoragedrivers = { version = "2.1.2", git = "https://github.com/senamakel/tinystoragedrivers", rev = "16a4c521aaf2ab9e3756bbaecc32a6563dda2440", default-features = false }
-tinystoragedrivers-testkit = { version = "2.1.2", git = "https://github.com/senamakel/tinystoragedrivers", rev = "16a4c521aaf2ab9e3756bbaecc32a6563dda2440" }
-tinystoragedrivers-document = { version = "2.1.2", git = "https://github.com/senamakel/tinystoragedrivers", rev = "16a4c521aaf2ab9e3756bbaecc32a6563dda2440" }
+# Pin the storage contract crates to the canonical TSD v2.1.2 release commit,
+# which carries the zstd advisory fix.
+tinystoragedrivers-types = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-api = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-busproxy = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb", default-features = false }
+tinystoragedrivers-testkit = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-document = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
 tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.2.4" }
 
 # Lints apply to every crate in the workspace via `[lints] workspace = true`.
