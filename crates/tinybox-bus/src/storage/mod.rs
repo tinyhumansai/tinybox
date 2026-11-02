@@ -38,7 +38,7 @@ pub struct CollectionDeclaration {
 }
 
 impl CollectionDeclaration {
-    /// Declare a TinyBox collection by name.
+    /// Declare a `TinyBox` collection by name.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }

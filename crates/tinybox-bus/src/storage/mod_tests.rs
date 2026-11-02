@@ -24,26 +24,26 @@ fn current_and_legacy_collection_names_are_distinct() {
 }
 
 #[test]
-fn storage_declarations_are_serializable_names_without_backend_policy() {
+fn storage_declarations_are_serializable_names_without_backend_policy() -> serde_json::Result<()> {
     let declaration = CollectionDeclaration::new(BOX_COLLECTION);
 
     assert_eq!(
-        serde_json::to_value(&declaration).expect("serialize declaration"),
+        serde_json::to_value(&declaration)?,
         serde_json::json!({ "name": BOX_COLLECTION })
     );
     assert_eq!(
         serde_json::from_value::<CollectionDeclaration>(
             serde_json::json!({ "name": BOX_COLLECTION })
-        )
-        .expect("deserialize declaration"),
+        )?,
         declaration
     );
+    Ok(())
 }
 
 #[test]
 fn every_declared_collection_has_a_nonempty_name() {
     for declaration in collections() {
-        assert!(!declaration.name.is_empty());
+        assert_ne!(declaration.name, "");
     }
     assert_eq!(BODY_VERSION, 2);
 }
