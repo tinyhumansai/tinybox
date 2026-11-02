@@ -1495,6 +1495,34 @@ async fn run_native_shell_returns_finished_output_after_module_cleanup()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_native_shell_reports_a_failed_start_as_a_backend_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = tempfile::tempdir()?;
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
+    let service = Connection::connect(bus.connect().await?).await?;
+    setup(service.clone()).await?;
+    let client = Connection::connect(bus.connect().await?).await?;
+    let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
+    let mut request = run_native_shell_request("echo never", state.path(), None);
+    request.create.backend = "no-such-backend".into();
+
+    let failed = proxy
+        .call::<tinybox_bus::RunNativeShellResult>("RunNativeShell", (request,))
+        .await;
+
+    assert!(
+        matches!(
+            &failed,
+            Err(tinybus::Error::MethodFailed { name, .. }) if name == tinybox_bus::BACKEND_ERROR
+        ),
+        "{failed:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_native_shell_yields_an_owned_process_for_existing_output_operations()
 -> Result<(), Box<dyn std::error::Error>> {
     let state = tempfile::tempdir()?;
