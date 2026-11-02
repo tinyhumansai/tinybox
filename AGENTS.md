@@ -29,6 +29,7 @@ crates/
 ├── tinybox-linux/           # confinement: rootless namespaces, no daemon
 ├── tinybox-microvm/         # confinement: a Firecracker guest with its own kernel
 ├── tinybox-ssh/             # reach: another machine, over SSH
+├── tinybox-openshell/       # confinement: NVIDIA OpenShell sandboxes behind a gateway
 ├── tinybox-sync/            # fingerprinting and workspace transfer
 ├── tinybox-drivers/         # box records + jail index on the tinystoragedrivers ports (unpublished)
 ├── tinybox-cli/             # the `tinybox` binary

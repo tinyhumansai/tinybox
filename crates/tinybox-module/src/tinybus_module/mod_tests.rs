@@ -91,21 +91,30 @@ fn backend_capabilities_match_supervision_and_confinement_platforms() {
     assert_eq!(other.spawn_backends, Vec::<String>::new());
 
     let macos = capabilities_for(Platform::Unix);
-    assert_eq!(macos.create_backends, ["passthrough", "docker"]);
-    assert_eq!(macos.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(
+        macos.create_backends,
+        ["passthrough", "docker", "openshell"]
+    );
+    assert_eq!(macos.exec_backends, ["passthrough", "docker", "openshell"]);
     assert_eq!(macos.spawn_backends, ["passthrough", "docker"]);
 
     let windows = capabilities_for(Platform::Windows);
-    assert_eq!(windows.create_backends, ["passthrough", "docker"]);
-    assert_eq!(windows.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(
+        windows.create_backends,
+        ["passthrough", "docker", "openshell"]
+    );
+    assert_eq!(
+        windows.exec_backends,
+        ["passthrough", "docker", "openshell"]
+    );
     assert_eq!(windows.spawn_backends, ["passthrough", "docker"]);
 
     let linux = capabilities_for(Platform::Linux);
     assert_eq!(
         linux.create_backends,
-        ["passthrough", "docker", "namespace"]
+        ["passthrough", "docker", "openshell", "namespace"]
     );
-    assert_eq!(linux.exec_backends, ["passthrough", "docker"]);
+    assert_eq!(linux.exec_backends, ["passthrough", "docker", "openshell"]);
     assert_eq!(linux.spawn_backends, ["passthrough", "docker"]);
 }
 
@@ -131,6 +140,29 @@ fn windows_advertises_only_backends_with_native_supervision() {
     assert!(!super::resources::supports_execution(
         Platform::Windows,
         "namespace"
+    ));
+}
+
+#[test]
+fn openshell_is_offered_wherever_docker_is_and_never_for_spawn() {
+    for platform in [Platform::Linux, Platform::Unix, Platform::Windows] {
+        assert!(super::supports_create_backend(platform, "openshell"));
+        assert!(super::resources::supports_execution(platform, "openshell"));
+        let capabilities = capabilities_for(platform);
+        assert!(
+            !capabilities
+                .spawn_backends
+                .iter()
+                .any(|backend| backend == "openshell")
+        );
+    }
+    assert!(!super::supports_create_backend(
+        Platform::Other,
+        "openshell"
+    ));
+    assert!(!super::resources::supports_execution(
+        Platform::Other,
+        "openshell"
     ));
 }
 
@@ -307,16 +339,19 @@ fn the_registry_reports_every_backend_and_only_the_safe_ones_as_capable() {
     let description = describe(&registered_sandboxes());
 
     // Both backends are listed as present...
-    assert!(description.contains("sandboxes: passthrough, docker, namespace, microvm"));
+    assert!(description.contains("sandboxes: passthrough, docker, namespace, microvm, openshell"));
     // ...but only Docker clears the isolation floor, and passthrough says so
     // through its own declaration rather than a special case here.
-    assert!(description.ends_with("docker, namespace, microvm"));
+    assert!(description.ends_with("docker, namespace, microvm, openshell"));
 
     let names = registered_sandboxes()
         .into_iter()
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
-    assert_eq!(names, ["passthrough", "docker", "namespace", "microvm"]);
+    assert_eq!(
+        names,
+        ["passthrough", "docker", "namespace", "microvm", "openshell"]
+    );
 }
 
 #[test]

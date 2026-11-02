@@ -15,6 +15,7 @@ members = [
     "crates/tinybox-linux",
     "crates/tinybox-microvm",
     "crates/tinybox-module",
+    "crates/tinybox-openshell",
     "crates/tinybox-ssh",
     "crates/tinybox-sync",
 ]
@@ -65,6 +66,7 @@ tinybox-jail = { path = "crates/tinybox-jail", version = "0.2.4" }
 tinybox-linux = { path = "crates/tinybox-linux", version = "0.2.4" }
 tinybox-microvm = { path = "crates/tinybox-microvm", version = "0.2.4" }
 tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.4" }
+tinybox-openshell = { path = "crates/tinybox-openshell", version = "0.2.4" }
 tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.4" }
 tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.4" }
 # Pin the storage contract crates to the zstd advisory fix on the fork's security epic.

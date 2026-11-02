@@ -169,6 +169,7 @@ crates/
 ├── tinybox-sync/     # fingerprinting and transfer     (M4)
 ├── tinybox-docker/   # DockerSandbox                    (M3)
 ├── tinybox-linux/    # NamespaceSandbox                (M6)
+├── tinybox-openshell/ # OpenShellSandbox, over the `openshell` CLI
 ├── tinybox-cli/      # bin `tinybox`                    (M2)
 └── tinybox-module/   # cdylib, TinyBus ABI v1                    (M1)
 ```
