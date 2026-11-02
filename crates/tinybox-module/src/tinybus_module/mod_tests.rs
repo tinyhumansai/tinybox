@@ -1442,7 +1442,7 @@ fn run_native_shell_request(
                 python_utf8: false,
             },
             cwd: None,
-            extra_env: Default::default(),
+            extra_env: std::collections::BTreeMap::default(),
             state_dir: state_dir.to_string_lossy().into_owned(),
             timeout_ms: 5_000,
             stdin: None,
@@ -1482,7 +1482,7 @@ async fn run_native_shell_returns_finished_output_after_module_cleanup()
         ..
     } = result
     else {
-        panic!("short shell should finish before returning: {result:?}");
+        return Err(format!("short shell should finish before returning: {result:?}").into());
     };
     assert_eq!(exit_code, 0, "timed_out={timed_out}, stdout={stdout:?}");
     assert_eq!(stdout, b"finished\n");
@@ -1585,7 +1585,7 @@ async fn run_native_shell_yields_an_owned_process_for_existing_output_operations
         stderr,
     } = result
     else {
-        panic!("long shell should yield while running: {result:?}");
+        return Err(format!("long shell should yield while running: {result:?}").into());
     };
     let mut output = stdout;
     output.extend(stderr);
