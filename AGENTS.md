@@ -145,12 +145,15 @@ Use standard `rustfmt` output and Rust 2024 idioms. Do not hand-format around
   `impl Into<String>` at boundaries; return owned, concrete types.
 - Keep the public surface minimal: default to private, and export deliberately
   from `src/lib.rs`.
-- `unsafe` is forbidden across the workspace by `[workspace.lints]` in the root
+- `unsafe` is denied across the workspace by `[workspace.lints]` in the root
   `Cargo.toml`, which every crate inherits with `[lints] workspace = true`.
-  **No crate relaxes it.** ADR 0003 reserved `tinybox-linux` as the one that
-  might; ADR 0005 records why it did not need to. If you find yourself wanting
-  `unsafe`, check first whether an existing tool already does the dangerous part
-  correctly — that is how the namespace backend avoided it.
+  **Only `crates/tinybox-jail/src/windows.rs` relaxes it**, with one file-scoped
+  `#![allow(unsafe_code)]` for the `AppContainer` FFI (ADR 0003);
+  `scripts/ci/check-windows-unsafe-boundary.sh` fails CI on any other spelling
+  of a relaxation. ADR 0005 records why `tinybox-linux` did not need one. If
+  you find yourself wanting `unsafe`, check first whether an existing tool
+  already does the dangerous part correctly — that is how the namespace
+  backend avoided it.
 
 ### Errors
 

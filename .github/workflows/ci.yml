@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test the Windows FFI allowance guard
+        run: scripts/ci/check-windows-unsafe-boundary_tests.sh
       - name: Check the Windows FFI allowance boundary
         run: scripts/ci/check-windows-unsafe-boundary.sh
   module-ci:
