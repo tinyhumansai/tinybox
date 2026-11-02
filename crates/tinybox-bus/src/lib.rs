@@ -85,7 +85,8 @@ pub use files::{
 /// 2.1 adds separate resource-aware native jail request members without
 /// changing the 2.0 Rust request shapes. 2.2 adds process-scoped lifecycle
 /// events for module-owned executions and timeout observations. 2.3 adds
-/// module-owned native-shell orchestration through completion or yield.
+/// module-owned native-shell orchestration through completion or yield, and
+/// the `openshell` sandbox backend for `Create`.
 pub const CONTRACT_VERSION: (u32, u32) = (2, 3);
 
 /// Minimum contract version required for resource-aware native jail members.
