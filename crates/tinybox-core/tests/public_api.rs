@@ -4,10 +4,28 @@
 //! the export surface regresses even when the internals still compile.
 
 use tinybox_core::{
-    BoxSpec, BoxState, Capability, Error, ExecOutput, ExecRequest, HostRef, IsolationLevel,
-    Lifecycle, NetworkPolicy, Placement, Resources, Result, SandboxCapabilities, SandboxRef,
-    SnapshotId, SnapshotSupport, WorkspaceSource,
+    BoxSpec, BoxState, Capability, Error, ExecOutput, ExecRequest, ExecutionObserver, HostRef,
+    IsolationLevel, Lifecycle, NetworkPolicy, OutputStream, Placement, Resources, Result,
+    SandboxCapabilities, SandboxRef, SnapshotId, SnapshotSupport, TerminationCause,
+    WorkspaceSource,
 };
+
+#[derive(Debug)]
+struct Observer;
+
+#[async_trait::async_trait]
+impl ExecutionObserver for Observer {
+    fn output(&self, _: OutputStream, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn public_observers_accept_proven_cpu_quota_causes() {
+    let observer = Observer;
+    let observer: &dyn ExecutionObserver = &observer;
+    observer.termination_cause(TerminationCause::CpuQuota);
+}
 
 /// Build a placement, propagating identifier validation failures to the test.
 fn placement(host: &str, sandbox: &str) -> Result<Placement> {

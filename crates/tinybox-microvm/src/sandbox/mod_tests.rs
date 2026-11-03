@@ -658,6 +658,27 @@ fn preflight_reports_each_enforced_boundary_without_claiming_disk() {
     assert!(backend.require(&[Constraint::Disk]).is_err());
 }
 
+#[test]
+fn spec_hard_requirements_reject_best_effort_cpu() -> Result<()> {
+    use tinybox_core::{Constraint, Enforcement};
+
+    let backend = sandbox(ScriptedHost::booting("", 0));
+    let requested = spec()?.with_hard_requirements([Constraint::Cpu]);
+    assert_eq!(
+        backend.plan_check_spec(&requested).constraints,
+        vec![(Constraint::Cpu, Enforcement::BestEffort)]
+    );
+    assert!(matches!(
+        backend.require_spec(&requested),
+        Err(Error::ConstraintNotEnforced {
+            constraint: Constraint::Cpu,
+            enforcement: Enforcement::BestEffort,
+            ..
+        })
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_unenforceable_network_allowlist_is_refused_at_creation() -> Result<()> {
     let sandbox = sandbox(ScriptedHost::booting("", 0));

@@ -55,7 +55,7 @@ The interface is `ai.tinyhumans.tinybox.Box` at
 | KillStdio | ProcessRef | () |
 | StdioStatus | ProcessRef | StdioStatus |
 
-Capabilities advertises contract version 2.0. Hosts require equal majors and a
+Capabilities advertises contract version 2.2. Hosts require equal majors and a
 module minor at least as new as their vocabulary, using
 `tinybox_bus::is_compatible`. Contract 1.0 was the original discovery-only
 surface; 1.1 added reserved resource/process ownership and terminal shutdown;
@@ -75,6 +75,19 @@ occurs outside heredoc data. TinySecurity owns command classification and
 execution policy. Old 1.x hosts must reject a 2.x module; there is no fallback
 that applies or reconstructs command policy in TinyBox. Describe remains
 unchanged.
+
+Contract 2.1 adds resource-aware native jail request members. Contract 2.2 adds
+the `ProcessEvent` signal, carrying the caller's `ProcessRef` with each
+observation. The module emits `Started` once after a successful `StartExec`,
+`StartJailedExec`, `StartJailedExecWithResources`, `StartShellExec`, or
+`StartNativeShellExec`, then `Exited` after its supervisor observes the
+terminal exit status. When an execution times out, it emits
+`LimitHit { limit: Timeout }` before `Exited { status: None }`. Replayed starts
+do not duplicate these events. Signal delivery is best-effort; this increment
+also emits `LimitHit { limit: Cpu }` before exit when the trusted Linux
+cgroup-v2 CPU counter proves that a scoped CPU quota throttled the workload.
+This reports throttling, not CPU exhaustion or process termination. Other
+resource-limit observations remain unpublished.
 
 Version 1.5 adds bounded file transfer for mounted directory workspaces.
 Reserve `FileRead(resource)` or `FileWrite(resource)` before opening a transfer.

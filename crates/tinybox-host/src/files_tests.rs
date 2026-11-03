@@ -1,7 +1,9 @@
 //! Tests for confined workspace file handles.
 
 use super::{LocalFileWriter, begin_writer, open_reader, open_root};
-use std::io::{ErrorKind, Write};
+#[cfg(unix)]
+use std::io::ErrorKind;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tinybox_core::{Error, Result, WorkspaceFileWriter};
 

@@ -96,6 +96,26 @@ async fn a_box_can_be_created_inspected_and_destroyed() -> Result<()> {
 }
 
 #[tokio::test]
+async fn passthrough_refuses_explicit_hard_requirements_before_storage() -> Result<()> {
+    use crate::{Constraint, Enforcement};
+
+    let store = Arc::new(MemoryStore::new());
+    let sandbox = PassthroughSandbox::new(Arc::new(RecordingHost::default()), store.clone());
+    let requested = spec()?.with_hard_requirements([Constraint::Filesystem]);
+
+    assert!(matches!(
+        sandbox.create(&requested).await,
+        Err(Error::ConstraintNotEnforced {
+            constraint: Constraint::Filesystem,
+            enforcement: Enforcement::Unsupported,
+            ..
+        })
+    ));
+    assert_eq!(store.list()?, []);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_command_runs_in_the_workspace_directory() -> Result<()> {
     let (sandbox, host) = sandbox();
     let created = sandbox.create(&spec()?).await?;

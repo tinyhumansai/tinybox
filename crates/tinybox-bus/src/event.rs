@@ -6,6 +6,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One process-scoped sandbox observation sent by the `TinyBox` module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessEvent {
+    /// Resource and process identifiers chosen by the caller.
+    pub process: crate::ProcessRef,
+    /// What the sandbox observed about this process.
+    pub event: SandboxEvent,
+}
+
 /// Hosts and ports an allowlisted box may reach.
 ///
 /// Hostnames are resolved outside the box and pinned; metadata endpoints are

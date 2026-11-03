@@ -327,6 +327,10 @@ impl ExecutionObserver for DockerExecutionObserver {
         self.inner.output(stream, bytes)
     }
 
+    fn termination_cause(&self, cause: tinybox_core::TerminationCause) {
+        self.inner.termination_cause(cause);
+    }
+
     async fn cancelled(&self) {
         self.inner.cancelled().await;
         match cleanup_remote(self.host.clone(), &self.namespace, &self.handle).await {
@@ -775,6 +779,7 @@ impl Sandbox for DockerSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        self.require_spec(spec)?;
         self.validate_network_policy(spec).await?;
         // The workspace is bind-mounted read-write, so it gets the one-shot
         // mount policy before any record or container exists.

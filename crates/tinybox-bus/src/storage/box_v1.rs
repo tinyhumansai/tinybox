@@ -43,6 +43,8 @@ struct V1Spec {
     lifecycle: V1Lifecycle,
     network: V1Network,
     #[serde(default)]
+    hard_requirements: Vec<Value>,
+    #[serde(default)]
     ports: Vec<Value>,
     env: BTreeMap<String, String>,
 }
@@ -175,6 +177,7 @@ pub fn to_body(source: Value) -> Result<Value, String> {
             "resources": spec.resources,
             "lifecycle": lifecycle_body(&spec.lifecycle),
             "network": network_body(spec.network),
+            "hard_requirements": spec.hard_requirements,
             "ports": spec.ports,
             "env": spec.env,
         },

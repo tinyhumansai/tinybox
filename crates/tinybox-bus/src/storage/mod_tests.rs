@@ -24,9 +24,26 @@ fn current_and_legacy_collection_names_are_distinct() {
 }
 
 #[test]
-fn every_declared_collection_has_a_valid_v2_spec() {
-    for spec in collections() {
-        assert!(spec.validate().is_ok(), "invalid collection {}", spec.name);
+fn storage_declarations_are_serializable_names_without_backend_policy() -> serde_json::Result<()> {
+    let declaration = CollectionDeclaration::new(BOX_COLLECTION);
+
+    assert_eq!(
+        serde_json::to_value(&declaration)?,
+        serde_json::json!({ "name": BOX_COLLECTION })
+    );
+    assert_eq!(
+        serde_json::from_value::<CollectionDeclaration>(
+            serde_json::json!({ "name": BOX_COLLECTION })
+        )?,
+        declaration
+    );
+    Ok(())
+}
+
+#[test]
+fn every_declared_collection_has_a_nonempty_name() {
+    for declaration in collections() {
+        assert_ne!(declaration.name, "");
     }
     assert_eq!(BODY_VERSION, 2);
 }

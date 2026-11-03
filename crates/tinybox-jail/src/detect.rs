@@ -52,6 +52,16 @@ fn candidates() -> Vec<Arc<dyn JailBackend>> {
     Vec::new()
 }
 
+#[cfg(target_os = "windows")]
+fn owned_candidates() -> Vec<Arc<dyn JailBackend>> {
+    vec![Arc::new(crate::windows::AppContainerBackend::new())]
+}
+
+#[cfg(not(target_os = "windows"))]
+fn owned_candidates() -> Vec<Arc<dyn JailBackend>> {
+    candidates()
+}
+
 /// Picks the first available OS backend (bubblewrap then Landlock on Linux,
 /// Seatbelt on macOS). When none works it logs a warning and returns an unsupported
 /// backend whose `is_available` is `false` and whose `spawn` fails with
@@ -60,6 +70,52 @@ fn candidates() -> Vec<Arc<dyn JailBackend>> {
 #[must_use]
 pub fn pick_backend() -> Arc<dyn JailBackend> {
     pick_from(candidates())
+}
+
+/// Picks the strongest available backend that can return an [`super::jail::OwnedChild`].
+#[must_use]
+pub fn pick_owned_backend() -> Arc<dyn JailBackend> {
+    pick_owned_from(owned_candidates())
+}
+
+/// Select the first backend that can return an owned child.
+fn pick_owned_from(backends: Vec<Arc<dyn JailBackend>>) -> Arc<dyn JailBackend> {
+    for backend in backends {
+        if backend.is_owned_available() {
+            log::debug!(
+                "[cwd_jail] selected owned-process sandbox {}",
+                backend.name()
+            );
+            return backend;
+        }
+        log::debug!(
+            "[cwd_jail] owned-process sandbox {} is unavailable",
+            backend.name()
+        );
+    }
+    log::warn!("[cwd_jail] no owned-process sandbox available; jailed spawns are unsupported");
+    Arc::new(UnsupportedBackend)
+}
+
+/// Returns the stable name of the backend selected by platform detection.
+#[must_use]
+pub fn backend_name() -> &'static str {
+    pick_backend().name()
+}
+
+/// Reports whether this build and running Linux kernel support Landlock.
+///
+/// This is always false off Linux and when the `landlock` feature is disabled.
+#[must_use]
+pub fn landlock_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::LandlockBackend::new().is_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 /// Select an available backend from the ordered platform candidates.

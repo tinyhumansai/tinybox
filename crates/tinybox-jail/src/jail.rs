@@ -9,13 +9,6 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-const RESOURCE_CONSTRAINTS: [tinybox_core::Constraint; 4] = [
-    tinybox_core::Constraint::Cpu,
-    tinybox_core::Constraint::Memory,
-    tinybox_core::Constraint::Pids,
-    tinybox_core::Constraint::Disk,
-];
-
 /// Declarative description of a directory jail.
 ///
 /// One `root` (read/write), zero or more extra `read_write` paths, zero or
@@ -41,11 +34,13 @@ pub struct Jail {
     /// native module rejects overlaps that an allow-list backend cannot enforce.
     /// Missing paths are retained so backend rules can cover later creation.
     pub deny_read: Vec<PathBuf>,
-    /// Optional hard CPU, memory, process and writable-disk limits.
+    /// Optional resource values to apply where the backend supports them.
     ///
-    /// Backends include the corresponding constraints in preflight. A backend
-    /// that does not enforce every requested limit refuses before spawning.
+    /// These values are defaults, not hard requirements. Use
+    /// [`hard_requirements`](Self::hard_requirements) to require enforcement.
     pub resources: Option<tinybox_core::Resources>,
+    /// Constraints the backend must enforce fully before spawning.
+    pub hard_requirements: Vec<tinybox_core::Constraint>,
     /// Allow outbound network. Most agent tools need this; some risky tools
     /// (untrusted code execution) should disable it.
     pub allow_net: bool,
@@ -67,6 +62,7 @@ impl Jail {
             read_write: Vec::new(),
             deny_read: Vec::new(),
             resources: None,
+            hard_requirements: Vec::new(),
             allow_net: true,
             allow_subprocess: true,
             label: label.into(),
@@ -106,6 +102,35 @@ impl Jail {
         self
     }
 
+    /// Require the backend to fully enforce each listed constraint.
+    #[must_use]
+    pub fn with_hard_requirements(
+        mut self,
+        requirements: impl IntoIterator<Item = tinybox_core::Constraint>,
+    ) -> Self {
+        self.hard_requirements = requirements.into_iter().collect();
+        self.deny_required()
+    }
+
+    /// Copy resource defaults and hard constraints from a box specification.
+    /// Filesystem roots and grants remain explicit Jail data; a hard network
+    /// or subprocess requirement denies that access.
+    #[must_use]
+    pub fn with_box_spec(mut self, spec: &tinybox_core::BoxSpec) -> Self {
+        self.resources = Some(spec.resources);
+        self.hard_requirements.clone_from(&spec.hard_requirements);
+        self.deny_required()
+    }
+
+    /// A hard `Network` or `Subprocess` requirement is a denial, so the flags
+    /// backends launch from agree with what preflight checked.
+    fn deny_required(mut self) -> Self {
+        use tinybox_core::Constraint;
+        self.allow_net &= !self.hard_requirements.contains(&Constraint::Network);
+        self.allow_subprocess &= !self.hard_requirements.contains(&Constraint::Subprocess);
+        self
+    }
+
     /// Hard constraints implied by this jail's grants and denial flags.
     #[must_use]
     pub fn constraints(&self) -> Vec<tinybox_core::Constraint> {
@@ -117,13 +142,10 @@ impl Jail {
         if !self.allow_subprocess {
             constraints.push(Constraint::Subprocess);
         }
-        if self.resources.is_some() {
-            constraints.extend([
-                Constraint::Cpu,
-                Constraint::Memory,
-                Constraint::Pids,
-                Constraint::Disk,
-            ]);
+        for constraint in &self.hard_requirements {
+            if !constraints.contains(constraint) {
+                constraints.push(*constraint);
+            }
         }
         constraints
     }
@@ -346,6 +368,12 @@ pub trait JailBackend: Send + Sync {
     /// a backend.
     fn is_available(&self) -> bool;
 
+    /// Whether the backend can spawn through [`OwnedChild`]. Backends that
+    /// cannot expose a `std::process::Child` may override this independently.
+    fn is_owned_available(&self) -> bool {
+        self.is_available()
+    }
+
     /// Declares implemented constraints; unknown backends claim nothing.
     fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
         tinybox_core::ConstraintSupport::NONE
@@ -397,6 +425,21 @@ pub trait JailBackend: Send + Sync {
         self.constraint_support().plan_check(&jail.constraints())
     }
 
+    /// Inspect only the hard requirements explicitly listed on a box spec.
+    fn plan_check_spec(&self, spec: &tinybox_core::BoxSpec) -> tinybox_core::PlanCheck {
+        self.constraint_support()
+            .plan_check(&spec.hard_requirements)
+    }
+
+    /// Refuse a box spec when any explicit hard requirement is unsupported.
+    ///
+    /// # Errors
+    /// Returns a typed refusal naming the first unsupported hard constraint.
+    fn require_spec(&self, spec: &tinybox_core::BoxSpec) -> tinybox_core::Result<()> {
+        self.constraint_support()
+            .require(self.name(), &spec.hard_requirements)
+    }
+
     /// Refuse incomplete filesystem, network or subprocess confinement.
     ///
     /// # Errors
@@ -406,20 +449,16 @@ pub trait JailBackend: Send + Sync {
             .require(self.name(), &jail.constraints())
     }
 
-    /// Require full enforcement for every resource limit present on a jail.
-    ///
-    /// Resource limits are hard requirements even when the caller accepts
-    /// declared filesystem, network, or subprocess enforcement.
+    /// Validate resource values and preflight every explicit hard requirement.
     ///
     /// # Errors
-    /// Returns a typed refusal if any requested resource constraint is not
-    /// fully enforced.
+    /// Returns a typed refusal if any listed hard constraint is not fully enforced.
     fn require_resources(&self, jail: &Jail) -> tinybox_core::Result<()> {
         if let Some(resources) = jail.resources {
             resources.validate()?;
-            self.constraint_support()
-                .require(self.name(), &RESOURCE_CONSTRAINTS)?;
         }
+        self.constraint_support()
+            .require(self.name(), &jail.hard_requirements)?;
         Ok(())
     }
 
@@ -481,6 +520,22 @@ pub trait JailBackend: Send + Sync {
         {
             OwnedChild::from_std(child)
         }
+    }
+
+    /// Spawn captured work with exactly the environment approved by the host.
+    /// The default clears `cmd`'s environment and applies `env` before
+    /// delegating; native launchers must build the child environment from
+    /// `env` instead of inheriting the parent's.
+    /// # Errors
+    /// Returns a confinement or native startup error.
+    fn spawn_owned_captured_with_env(
+        &self,
+        jail: &Jail,
+        mut cmd: Command,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> std::io::Result<OwnedChild> {
+        cmd.env_clear().envs(env);
+        self.spawn_owned_captured(jail, cmd)
     }
 }
 

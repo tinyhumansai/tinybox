@@ -130,6 +130,18 @@ fn cleanup_failure_is_observable_and_kept_distinct_from_acknowledged_cancel()
 }
 
 #[test]
+fn cancellation_wins_when_command_failure_is_recorded_after_the_cancel_signal()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let journal = OutputJournal::default();
+    // This is the interleaving where the collector finished with an error
+    // just after the stream task checked cancel_requested().
+    journal.cancel();
+    journal.finish_failed(ExecutionFailure::BackendFailed);
+    assert_eq!(journal.read(0)?.state, ExecutionState::Cancelled);
+    Ok(())
+}
+
+#[test]
 fn empty_output_does_not_consume_sequence_or_memory()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let journal = OutputJournal::default();

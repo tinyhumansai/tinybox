@@ -4,7 +4,7 @@ use tinybox_core::clock::FixedClock;
 use tinybox_jail::JailRegistry;
 use tinystoragedrivers_api::DocumentStore;
 use tinystoragedrivers_testkit::memory_storage;
-use tinystoragedrivers_types::{Scope, StorageError, WriteOptions};
+use tinystoragedrivers_types::{CollectionSpec, Scope, StorageError, WriteOptions};
 
 fn documents() -> Arc<dyn DocumentStore> {
     memory_storage(&Scope::new("tinybox-index-tests").expect("scope"))
@@ -17,8 +17,10 @@ fn test_store(docs: Arc<dyn DocumentStore>, registry: &str) -> io::Result<Docume
     let ensure_docs = Arc::clone(&docs);
     bridge
         .run(async move {
-            for spec in tinybox_bus::storage::collections() {
-                ensure_docs.ensure_collection(&spec).await?;
+            for declaration in tinybox_bus::storage::collections() {
+                ensure_docs
+                    .ensure_collection(&CollectionSpec::new(declaration.name))
+                    .await?;
             }
             Ok::<_, StorageError>(())
         })

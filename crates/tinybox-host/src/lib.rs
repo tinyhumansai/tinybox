@@ -43,6 +43,7 @@
 mod files;
 mod limited;
 mod local;
+mod native_shell;
 
 /// Local reach with an enforced combined output budget and supervised cleanup.
 pub use limited::{JailLocalHost, LimitedLocalHost, ManagedProcess};
@@ -51,3 +52,9 @@ pub use local::{LocalHost, NAME as LOCAL};
 
 /// Platform shell discovery and command construction owned by the local host.
 pub use local::shell::{build_shell_command, select_shell};
+
+/// Runtime-neutral orchestration for supervised native-shell execution.
+pub use native_shell::{
+    NativeShellClient, NativeShellError, NativeShellOutput, NativeShellRunOutcome,
+    NativeShellRunRequest, NativeShellRunning, run_native_shell,
+};

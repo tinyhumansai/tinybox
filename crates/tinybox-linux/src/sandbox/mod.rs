@@ -49,6 +49,7 @@ pub struct NamespaceSandbox {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     limits: bool,
+    setrlimit_fallback: bool,
 }
 
 impl NamespaceSandbox {
@@ -64,6 +65,7 @@ impl NamespaceSandbox {
             store,
             clock: Arc::new(SystemClock::new()),
             limits: false,
+            setrlimit_fallback: false,
         }
     }
 
@@ -77,6 +79,16 @@ impl NamespaceSandbox {
     #[must_use]
     pub fn with_cgroup_limits(mut self) -> Self {
         self.limits = true;
+        self
+    }
+
+    /// Use `RLIMIT_AS` for a per-process memory ceiling when cgroup v2 is not
+    /// selected. Memory is best effort, since processes together can exceed
+    /// it; CPU quota and per-box PID limits remain unsupported because
+    /// `setrlimit` has no equivalent aggregate controls.
+    #[must_use]
+    pub fn with_setrlimit_fallback(mut self) -> Self {
+        self.setrlimit_fallback = true;
         self
     }
 
@@ -112,28 +124,31 @@ impl Sandbox for NamespaceSandbox {
     fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
         use tinybox_core::Constraint::{Cpu, Filesystem, Memory, Network, Pids};
         use tinybox_core::Enforcement::Enforced;
-        if self.limits {
-            tinybox_core::ConstraintSupport::NONE
-                .with(Filesystem, Enforced)
-                .with(Network, Enforced)
-                .with(Cpu, Enforced)
-                .with(Memory, Enforced)
-                .with(Pids, Enforced)
-        } else {
-            tinybox_core::ConstraintSupport::NONE
-                .with(Filesystem, Enforced)
-                .with(Network, Enforced)
-        }
+        let resource_enforcement =
+            args::select_resource_enforcement(self.limits, self.setrlimit_fallback);
+        let resource_support = args::resource_constraint_support(resource_enforcement);
+        tinybox_core::ConstraintSupport::NONE
+            .with(Filesystem, Enforced)
+            .with(Network, Enforced)
+            .with(Cpu, resource_support.enforcement(Cpu))
+            .with(Memory, resource_support.enforcement(Memory))
+            .with(Pids, resource_support.enforcement(Pids))
     }
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        self.require_spec(spec)?;
         spec.network.refuse_allowlist(self.name())?;
         // Nothing is started here: a box is a record plus a directory, and the
         // sandbox itself exists only for the length of a command. Checking the
         // source now means an unusable spec fails at `create` rather than
         // surprising the caller at the first `exec`.
         args::workspace_dir(spec)?;
+        args::fallback_prlimit(
+            self.limits,
+            self.setrlimit_fallback,
+            args::trusted_prlimit_program,
+        )?;
 
         tinybox_core::insert_new(self.store.as_ref(), BoxState::Ready, spec, self.clock.now())
     }
@@ -161,6 +176,7 @@ impl Sandbox for NamespaceSandbox {
             &info.spec,
             request,
             self.limits,
+            self.setrlimit_fallback,
             supports_expand_environment,
         )?;
         // A command that runs and fails is a result, so the raw output is

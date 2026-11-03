@@ -9,7 +9,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinybox_core::{BoxSpec, Capability, Error, ExecRequest, Resources, Result, WorkspaceSource};
+use tinybox_core::{
+    BoxSpec, Capability, Constraint, ConstraintSupport, Enforcement, Error, ExecRequest, Resources,
+    Result, WorkspaceSource,
+};
 
 use super::NAME;
 
@@ -25,6 +28,44 @@ pub const WORKSPACE_MOUNT: &str = "/workspace";
 const USR: &str = "/usr";
 const SYSTEMD_EXPAND_ENVIRONMENT_FLAG: &[u8] = b"--expand-environment";
 static NATIVE_SCOPE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResourceEnforcement {
+    CgroupV2,
+    Setrlimit,
+    Unavailable,
+}
+
+pub(super) const fn select_resource_enforcement(
+    cgroup_v2_delegated: bool,
+    allow_setrlimit_fallback: bool,
+) -> ResourceEnforcement {
+    if cgroup_v2_delegated {
+        ResourceEnforcement::CgroupV2
+    } else if allow_setrlimit_fallback {
+        ResourceEnforcement::Setrlimit
+    } else {
+        ResourceEnforcement::Unavailable
+    }
+}
+
+pub(super) const fn resource_constraint_support(
+    enforcement: ResourceEnforcement,
+) -> ConstraintSupport {
+    match enforcement {
+        ResourceEnforcement::CgroupV2 => ConstraintSupport::NONE
+            .with(Constraint::Cpu, Enforcement::Enforced)
+            .with(Constraint::Memory, Enforcement::Enforced)
+            .with(Constraint::Pids, Enforcement::Enforced),
+        // RLIMIT_AS gives each process in the box a hard address-space ceiling,
+        // but the box's processes together can exceed it, so memory is only
+        // best effort. CPU rate and process count have no equivalent at all.
+        ResourceEnforcement::Setrlimit => {
+            ConstraintSupport::NONE.with(Constraint::Memory, Enforcement::BestEffort)
+        }
+        ResourceEnforcement::Unavailable => ConstraintSupport::NONE,
+    }
+}
 
 /// Files a normal command expects to exist.
 ///
@@ -80,6 +121,62 @@ pub(super) fn exec(
     spec: &BoxSpec,
     request: &ExecRequest,
     limits: bool,
+    setrlimit_fallback: bool,
+    supports_expand_environment: bool,
+) -> Result<Vec<String>> {
+    exec_with_prlimit_resolver(
+        spec,
+        request,
+        limits,
+        setrlimit_fallback,
+        supports_expand_environment,
+        trusted_prlimit_program,
+    )
+}
+
+pub(super) fn exec_with_prlimit_resolver(
+    spec: &BoxSpec,
+    request: &ExecRequest,
+    limits: bool,
+    setrlimit_fallback: bool,
+    supports_expand_environment: bool,
+    resolve_prlimit: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Result<Vec<String>> {
+    let prlimit = fallback_prlimit(limits, setrlimit_fallback, resolve_prlimit)?;
+    exec_with_prlimit_program(
+        spec,
+        request,
+        limits,
+        prlimit.as_deref(),
+        supports_expand_environment,
+    )
+}
+
+/// The trusted `prlimit` the setrlimit fallback launches through, when that
+/// fallback is in use.
+///
+/// # Errors
+/// Returns [`Error::Unsupported`] for resource limits when no trusted
+/// `prlimit` exists.
+pub(super) fn fallback_prlimit(
+    limits: bool,
+    setrlimit_fallback: bool,
+    resolve_prlimit: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>> {
+    if limits || !setrlimit_fallback {
+        return Ok(None);
+    }
+    resolve_prlimit().map(Some).map_err(|_| Error::Unsupported {
+        sandbox: NAME.to_owned(),
+        capability: Capability::ResourceLimits,
+    })
+}
+
+pub(super) fn exec_with_prlimit_program(
+    spec: &BoxSpec,
+    request: &ExecRequest,
+    limits: bool,
+    prlimit_program: Option<&Path>,
     supports_expand_environment: bool,
 ) -> Result<Vec<String>> {
     if request.argv.is_empty() {
@@ -94,7 +191,39 @@ pub(super) fn exec(
         Vec::new()
     };
     argv.extend(bwrap(spec, request)?);
+    if !limits && let Some(prlimit) = prlimit_program {
+        wrap_setrlimit(&mut argv, &spec.resources, prlimit);
+    }
     Ok(argv)
+}
+
+pub(super) fn wrap_setrlimit(argv: &mut Vec<String>, resources: &Resources, prlimit: &Path) {
+    argv.splice(
+        0..0,
+        [
+            prlimit.to_string_lossy().into_owned(),
+            format!("--as={}", resources.memory_bytes),
+            "--".to_owned(),
+        ],
+    );
+}
+
+pub(super) fn trusted_prlimit_program() -> std::io::Result<std::path::PathBuf> {
+    trusted_program_from([Path::new("/usr/bin/prlimit"), Path::new("/bin/prlimit")])
+}
+
+pub(super) fn trusted_program_from<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> std::io::Result<std::path::PathBuf> {
+    paths
+        .into_iter()
+        .find_map(|path| validate_trusted_program(path).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no trusted executable in fixed system locations",
+            )
+        })
 }
 
 /// Wrap the sandbox in a transient systemd scope so cgroup limits apply.
@@ -237,8 +366,50 @@ pub fn native_jail_argv_with_programs(
     let bwrap = validate_trusted_program(bwrap)?;
     let supports_expand_environment = systemd_run_supports_safe_arguments(&systemd_run)?;
     let argv = native_bwrap_argv(request, supports_expand_environment, &systemd_run, &bwrap);
-    Ok(native_launcher_argv(argv))
+    Ok(native_launcher_argv(wrap_scope_command(argv)))
 }
+
+/// Sample cgroup counters from inside the transient scope before it is stopped.
+fn wrap_scope_command(mut argv: Vec<String>) -> Vec<String> {
+    let Some(delimiter) = argv.iter().position(|arg| arg == "--") else {
+        return argv;
+    };
+    let Some(unit) = argv
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--unit=").map(str::to_owned))
+    else {
+        return argv;
+    };
+    let workload = argv.split_off(delimiter + 1);
+    argv.extend([
+        "/bin/bash".to_owned(),
+        "--noprofile".to_owned(),
+        "--norc".to_owned(),
+        "-c".to_owned(),
+        CPU_EVENT_SCOPE_WRAPPER.to_owned(),
+        "tinybox-cpu-event-scope".to_owned(),
+        unit,
+    ]);
+    argv.extend(workload);
+    argv
+}
+
+const CPU_EVENT_SCOPE_WRAPPER: &str = r#"
+unit=$1
+shift
+"$@"
+status=$?
+report=${TINYBOX_INTERNAL_CPU_EVENT_FILE:-}
+if [ -n "$report" ]; then
+    control_group=$(/usr/bin/systemctl --user show --property=ControlGroup --value "$unit" 2>/dev/null)
+    stats=
+    case $control_group in /*) stats=/sys/fs/cgroup${control_group}/cpu.stat;; esac
+    if [ -r "$stats" ]; then
+        { stat=$(<"$stats") && printf '%s\n' "$stat" > "$report"; } 2>/dev/null || :
+    fi
+fi
+exit "$status"
+"#;
 
 /// Find systemd-run only in fixed system locations and return its trusted
 /// canonical path. This does not consult the caller's `PATH`.
@@ -545,7 +716,7 @@ fn ensure_mount_parents(argv: &mut Vec<String>, request: &NativeJailCommand) {
 }
 
 /// The `bwrap` invocation itself.
-fn bwrap(spec: &BoxSpec, request: &ExecRequest) -> Result<Vec<String>> {
+pub(super) fn bwrap(spec: &BoxSpec, request: &ExecRequest) -> Result<Vec<String>> {
     let workspace = workspace_dir(spec)?;
     let mut argv = vec!["bwrap".to_owned()];
 

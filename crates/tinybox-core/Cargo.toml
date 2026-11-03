@@ -24,6 +24,7 @@ tinybox-bus.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -52,6 +52,8 @@ pub(crate) struct SpecRecord {
     resources: Resources,
     lifecycle: LifecycleRecord,
     network: NetworkRecord,
+    #[serde(default)]
+    hard_requirements: Vec<tinybox_core::Constraint>,
     ports: BTreeSet<PortMapping>,
     env: BTreeMap<String, String>,
 }
@@ -171,6 +173,7 @@ impl TryFrom<&BoxSpec> for SpecRecord {
             resources: spec.resources,
             lifecycle: LifecycleRecord::try_from(&spec.lifecycle)?,
             network: NetworkRecord::try_from(&spec.network)?,
+            hard_requirements: spec.hard_requirements.clone(),
             ports: spec.ports.clone(),
             env: spec.env.clone(),
         })
@@ -184,6 +187,7 @@ impl SpecRecord {
         spec.resources = self.resources;
         spec.lifecycle = self.lifecycle.into();
         spec.network = self.network.into();
+        spec.hard_requirements = self.hard_requirements;
         spec.ports = self.ports;
         spec.env = self.env;
         spec

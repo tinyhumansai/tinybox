@@ -74,6 +74,78 @@ async fn live_admission_is_bounded_until_outputs_are_explicitly_released() -> Re
     Ok(())
 }
 
+#[test]
+fn cpu_quota_observer_cause_is_forwarded_before_process_exit() {
+    use tinybox_core::ExecutionObserver;
+
+    let journal = Arc::new(OutputJournal::default());
+    journal.termination_cause(tinybox_core::TerminationCause::CpuQuota);
+    let stream = stream_with(journal, false);
+
+    assert_eq!(
+        stream.terminal_events(Some(0)),
+        vec![
+            tinybox_bus::SandboxEvent::LimitHit {
+                limit: tinybox_bus::LimitKind::Cpu,
+            },
+            tinybox_bus::SandboxEvent::Exited { status: Some(0) },
+        ]
+    );
+}
+
+#[test]
+fn a_timed_out_stream_keeps_its_cpu_event_and_exits_only_once_cleaned_up() {
+    use tinybox_bus::{LimitKind, SandboxEvent};
+    use tinybox_core::ExecutionObserver;
+
+    let cpu = SandboxEvent::LimitHit {
+        limit: LimitKind::Cpu,
+    };
+    let timeout = SandboxEvent::LimitHit {
+        limit: LimitKind::Timeout,
+    };
+    let journal = Arc::new(OutputJournal::default());
+    journal.termination_cause(tinybox_core::TerminationCause::CpuQuota);
+    journal.finish_failed(ExecutionFailure::CleanupFailed);
+    let stream = stream_with(journal.clone(), true);
+    assert_eq!(
+        stream.terminal_events(None),
+        vec![cpu.clone(), timeout.clone()]
+    );
+    journal.finish_failed(ExecutionFailure::TimedOut);
+    assert_eq!(
+        stream.terminal_events(None),
+        vec![cpu, timeout, SandboxEvent::Exited { status: None }]
+    );
+}
+
+fn stream_with(journal: Arc<OutputJournal>, timed_out: bool) -> StreamExecution {
+    let process = ProcessRef {
+        resource: ResourceId("resource".into()),
+        process: ResourceId("process".into()),
+    };
+    StreamExecution {
+        request: SpawnRequest {
+            process: process.process.clone(),
+            command: ExecRequest {
+                resource: process.resource.clone(),
+                argv: true_command(),
+                cwd: None,
+                env: std::collections::BTreeMap::new(),
+                stdin: None,
+            },
+        },
+        shell: None,
+        platform_shell: None,
+        jail: None,
+        journal,
+        task: Mutex::new(None),
+        collector: Collector::Host(Arc::new(tinybox_host::LimitedLocalHost::new(64)), None),
+        timed_out: Arc::new(std::sync::atomic::AtomicBool::new(timed_out)),
+        event_publisher_claimed: std::sync::atomic::AtomicBool::new(false),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stream_replay_keeps_request_identity_and_rejects_cross_resource_handles() -> Result<()> {
     let resources = Resources::test_resources();
@@ -209,6 +281,7 @@ async fn a_panicked_job_is_joined_and_cleanup_failure_stays_owned_until_retry() 
         shell: None,
         platform_shell: None,
         timed_out: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        event_publisher_claimed: std::sync::atomic::AtomicBool::new(false),
         journal,
         task: Mutex::new(Some(task)),
         collector: Collector::Host(Arc::new(tinybox_host::LimitedLocalHost::new(64)), None),
@@ -889,9 +962,11 @@ async fn cancelled_native_shell_retains_scratch_until_output_release()
     })
     .await??;
     resources.cancel(&process).await?;
+    let output = resources.read_output(&process, 0).await?;
     assert_eq!(
-        resources.read_output(&process, 0).await?.state,
-        ExecutionState::Cancelled
+        output.state,
+        ExecutionState::Cancelled,
+        "cancellation failed after captured output: {output:?}"
     );
     let scratch = state.path().join("artifacts/sandbox-scratch");
     assert_eq!(std::fs::read_dir(&scratch)?.count(), 1);
@@ -1415,6 +1490,18 @@ fn native_resource_bus_available() -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn native_resource_test_environment() -> std::collections::BTreeMap<String, String> {
+    ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_owned(), value))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn detached_descendant_script() -> String {
     "import os,time,sys\nfirst=os.fork()\nif first == 0:\n os.setsid()\n second=os.fork()\n if second == 0:\n  with open(sys.argv[1],'w') as f: f.write(f'{os.getpid()} {os.stat(\"/proc/self/ns/pid\").st_ino}')\n  while True: time.sleep(1)\n os._exit(0)\nos.waitpid(first,0)\nwhile not os.path.exists(sys.argv[1]) or os.path.getsize(sys.argv[1]) == 0: time.sleep(0.01)\nprint('stdout-ready',flush=True)\nprint('stderr-ready',file=sys.stderr,flush=True)\ntime.sleep(600)".into()
 }
@@ -1447,7 +1534,7 @@ async fn start_resource_descendant(
                         pid_file.display().to_string(),
                     ],
                     cwd: Some(root.display().to_string()),
-                    env: std::collections::BTreeMap::default(),
+                    env: native_resource_test_environment(),
                     stdin: None,
                 },
             },
@@ -1496,7 +1583,7 @@ async fn wait_for_resource_descendant(
         let streams_ready = !check_streams
             || (stream_has(tinybox_bus::OutputStream::Stdout, b"stdout-ready")
                 && stream_has(tinybox_bus::OutputStream::Stderr, b"stderr-ready"));
-        if streams_ready && std::fs::metadata(pid_file).is_ok() {
+        if streams_ready && std::fs::metadata(pid_file).is_ok_and(|metadata| metadata.len() > 0) {
             let identity = std::fs::read_to_string(pid_file)?;
             let mut parts = identity.split_whitespace();
             return Ok((

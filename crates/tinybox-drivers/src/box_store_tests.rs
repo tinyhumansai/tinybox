@@ -5,7 +5,7 @@ use tinybox_core::store::insert_new;
 use tinybox_core::{BoxSpec, HostRef, Placement, SandboxRef, WorkspaceSource};
 use tinystoragedrivers_api::DocumentStore;
 use tinystoragedrivers_testkit::memory_storage;
-use tinystoragedrivers_types::{Precondition, Scope, StorageError};
+use tinystoragedrivers_types::{CollectionSpec, Precondition, Scope, StorageError};
 
 fn documents() -> Arc<dyn DocumentStore> {
     memory_storage(&Scope::new("tinybox-tests").expect("scope"))
@@ -18,8 +18,10 @@ fn test_store(docs: Arc<dyn DocumentStore>) -> Result<DocumentBoxStore> {
     let ensure_docs = Arc::clone(&docs);
     bridge
         .run(async move {
-            for spec in tinybox_bus::storage::collections() {
-                ensure_docs.ensure_collection(&spec).await?;
+            for declaration in tinybox_bus::storage::collections() {
+                ensure_docs
+                    .ensure_collection(&CollectionSpec::new(declaration.name))
+                    .await?;
             }
             Ok::<_, StorageError>(())
         })

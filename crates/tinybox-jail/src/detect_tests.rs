@@ -17,6 +17,22 @@ fn unavailable_backend_rejects_spawning() {
 #[test]
 fn backend_detection_returns_a_backend() {
     assert_ne!(pick_backend().name().len(), 0);
+    assert_eq!(backend_name(), pick_backend().name());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn landlock_detection_matches_the_landlock_backend() {
+    assert_eq!(
+        landlock_available(),
+        crate::linux::LandlockBackend::new().is_available()
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn landlock_is_unavailable_off_linux() {
+    assert!(!landlock_available());
 }
 
 #[test]
@@ -79,4 +95,56 @@ fn selection_uses_the_first_available_candidate() {
         Arc::new(crate::noop::NoopBackend),
     ]);
     assert_eq!(picked.name(), crate::noop::NOOP_BACKEND_NAME);
+}
+
+#[test]
+fn owned_selection_skips_backends_without_owned_child_support() {
+    struct OwnedCandidate(&'static str, bool);
+
+    impl JailBackend for OwnedCandidate {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn is_owned_available(&self) -> bool {
+            self.1
+        }
+        fn spawn(&self, _: &Jail, _: Command) -> std::io::Result<std::process::Child> {
+            unreachable!("selection tests never spawn")
+        }
+    }
+
+    let picked = pick_owned_from(vec![
+        Arc::new(OwnedCandidate("legacy-only", false)),
+        Arc::new(OwnedCandidate("owned", true)),
+        Arc::new(OwnedCandidate("later-owned", true)),
+    ]);
+    assert_eq!(picked.name(), "owned");
+    assert!(picked.is_owned_available());
+}
+
+#[test]
+fn owned_selection_fails_closed_when_no_candidate_can_return_owned_child() {
+    struct LegacyOnly;
+
+    impl JailBackend for LegacyOnly {
+        fn name(&self) -> &'static str {
+            "legacy-only"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn is_owned_available(&self) -> bool {
+            false
+        }
+        fn spawn(&self, _: &Jail, _: Command) -> std::io::Result<std::process::Child> {
+            unreachable!("selection tests never spawn")
+        }
+    }
+
+    let picked = pick_owned_from(vec![Arc::new(LegacyOnly)]);
+    assert_eq!(picked.name(), UNSUPPORTED_BACKEND_NAME);
+    assert!(!picked.is_owned_available());
 }

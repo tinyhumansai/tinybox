@@ -56,9 +56,12 @@ applications with.
 `tinybox-linux` drives `bwrap` through its [`Host`](0004-drive-backends-through-the-host-trait.md),
 exactly as the Docker backend drives `docker`.
 
-`unsafe` is **not** enabled anywhere. `unsafe_code = "forbid"` stays in
-`[workspace.lints]` with no exception, and the reservation ADR 0003 made for
-this crate is withdrawn.
+The Linux namespace backend uses bubblewrap and contains no unsafe code. The
+workspace default remains `unsafe_code = "deny"`; the only local allowance is
+the Win32 FFI boundary in `crates/tinybox-jail/src/windows.rs`, documented in
+ADR 0003. CI checks that no other Rust source file adds an unsafe-code
+allowance. The reservation ADR 0003 made for the Linux backend remains
+withdrawn.
 
 Rootless cgroup v2 limits go through `systemd-run --user --scope`, which is the
 only route an unprivileged process has to a delegated cgroup. They are opt-in on

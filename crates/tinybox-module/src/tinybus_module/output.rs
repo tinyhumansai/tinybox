@@ -1,9 +1,12 @@
 //! Module-owned bounded output journal and cooperative execution cancellation.
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use tinybox_bus::{
     ExecutionFailure, ExecutionState, MAX_OUTPUT_BYTES, OutputBatch, OutputChunk, OutputStream,
 };
-use tinybox_core::{Error, ExecutionObserver, Result};
+use tinybox_core::{Error, ExecutionObserver, Result, TerminationCause};
 
 const FRAME_BYTES: usize = 8192;
 const BATCH_BYTES: usize = 64 * 1024;
@@ -30,8 +33,12 @@ impl Default for JournalState {
 pub(super) struct OutputJournal {
     state: Mutex<JournalState>,
     cancelled: tokio::sync::Notify,
+    cpu_quota_hit: AtomicBool,
 }
 impl OutputJournal {
+    pub(super) fn cpu_quota_hit(&self) -> bool {
+        self.cpu_quota_hit.load(Ordering::SeqCst)
+    }
     pub(super) fn read(&self, cursor: u64) -> Result<OutputBatch> {
         let state = self
             .state
@@ -97,7 +104,11 @@ impl OutputJournal {
                 }
             )
         {
-            state.state = ExecutionState::Failed { code };
+            state.state = if state.cancelled && code == ExecutionFailure::BackendFailed {
+                ExecutionState::Cancelled
+            } else {
+                ExecutionState::Failed { code }
+            };
         }
     }
     pub(super) fn cleanup_acknowledged(&self) -> bool {
@@ -144,6 +155,11 @@ impl ExecutionObserver for OutputJournal {
         }
         state.bytes = total;
         Ok(())
+    }
+    fn termination_cause(&self, cause: TerminationCause) {
+        if cause == TerminationCause::CpuQuota {
+            self.cpu_quota_hit.store(true, Ordering::SeqCst);
+        }
     }
     async fn cancelled(&self) {
         let cancelled = self.cancelled.notified();

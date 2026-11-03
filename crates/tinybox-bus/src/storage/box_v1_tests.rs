@@ -34,7 +34,19 @@ fn every_variant_takes_its_v2_tagged_form() {
     );
     assert_eq!(body["spec"]["network"], json!({"kind": "open"}));
     assert_eq!(body["spec"]["ports"], json!([]));
+    assert_eq!(body["spec"]["hard_requirements"], json!([]));
     assert!(body.get("id").is_none(), "the id is the document id");
+}
+
+#[test]
+fn hard_requirements_survive_the_v1_conversion() {
+    let mut old = v1();
+    old["spec"]["hard_requirements"] = json!(["cpu", "filesystem"]);
+    let body = to_body(old).expect("decodes");
+    assert_eq!(
+        body["spec"]["hard_requirements"],
+        json!(["cpu", "filesystem"])
+    );
 }
 
 #[test]

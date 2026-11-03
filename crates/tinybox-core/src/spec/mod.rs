@@ -64,6 +64,13 @@ pub struct BoxSpec {
     pub source: WorkspaceSource,
     /// The limits applied to the workspace.
     pub resources: Resources,
+    /// Constraints the caller requires the selected sandbox to enforce fully.
+    ///
+    /// Resource values remain soft defaults unless their corresponding
+    /// constraint is listed here. Defaulted on read for stored specs created
+    /// before hard requirements were introduced.
+    #[serde(default)]
+    pub hard_requirements: Vec<crate::Constraint>,
     /// How long the box lives and whether it snapshots as it goes.
     pub lifecycle: Lifecycle,
     /// What the workspace may reach over the network.
@@ -97,6 +104,7 @@ impl BoxSpec {
             workspace: placement,
             source,
             resources: Resources::DEFAULT,
+            hard_requirements: Vec::new(),
             lifecycle: Lifecycle::default(),
             network: NetworkPolicy::default(),
             ports: BTreeSet::new(),
@@ -128,6 +136,16 @@ impl BoxSpec {
     #[must_use]
     pub const fn with_resources(mut self, resources: Resources) -> Self {
         self.resources = resources;
+        self
+    }
+
+    /// Require the selected sandbox to fully enforce each listed constraint.
+    #[must_use]
+    pub fn with_hard_requirements(
+        mut self,
+        requirements: impl IntoIterator<Item = crate::Constraint>,
+    ) -> Self {
+        self.hard_requirements = requirements.into_iter().collect();
         self
     }
 

@@ -14,7 +14,7 @@ enum NativeJailRequest {
     Resources(tinybox_bus::NativeJailRequest),
 }
 
-pub(super) struct StreamExecution {
+pub(in crate::tinybus_module) struct StreamExecution {
     request: SpawnRequest,
     shell: Option<tinybox_bus::ShellExecRequest>,
     platform_shell: Option<tinybox_bus::SelectShellRequest>,
@@ -23,6 +23,7 @@ pub(super) struct StreamExecution {
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     collector: Collector,
     timed_out: Arc<std::sync::atomic::AtomicBool>,
+    event_publisher_claimed: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 enum Collector {
@@ -348,7 +349,61 @@ impl StreamExecution {
             task: Mutex::new(Some(task)),
             collector,
             timed_out,
+            event_publisher_claimed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+    pub(in crate::tinybus_module) fn claim_event_publisher(&self) -> bool {
+        !self
+            .event_publisher_claimed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+    pub(in crate::tinybus_module) async fn wait_for_terminal_exit(&self) -> Option<i32> {
+        let mut task = self.task.lock().await;
+        if let Some(join) = task.as_mut()
+            && join.await.is_err()
+        {
+            task.take();
+            return None;
+        }
+        task.take();
+        match self.journal.read(0).ok()?.state {
+            tinybox_bus::ExecutionState::Exited { exit_code } => Some(exit_code),
+            tinybox_bus::ExecutionState::Running
+            | tinybox_bus::ExecutionState::Cancelled
+            | tinybox_bus::ExecutionState::Failed { .. } => None,
+        }
+    }
+    pub(in crate::tinybus_module) fn timed_out(&self) -> bool {
+        self.timed_out.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(in crate::tinybus_module) fn terminal_events(
+        &self,
+        status: Option<i32>,
+    ) -> Vec<tinybox_bus::SandboxEvent> {
+        use tinybox_bus::{LimitKind, SandboxEvent};
+
+        let mut events = Vec::new();
+        if self.journal.cpu_quota_hit() {
+            events.push(SandboxEvent::LimitHit {
+                limit: LimitKind::Cpu,
+            });
+        }
+        if self.timed_out() {
+            events.push(SandboxEvent::LimitHit {
+                limit: LimitKind::Timeout,
+            });
+            // A timed-out process has ended only once its cleanup is acknowledged.
+            if self.journal.cleanup_acknowledged() {
+                events.push(SandboxEvent::Exited { status: None });
+            }
+            return events;
+        }
+        if let Some(status) = status {
+            events.push(SandboxEvent::Exited {
+                status: Some(status),
+            });
+        }
+        events
     }
     pub(super) fn running(&self) -> bool {
         !self.journal.cleanup_acknowledged()
@@ -682,7 +737,10 @@ impl Resources {
         error.map_or(Ok(()), Err)
     }
 
-    pub(super) fn stream(&self, process: &ProcessRef) -> Result<Option<Arc<StreamExecution>>> {
+    pub(in crate::tinybus_module) fn stream(
+        &self,
+        process: &ProcessRef,
+    ) -> Result<Option<Arc<StreamExecution>>> {
         validate_id(&process.resource)?;
         validate_id(&process.process)?;
         let streams = self

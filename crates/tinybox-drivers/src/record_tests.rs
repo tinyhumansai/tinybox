@@ -58,6 +58,7 @@ fn the_body_is_snake_case_with_millisecond_times_and_no_id() -> Result<()> {
                 },
                 "lifecycle": {"kind": "persistent", "autosnapshot_ms": 60_000},
                 "network": {"kind": "denied"},
+                "hard_requirements": [],
                 "ports": [],
                 "env": {"KEY": "value"},
             },
@@ -137,6 +138,30 @@ fn an_unknown_creation_time_stays_unknown() -> Result<()> {
 }
 
 #[test]
+fn older_stored_records_default_hard_requirements_to_empty() -> Result<()> {
+    let info = info_with(base_spec(WorkspaceSource::OciImage("a".into()))?)?;
+    let mut value =
+        serde_json::to_value(BoxRecord::try_from(&info)?).map_err(|e| Error::Store {
+            operation: "encode",
+            message: e.to_string(),
+        })?;
+    value["spec"]
+        .as_object_mut()
+        .ok_or_else(|| Error::Store {
+            operation: "decode",
+            message: "spec record must be an object".to_owned(),
+        })?
+        .remove("hard_requirements");
+
+    let stored: BoxRecord = serde_json::from_value(value).map_err(|e| Error::Store {
+        operation: "decode",
+        message: e.to_string(),
+    })?;
+    assert_eq!(stored.into_info(info.id).spec.hard_requirements, []);
+    Ok(())
+}
+
+#[test]
 fn a_creation_time_keeps_millisecond_precision() -> Result<()> {
     let at = UNIX_EPOCH + Duration::from_millis(42_007);
     let info = info_with(base_spec(WorkspaceSource::OciImage("a".into()))?)?.created_at(at);
@@ -157,6 +182,7 @@ fn the_contracts_v1_migration_matches_the_record_encoding() {
         ttl: Duration::from_secs(60),
     };
     spec.network = NetworkPolicy::Allowlist(EgressAllowlist::new(["a.test"], vec![443]));
+    spec.hard_requirements = vec![tinybox_core::Constraint::Cpu];
     spec.ports.insert(PortMapping {
         guest: 80,
         host: None,

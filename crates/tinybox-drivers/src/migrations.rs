@@ -36,8 +36,10 @@ struct MigrationReceipt {
 /// [`DocumentBoxStore::open_host_managed`]: crate::DocumentBoxStore::open_host_managed
 pub(crate) async fn declare(storage: &Storage) -> Result<()> {
     let documents = storage.documents();
-    for spec in collections() {
-        documents.ensure_collection(&spec).await?;
+    for declaration in collections() {
+        documents
+            .ensure_collection(&CollectionSpec::new(declaration.name))
+            .await?;
     }
     Ok(())
 }

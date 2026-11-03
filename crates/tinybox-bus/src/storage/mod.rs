@@ -4,7 +4,8 @@
 //! legacy rows when their storage adapters open. The bus contract describes
 //! names and conversions only; it has no engine or migration runner.
 
-use tinystoragedrivers_types::CollectionSpec;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub mod box_v1;
 pub mod jail_index;
@@ -29,12 +30,27 @@ pub const V1_BOX_COLLECTION: &str = "tinybox_boxes";
 /// The v1 name of [`JAIL_INDEX_COLLECTION`].
 pub const V1_JAIL_INDEX_COLLECTION: &str = "tinybox_jail_index";
 
+/// A TinyBox-owned storage collection name, independent of a storage backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CollectionDeclaration {
+    /// Stable collection name to provision in the host's bound storage scope.
+    pub name: String,
+}
+
+impl CollectionDeclaration {
+    /// Declare a `TinyBox` collection by name.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
 /// The body schema version used by `TinyBox`'s current documents.
 pub const BODY_VERSION: u32 = 2;
 
 /// Collections owned by `TinyBox`, as pure declarations for the host to ensure.
 #[must_use]
-pub fn collections() -> Vec<CollectionSpec> {
+pub fn collections() -> Vec<CollectionDeclaration> {
     [
         BOX_COLLECTION,
         JAIL_INDEX_COLLECTION,
@@ -43,7 +59,7 @@ pub fn collections() -> Vec<CollectionSpec> {
         CLI_IMPORTS_COLLECTION,
     ]
     .into_iter()
-    .map(CollectionSpec::new)
+    .map(CollectionDeclaration::new)
     .collect()
 }
 

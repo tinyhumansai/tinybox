@@ -1,5 +1,5 @@
 use super::*;
-use crate::NetworkPolicy;
+use crate::{CONTRACT_VERSION, NetworkPolicy, SIGNALS, names};
 
 #[test]
 fn events_keep_their_wire_labels() -> Result<(), serde_json::Error> {
@@ -23,6 +23,28 @@ fn events_keep_their_wire_labels() -> Result<(), serde_json::Error> {
     );
     let exited: SandboxEvent = serde_json::from_value(serde_json::json!({"event":"exited"}))?;
     assert_eq!(exited, SandboxEvent::Exited { status: None });
+    Ok(())
+}
+
+#[test]
+fn process_events_keep_their_correlation_and_signal_wire_shape() -> Result<(), serde_json::Error> {
+    let event = ProcessEvent {
+        process: crate::ProcessRef {
+            resource: crate::ResourceId("resource-1".into()),
+            process: crate::ResourceId("process-2".into()),
+        },
+        event: SandboxEvent::Started,
+    };
+    assert_eq!(
+        serde_json::to_value(&event)?,
+        serde_json::json!({
+            "process": {"resource": "resource-1", "process": "process-2"},
+            "event": {"event": "started"}
+        })
+    );
+    assert_eq!(names::PROCESS_EVENT, "ProcessEvent");
+    assert_eq!(SIGNALS, &["ProcessEvent"]);
+    assert_eq!(CONTRACT_VERSION, (2, 3));
     Ok(())
 }
 

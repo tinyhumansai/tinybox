@@ -6,6 +6,7 @@ use std::{
 use tinybox_bus::ShellExecRequest;
 use tinybus::Result;
 
+pub(super) mod run;
 mod types;
 pub(super) use types::ShellContext;
 use types::ShellHost;
@@ -157,8 +158,13 @@ impl ShellContext {
                     .await
             }
             ShellHost::Jailed(host) => {
-                host.run_command_observed(command, self.request.stdin.clone(), observer)
-                    .await
+                host.run_command_observed_with_env(
+                    command,
+                    self.request.stdin.clone(),
+                    observer,
+                    self.environment.clone(),
+                )
+                .await
             }
         }
     }

@@ -9,6 +9,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  windows-unsafe-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test the Windows FFI allowance guard
+        run: scripts/ci/check-windows-unsafe-boundary_tests.sh
+      - name: Check the Windows FFI allowance boundary
+        run: scripts/ci/check-windows-unsafe-boundary.sh
   module-ci:
     uses: tinyhumansai/.github/.github/workflows/module-ci.yml@4adc1080fb495098e7af1aade82ed7e6e3c69bb7
     with:

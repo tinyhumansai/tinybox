@@ -99,6 +99,20 @@ fn environment_order_does_not_change_spec_identity() -> Result<()> {
 }
 
 #[test]
+fn older_specs_default_hard_requirements_to_empty()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut value = serde_json::to_value(spec()?)?;
+    let Some(object) = value.as_object_mut() else {
+        return Err(std::io::Error::other("BoxSpec must serialize as an object").into());
+    };
+    object.remove("hard_requirements");
+
+    let restored: BoxSpec = serde_json::from_value(value)?;
+    assert_eq!(restored.hard_requirements, []);
+    Ok(())
+}
+
+#[test]
 fn validate_rejects_each_zero_limit_in_turn() -> Result<()> {
     for (limit, resources) in [
         (

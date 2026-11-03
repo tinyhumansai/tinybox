@@ -17,6 +17,14 @@ fn command_optional_fields_default_when_absent() -> Result<(), serde_json::Error
 }
 
 #[test]
+fn local_grant_config_exposes_a_json_schema() -> Result<(), serde_json::Error> {
+    let schema = schemars::schema_for!(LocalGrantConfig);
+    let schema = serde_json::to_value(schema)?;
+    assert!(schema.get("properties").is_some());
+    Ok(())
+}
+
+#[test]
 fn create_environment_defaults_and_workspace_round_trips() -> Result<(), serde_json::Error> {
     let request: CreateRequest = serde_json::from_str(
         r#"{"resource":"create-1","backend":"docker","workspace":{"Image":"alpine"}}"#,
@@ -51,7 +59,7 @@ fn docker_run_vocabulary_is_typed_bounded_and_additive() -> Result<(), serde_jso
     assert_eq!(METHODS[28], "CleanupDocker");
     assert_eq!(METHODS[29], "RunDockerWithoutWorkspace");
     assert_eq!(METHODS[33], "StartNativeShellExec");
-    assert_eq!(CONTRACT_VERSION, (2, 1));
+    assert_eq!(CONTRACT_VERSION, (2, 3));
     assert_eq!(MAX_DOCKER_RUN_TIMEOUT_MS, 86_400_000);
     let serialized = serde_json::to_value(&request)?;
     assert_eq!(serialized["read_only_rootfs"], false);
@@ -129,7 +137,7 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (2, 1));
+    assert_eq!(CONTRACT_VERSION, (2, 3));
     assert!(is_compatible(CONTRACT_VERSION));
     assert!(!is_compatible((1, 21)));
     assert!(!is_compatible((1, 8)));
@@ -144,7 +152,9 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
     assert!(!is_compatible((1, 22)));
     assert!(!is_compatible((3, 0)));
     assert!(!is_compatible((2, 0)));
-    assert!(is_compatible((2, 1)));
+    assert!(!is_compatible((2, 1)));
+    assert!(!is_compatible((2, 2)));
+    assert!(is_compatible((2, 3)));
     assert!(!supports_native_jail_resources((2, 0)));
     assert!(supports_native_jail_resources((2, 1)));
     assert!(supports_native_jail_resources((2, 2)));
@@ -154,7 +164,7 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[2,1],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[2,3],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
@@ -173,7 +183,7 @@ fn no_workspace_docker_operation_is_present_in_the_contract() {
             .count(),
         1
     );
-    assert_eq!(CONTRACT_VERSION, (2, 1));
+    assert_eq!(CONTRACT_VERSION, (2, 3));
 }
 
 #[test]
@@ -186,9 +196,10 @@ fn shell_analysis_wire_shape_contains_only_structural_facts() -> Result<(), serd
 
 #[test]
 fn contract_two_drops_command_classification_but_keeps_structural_shell_analysis() {
-    assert_eq!(CONTRACT_VERSION, (2, 1));
+    assert_eq!(CONTRACT_VERSION, (2, 3));
     assert!(!METHODS.contains(&"AnalyzeCommand"));
     assert!(METHODS.contains(&"AnalyzeShell"));
+    assert!(METHODS.contains(&"RunNativeShell"));
 }
 
 #[test]
@@ -318,6 +329,39 @@ fn native_shell_wire_defaults_close_stdin_and_keep_a_bounded_runtime()
 }
 
 #[test]
+fn run_native_shell_result_preserves_finished_and_yielded_shapes() -> Result<(), serde_json::Error>
+{
+    let finished = RunNativeShellResult::Finished {
+        exit_code: 7,
+        stdout: b"out".to_vec(),
+        stderr: b"err".to_vec(),
+        timed_out: false,
+    };
+    assert_eq!(
+        serde_json::from_value::<RunNativeShellResult>(serde_json::to_value(&finished)?)?,
+        finished
+    );
+    let running = RunNativeShellResult::Running {
+        resource: ResourceId("resource".into()),
+        process: ProcessRef {
+            resource: ResourceId("resource".into()),
+            process: ResourceId("process".into()),
+        },
+        cursor: 4,
+        stdout: b"before".to_vec(),
+        stderr: Vec::new(),
+    };
+    let value = serde_json::to_value(&running)?;
+    assert_eq!(value["state"], "running");
+    assert_eq!(
+        serde_json::from_value::<RunNativeShellResult>(value)?,
+        running
+    );
+    assert_eq!(names::RUN_NATIVE_SHELL, "RunNativeShell");
+    Ok(())
+}
+
+#[test]
 fn named_members_resolve_to_the_method_catalogue_in_order() {
     use names::*;
     let expected = [
@@ -363,6 +407,7 @@ fn named_members_resolve_to_the_method_catalogue_in_order() {
         KILL_STDIO,
         STDIO_STATUS,
         START_JAILED_EXEC_WITH_RESOURCES,
+        RUN_NATIVE_SHELL,
     ];
     assert_eq!(METHODS, &expected[..]);
     assert_eq!(DESCRIBE, "Describe");

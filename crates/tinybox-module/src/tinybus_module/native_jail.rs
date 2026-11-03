@@ -56,18 +56,7 @@ pub(super) fn prepare(
     jail.read_only = grants(&config.read_only)?;
     jail.read_write = grants(&config.read_write)?;
     jail.deny_read = denials(&config.deny_read)?;
-    jail.resources = config.resources.map(|limits| tinybox_core::Resources {
-        cpu_millis: limits.cpu_millis,
-        memory_bytes: limits.memory_bytes,
-        pids_max: limits.pids_max,
-        disk_bytes: limits.disk_bytes,
-    });
-    if jail
-        .resources
-        .is_some_and(|limits| limits.validate().is_err())
-    {
-        return Err(invalid());
-    }
+    configure_resources(&mut jail, config)?;
     // A denial over the root or a writable grant would leave the command no
     // workspace; a denial nested inside a writable grant is safe only for a
     // backend that applies denials after its write allows.
@@ -124,6 +113,43 @@ pub(super) fn prepare(
     }
     Ok(jail)
 }
+
+fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()> {
+    jail.resources = config.resources.map(|limits| tinybox_core::Resources {
+        cpu_millis: limits.cpu_millis,
+        memory_bytes: limits.memory_bytes,
+        pids_max: limits.pids_max,
+        disk_bytes: limits.disk_bytes,
+    });
+    jail.hard_requirements
+        .extend(required_resource_constraints(config.resources));
+    if jail
+        .resources
+        .is_some_and(|limits| limits.validate().is_err())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn required_resource_constraints(
+    resources: Option<tinybox_bus::ResourceLimits>,
+) -> Vec<tinybox_core::Constraint> {
+    if resources.is_some() {
+        // An explicitly supplied native jail budget is a hard request. The
+        // default values in a BoxSpec remain soft unless its own
+        // `hard_requirements` lists a constraint.
+        vec![
+            tinybox_core::Constraint::Cpu,
+            tinybox_core::Constraint::Memory,
+            tinybox_core::Constraint::Pids,
+            tinybox_core::Constraint::Disk,
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Validate and canonicalize each existing absolute grant path.
 fn grants(paths: &[String]) -> Result<Vec<std::path::PathBuf>> {
     paths

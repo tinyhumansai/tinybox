@@ -3,8 +3,8 @@
 Directory-jail facade. Given a declarative description of a workspace
 (`Jail`), it spawns a child through an available sandbox backend. Linux
 (Landlock) and macOS (Seatbelt) backends are compiled and selected by
-`pick_backend()`. The Windows AppContainer backend is still not compiled (see
-below). When no backend is usable the default backend is `unsupported`
+`pick_backend()`. On Windows the AppContainer backend serves the owned-child
+API (`spawn_owned_captured`); the legacy `spawn` refuses there (see below). When no backend is usable the default backend is `unsupported`
 (`is_available() == false`, `spawn` fails with `Unsupported`); callers can
 explicitly select `NoopBackend` when unrestricted execution is intended.
 It is a per-process complement to the box-level isolation in `tinybox-linux`:
@@ -44,7 +44,7 @@ spawns, never the core process itself.
 | `crates/tinybox-jail/src/bwrap/` | Bubblewrap backend (Linux only): user/pid/ipc/uts (+net) namespaces, grants as bind mounts, `deny_read` masked, `--die-with-parent`. `isolation()` is the minimum over configurations (`Process` with `--disable-userns`, else `None`); `Kernel` only per jail without `allow_net` (`isolation_for` / `is_suitable_for_untrusted_jail`; hosts must use the per-jail form). Never looks `bwrap` up on `PATH`; the probe is a sanity check, not authentication, and `with_program` skips the ownership check. The caller's environment and credentials travel in a private `--args` file, not in argv or any host process environment (`launcher.rs`), and inherited descriptors above 2 are closed by that launcher. No seccomp filter and no resource limits yet. Landlock is the fallback. Landlock is not layered inside because the kernel denies `mount` to a Landlock-restricted thread. |
 | `crates/tinybox-jail/src/linux.rs` | Landlock backend (Linux only, `landlock` feature, on by default). Applies the ruleset to a dedicated spawn thread so no `unsafe` `pre_exec` is needed. |
 | `crates/tinybox-jail/src/macos.rs` | Seatbelt backend via `sandbox-exec`. Compiled on every host so the profile renderer is unit-tested everywhere; selected only on macOS. |
-| `crates/tinybox-jail/src/windows.rs` | AppContainer implementation; **not compiled**: it needs `unsafe` FFI the workspace forbids and cannot return a waitable `std::process::Child` yet. |
+| `crates/tinybox-jail/src/windows.rs` | `AppContainerBackend`, compiled on Windows only under the one file-scoped `unsafe_code` allowance. Available through `spawn_owned_captured` / `spawn_owned_captured_with`; the legacy `spawn` returns `Unsupported` because it cannot return a waitable `std::process::Child`. |
 | `crates/tinybox-jail/src/registry.rs` | `JailRegistry` and `JailRecord`: multi-jail manager persisted to `index.json`, with atomic-rename writes and containment checks. |
 | `crates/tinybox-jail/src/{lib,jail,noop,macos,windows,registry}_tests.rs` | Sibling test suites, each `#[path]`-included from its source file. |
 
@@ -100,8 +100,8 @@ This crate depends only on std and:
   (registry).
 - `landlock` crate: Linux backend, gated on the `landlock` cargo
   feature.
-- `windows-sys`: Windows AppContainer FFI (Security/Isolation, Threading,
-  Memory APIs).
+- `windows-sys`: Windows AppContainer, Job Object, process/threading,
+  pipe and memory APIs.
 - macOS backend shells out to the system binary `/usr/bin/sandbox-exec`.
 
 The Linux backend's docstring references `crate::security::landlock` as
@@ -120,13 +120,14 @@ not import that module.
   as a real read grant and maps `allow_net` to the strictly outbound-only
   `internetClient` capability (LAN and inbound capabilities are deliberately
   excluded).
-- Windows `spawn` currently returns an error after a successful launch.
-  `spawn_in_container` creates the process successfully but cannot bridge
-  the raw `HANDLE` into a `std::process::Child` (the needed
-  `FromRawHandle for Child` is unstable), so it closes the handle and
-  returns `io::ErrorKind::Unsupported`. See the TODO in `windows.rs`. The
-  Windows path is compile-checked but flagged as needing real-hardware
-  testing.
+- Windows callers use `spawn_owned_captured` / `spawn_owned_captured_with`;
+  the legacy `spawn` API refuses before launch because Windows cannot create a
+  `std::process::Child` from a raw process handle. The owned AppContainer
+  backend retains process and Job Object handles, captures standard pipes,
+  applies CPU, aggregate memory and active-process limits when requested, and
+  terminates the whole job on cleanup. Job Objects do not enforce disk quotas,
+  so hard disk requirements are refused in preflight. The Windows path still
+  needs real-hardware validation.
 - macOS forwards only variables explicitly supplied with `Command::env` or
   `Command::envs`. The launcher clears the inherited environment because Rust
   exposes no getter for `Command::env_clear`; this prevents restoring parent

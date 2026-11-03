@@ -5,7 +5,8 @@
 //! accepted as a hard requirement. Unknown backends default to unsupported.
 
 /// A security boundary requested before starting a workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Constraint {
     /// Confine filesystem reads and writes to the granted paths.
     Filesystem,

@@ -3,16 +3,20 @@
 - **Status:** Accepted, amended by [ADR 0005](0005-namespaces-through-bubblewrap.md)
 - **Date:** 2026-08-14
 
-> **Amendment.** The `unsafe` reservation described below was never needed.
-> Modern Ubuntu blocks unprivileged user namespaces for unconfined binaries, so
-> the namespace backend drives `bwrap` instead of calling `clone` directly and
-> `unsafe_code = "forbid"` holds across the whole workspace with no exception.
-> The rest of this decision — the split itself, and why — stands.
+> **Amendment.** Modern Ubuntu blocks unprivileged user namespaces for
+> unconfined binaries, so the namespace backend drives `bwrap` instead of
+> calling `clone` directly. The Windows AppContainer backend now has one
+> narrowly scoped FFI exception at
+> `crates/tinybox-jail/src/windows.rs`; the workspace default remains
+> `unsafe_code = "deny"`, and CI rejects allowances in every other Rust source
+> file. The rest of this decision — the split itself, and why — stands.
 
 ## Context
 
-`Cargo.toml` sets `unsafe_code = "forbid"`. Unlike `deny`, `forbid` cannot be
-cancelled by a local `#[allow]` — that is the point of choosing it.
+`Cargo.toml` sets the workspace default to `unsafe_code = "deny"`. The Windows
+AppContainer APIs require a small Win32 FFI boundary; keeping the exception in
+one file makes that boundary reviewable without relaxing the lint for the rest
+of the workspace.
 
 A rootless namespaces backend cannot honor that. It needs `clone` with
 namespace flags, `unshare`, `pivot_root`, `mount`, and a seccomp filter loaded
@@ -22,12 +26,14 @@ async-signal-safe and no safe abstraction exists.
 
 Three options were available:
 
-1. Relax `unsafe_code` to `deny` crate-wide and use targeted `#[allow]`s.
+1. Relax `unsafe_code` to `deny` crate-wide and allow unsafe throughout the
+   platform backend.
 2. Stay on `forbid` and shell out to a helper binary for the unsafe parts.
-3. Split into a workspace and allow `unsafe` in exactly one member.
+3. Keep the workspace default at `deny` and permit unsafe in one audited
+   Windows FFI file, checked by CI.
 
-Option 1 removes the guarantee everywhere to serve one module: the model types,
-the bus adapter, and the CLI would all lose a lint they have no need to lose.
+Option 1 spreads the exception across a platform backend and makes the boundary
+harder to audit.
 Option 2 keeps the guarantee but pays a process spawn on every box creation and
 moves the hard part into an unversioned binary that is harder to test than a
 library.
@@ -41,16 +47,18 @@ deployment uses Docker or SSH.
 ## Decision
 
 Convert the repository to a Cargo workspace. Hoist the lint configuration into
-`[workspace.lints]` so every member inherits identical settings, and let
-`tinybox-linux` — and only `tinybox-linux` — override `unsafe_code` to `deny`,
-with every invariant documented in a `// SAFETY:` comment.
+`[workspace.lints]` so every member inherits identical settings. Keep
+`unsafe_code = "deny"` as the default and allow it only in
+`crates/tinybox-jail/src/windows.rs`; the CI boundary check rejects allowances
+in other production Rust files. The Windows FFI stays in that module, with each
+invariant documented at the relevant call.
 
 ```text
 crates/
 ├── tinybox-core/     # model and traits; unsafe FORBIDDEN
 ├── tinybox-host/     # LocalHost, SshHost
 ├── tinybox-docker/   # DockerSandbox
-├── tinybox-linux/    # NamespaceSandbox; unsafe DENIED, documented
+├── tinybox-linux/    # NamespaceSandbox; safe bubblewrap launcher
 ├── tinybox-cli/      # bin `tinybox`
 └── tinybox-module/   # cdylib, TinyBus ABI v1
 ```

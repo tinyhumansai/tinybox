@@ -914,6 +914,12 @@ async fn native_cancellation_kills_detached_descendants_and_preserves_stream_eve
     exec.cwd = Some(root.path().into());
     let backend = resource_backend();
     let jail = prepare_with_resources(root.path(), &request, &mut exec, backend.as_ref())?;
+    for key in ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] {
+        if let Ok(value) = std::env::var(key) {
+            exec.env.insert(key.to_owned(), value);
+        }
+    }
+    let approved_env = exec.env.clone();
     let host = Arc::new(tinybox_host::JailLocalHost::with_backend(
         jail,
         backend,
@@ -923,12 +929,15 @@ async fn native_cancellation_kills_detached_descendants_and_preserves_stream_eve
     command
         .args(exec.argv.iter().skip(1))
         .env_clear()
-        .envs(exec.env);
+        .envs(&approved_env);
     let journal = Arc::new(super::super::output::OutputJournal::default());
     let runner = host.clone();
     let observer = journal.clone();
-    let task =
-        tokio::spawn(async move { runner.run_command_observed(command, None, observer).await });
+    let task = tokio::spawn(async move {
+        runner
+            .run_command_observed_with_env(command, None, observer, approved_env)
+            .await
+    });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut ready = false;
     while tokio::time::Instant::now() < deadline {

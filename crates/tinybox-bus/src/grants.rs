@@ -1,8 +1,9 @@
 //! Host-configured filesystem grant discovery and protected-path vocabulary.
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Configuration used to discover toolchain and explicit filesystem grants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct LocalGrantConfig {
     /// Include existing toolchain homes and git configuration.

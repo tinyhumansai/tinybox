@@ -30,7 +30,7 @@ use crate::identity::{BoxId, ProcessId, SnapshotId};
 use crate::spec::BoxSpec;
 
 mod output;
-pub use output::{ExecutionObserver, OutputStream};
+pub use output::{ExecutionObserver, OutputStream, TerminationCause};
 
 mod forward;
 #[cfg(test)]
@@ -249,6 +249,11 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
         self.constraint_support().plan_check(requested)
     }
 
+    /// Inspect only the hard requirements explicitly carried by a box spec.
+    fn plan_check_spec(&self, spec: &BoxSpec) -> crate::PlanCheck {
+        self.plan_check(&spec.hard_requirements)
+    }
+
     /// Require fully implemented constraints before allocating or executing.
     ///
     /// This checks declarations only; callers must still propagate backend
@@ -260,6 +265,15 @@ pub trait Sandbox: std::fmt::Debug + Send + Sync + 'static {
     /// Returns [`Error::ConstraintNotEnforced`] for partial or absent support.
     fn require(&self, requested: &[crate::Constraint]) -> Result<()> {
         self.constraint_support().require(self.name(), requested)
+    }
+
+    /// Refuse a spec whose explicitly required constraints are not enforced.
+    ///
+    /// # Errors
+    /// Returns [`Error::ConstraintNotEnforced`] if any explicit requirement is
+    /// unsupported or only best effort.
+    fn require_spec(&self, spec: &BoxSpec) -> Result<()> {
+        self.require(&spec.hard_requirements)
     }
 
     /// Create a box from `spec` without starting any workload in it.

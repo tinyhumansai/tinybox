@@ -59,3 +59,11 @@ fn a_default_observer_does_not_spuriously_request_cancellation() {
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
 }
+
+#[test]
+fn a_default_observer_accepts_provider_termination_causes() {
+    let observer = DefaultTerminationObserver;
+    let observer: &dyn ExecutionObserver = &observer;
+    assert!(observer.output(OutputStream::Stdout, b"fixture").is_ok());
+    observer.termination_cause(TerminationCause::CpuQuota);
+}

@@ -1,5 +1,91 @@
 //! Native jail ownership regressions; providers are mocked without external services.
 use super::*;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_throttling_counter_requires_one_well_formed_nr_throttled_value() {
+    assert_eq!(
+        parse_cpu_throttled_counter("usage_usec 12\nnr_throttled 0\n"),
+        Some(0)
+    );
+    assert_eq!(parse_cpu_throttled_counter("nr_throttled 3\n"), Some(3));
+    assert_eq!(parse_cpu_throttled_counter("nr_throttled nope\n"), None);
+    assert_eq!(
+        parse_cpu_throttled_counter("nr_throttled 1\nnr_throttled 2\n"),
+        None
+    );
+    assert_eq!(parse_cpu_throttled_counter("usage_usec 12\n"), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_event_report_rejects_custom_paths_and_accepts_masked_run_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let custom_runtime = tempfile::tempdir()?;
+    std::fs::set_permissions(
+        custom_runtime.path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    let mut command = std::process::Command::new("systemd-run");
+    command.args([
+        "--scope",
+        "--unit=tinybox-native-fixture.scope",
+        "--property=CPUQuota=10%",
+        "--tmpfs",
+        "/run",
+        "--tmpfs",
+        "/sys",
+        "--clearenv",
+    ]);
+    let mut env = BTreeMap::new();
+    assert!(CpuEventReport::prepare_in(&command, &mut env, custom_runtime.path()).is_none());
+    assert!(
+        env.is_empty(),
+        "unmasked runtime paths must not be handed off"
+    );
+
+    let Some(runtime_root) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let Ok(metadata) = std::fs::metadata(&runtime_root) else {
+        return Ok(());
+    };
+    if !runtime_root.starts_with("/run/")
+        || metadata.uid() != std::fs::metadata("/proc/self")?.uid()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Ok(());
+    }
+    let runtime = tempfile::Builder::new()
+        .prefix("tinybox-test-")
+        .tempdir_in(runtime_root)?;
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700))?;
+    let report = CpuEventReport::prepare_in(&command, &mut env, runtime.path())
+        .ok_or("masked /run runtime path did not get a report")?;
+    let report_path = env
+        .get(CPU_EVENT_FILE_ENV)
+        .ok_or("report path was not passed to the trusted wrapper")?;
+    assert_eq!(std::fs::read_to_string(report_path)?, "nr_throttled 0\n");
+    drop(report);
+    assert!(!std::path::Path::new(report_path).exists());
+    env.clear();
+
+    let mut unmetered = std::process::Command::new("systemd-run");
+    unmetered.args([
+        "--scope",
+        "--unit=tinybox-native-fixture.scope",
+        "--tmpfs",
+        "/run",
+        "--tmpfs",
+        "/sys",
+    ]);
+    assert!(CpuEventReport::prepare_in(&unmetered, &mut env, custom_runtime.path()).is_none());
+    assert!(env.is_empty());
+    Ok(())
+}
 use std::result::Result;
 use std::sync::Arc;
 use tinybox_core::{ExecRequest, Host};
@@ -235,6 +321,37 @@ fn unavailable_jail_provider_refuses_instead_of_selecting_another_backend()
         64,
     );
     assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::Unsupported));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn detected_owned_backend_runs_with_only_the_approved_environment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let host = JailLocalHost::new(
+        tinybox_jail::Jail::new(root.path(), "host-owned-appcontainer"),
+        1024,
+    )?;
+    assert!(format!("{host:?}").contains("appcontainer"));
+
+    let parent_path = std::env::var("PATH").ok();
+    let mut request = ExecRequest::new(["cmd.exe", "/C", "echo %TINYBOX_APPROVED_ENV%|%PATH%"]);
+    request.cwd = Some(root.path().to_owned());
+    request.env.insert(
+        "TINYBOX_APPROVED_ENV".to_owned(),
+        "approved-marker".to_owned(),
+    );
+    let output = host.run(&request).await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("approved-marker"));
+    if let Some(parent_path) = parent_path {
+        assert!(
+            !stdout.contains(&parent_path),
+            "parent PATH leaked into jailed process"
+        );
+    }
+    host.drain_checked().await?;
     Ok(())
 }
 

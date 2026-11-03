@@ -13,14 +13,154 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{oneshot, watch};
 
+#[cfg(target_os = "linux")]
+const CPU_EVENT_FILE_ENV: &str = "TINYBOX_INTERNAL_CPU_EVENT_FILE";
+#[cfg(target_os = "linux")]
+static CPU_EVENT_FILE_SEQUENCE: AtomicUsize = AtomicUsize::new(1);
+
+#[cfg(target_os = "linux")]
+struct CpuEventReport(std::path::PathBuf);
+
+#[cfg(target_os = "linux")]
+impl CpuEventReport {
+    fn prepare(
+        command: &std::process::Command,
+        env: &mut BTreeMap<String, String>,
+    ) -> Option<Self> {
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+        Self::prepare_in(command, env, std::path::Path::new(&runtime_dir))
+    }
+
+    fn prepare_in(
+        command: &std::process::Command,
+        env: &mut BTreeMap<String, String>,
+        runtime_dir: &std::path::Path,
+    ) -> Option<Self> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let runtime_dir = runtime_dir.canonicalize().ok()?;
+        if !runtime_dir.starts_with("/run/") {
+            return None;
+        }
+        let args: Vec<_> = command.get_args().filter_map(|arg| arg.to_str()).collect();
+        let has_scope = args.iter().any(|arg| {
+            arg.strip_prefix("--unit=")
+                .and_then(|unit| std::path::Path::new(unit).extension())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("scope"))
+                && arg.starts_with("--unit=tinybox-native-")
+        });
+        let has_cpu_limit = args
+            .iter()
+            .any(|arg| arg.starts_with("--property=CPUQuota="))
+            || args
+                .windows(2)
+                .any(|pair| pair[0] == "--property" && pair[1].starts_with("CPUQuota="));
+        let masks_runtime = args.windows(2).any(|pair| pair == ["--tmpfs", "/run"]);
+        let masks_cgroup = args.windows(2).any(|pair| pair == ["--tmpfs", "/sys"]);
+        if !has_scope || !has_cpu_limit || !masks_runtime || !masks_cgroup {
+            return None;
+        }
+        let metadata = std::fs::metadata(&runtime_dir).ok()?;
+        let uid = std::fs::metadata("/proc/self").ok()?.uid();
+        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+            return None;
+        }
+        let sequence = CPU_EVENT_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = runtime_dir.join(format!(
+            "tinybox-cpu-event-{}-{sequence}",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .ok()?;
+        if std::io::Write::write_all(&mut file, b"nr_throttled 0\n").is_err() {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+        env.insert(
+            CPU_EVENT_FILE_ENV.into(),
+            path.to_string_lossy().into_owned(),
+        );
+        Some(Self(path))
+    }
+
+    fn throttling_observed(&self) -> bool {
+        std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|contents| parse_cpu_throttled_counter(&contents))
+            .is_some_and(|count| count > 0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for CpuEventReport {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cpu_throttled_counter(stats: &str) -> Option<u64> {
+    let mut counter = None;
+    for line in stats.lines() {
+        if let Some(value) = line.strip_prefix("nr_throttled ") {
+            if counter.is_some() {
+                return None;
+            }
+            counter = Some(value.parse().ok()?);
+        }
+    }
+    counter
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_cpu_event_report(
+    command: &std::process::Command,
+    env: &mut BTreeMap<String, String>,
+    observer_attached: bool,
+) -> Option<CpuEventReport> {
+    observer_attached
+        .then(|| CpuEventReport::prepare(command, env))
+        .flatten()
+}
+
+#[cfg(target_os = "linux")]
+fn report_cpu_termination(
+    report: Option<&CpuEventReport>,
+    observer: Option<&Arc<dyn ExecutionObserver>>,
+) {
+    if report.is_some_and(CpuEventReport::throttling_observed)
+        && let Some(observer) = observer
+    {
+        observer.termination_cause(tinybox_core::TerminationCause::CpuQuota);
+    }
+}
+
+fn configure_jail_command(command: &mut std::process::Command, env: &BTreeMap<String, String>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command.env_clear().envs(env);
+}
+
 #[cfg(unix)]
 struct AsyncPipe(tokio::io::unix::AsyncFd<std::fs::File>);
 
-// Native jail supervision is Unix-only today; retain a compile-time adapter for
-// other targets so this module stays buildable if that capability is added.
+// The Windows backend also exposes owned captured pipes; retain the portable
+// Tokio file adapter for that path.
 #[cfg(not(unix))]
 type AsyncPipe = tokio::fs::File;
 
+// Keep one fallible call shape across platforms; only Unix pipe registration can fail.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn async_pipe(file: std::fs::File) -> Result<AsyncPipe> {
     #[cfg(unix)]
     {
@@ -196,19 +336,19 @@ impl std::fmt::Debug for JailLocalHost {
 impl JailLocalHost {
     /// Use the detected backend without weakening unavailable confinement.
     /// # Errors
-    /// Rejects unavailable backends and platforms without supervised standard children.
+    /// Rejects unavailable backends without owned-child supervision.
     pub fn new(jail: Jail, limit: usize) -> std::io::Result<Self> {
-        Self::with_backend(jail, tinybox_jail::default_backend(), limit)
+        Self::with_backend(jail, tinybox_jail::default_owned_backend(), limit)
     }
     /// Use an explicitly selected provider; hosts apply policy to its enforcement facts.
     /// # Errors
-    /// Rejects unavailable providers and unsupported native ownership platforms.
+    /// Rejects providers that cannot return an owned child.
     pub fn with_backend(
         jail: Jail,
         backend: Arc<dyn JailBackend>,
         limit: usize,
     ) -> std::io::Result<Self> {
-        if !cfg!(unix) || !backend.is_available() {
+        if !backend.is_owned_available() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "native jail supervision is unavailable",
@@ -320,26 +460,46 @@ impl JailLocalHost {
         let mut command = crate::LocalHost::command(request)?.into_std();
         // The host explicitly supplies the approved environment for jailed code.
         command.env_clear().envs(&request.env);
-        self.collect_command(command, request.stdin.clone(), observer)
-            .await
+        self.collect_command(
+            command,
+            request.stdin.clone(),
+            observer,
+            request.env.clone(),
+        )
+        .await
     }
 
-    /// Collect a prepared shell inside this host's explicit native jail.
-    /// The caller clears and supplies the approved environment before invocation.
+    /// Collect a prepared shell inside this host's explicit native jail with an
+    /// empty environment; [`Self::run_command_observed_with_env`] passes one.
     /// # Errors
     /// Reports unavailable spawn, output bounds and retained kill/reap failures.
     pub async fn run_command_observed(
         &self,
+        command: std::process::Command,
+        payload: Option<Vec<u8>>,
+        observer: Arc<dyn ExecutionObserver>,
+    ) -> Result<ExecOutput> {
+        self.run_command_observed_with_env(command, payload, observer, BTreeMap::new())
+            .await
+    }
+
+    /// Collect a prepared command with the exact environment approved by its caller.
+    /// # Errors
+    /// Reports unavailable spawn, output bounds and retained kill/reap failures.
+    pub async fn run_command_observed_with_env(
+        &self,
         mut command: std::process::Command,
         payload: Option<Vec<u8>>,
         observer: Arc<dyn ExecutionObserver>,
+        env: BTreeMap<String, String>,
     ) -> Result<ExecOutput> {
         command.stdin(if payload.is_some() {
             std::process::Stdio::piped()
         } else {
             std::process::Stdio::null()
         });
-        self.collect_command(command, payload, Some(observer)).await
+        self.collect_command(command, payload, Some(observer), env)
+            .await
     }
 
     async fn collect_command(
@@ -347,15 +507,13 @@ impl JailLocalHost {
         mut command: std::process::Command,
         payload: Option<Vec<u8>>,
         observer: Option<Arc<dyn ExecutionObserver>>,
+        mut env: BTreeMap<String, String>,
     ) -> Result<ExecOutput> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        #[cfg(target_os = "linux")]
+        let cpu_event_report = prepare_cpu_event_report(&command, &mut env, observer.is_some());
+        #[cfg(target_os = "linux")]
+        let event_observer = observer.clone();
+        configure_jail_command(&mut command, &env);
         let jail = self.jail.clone();
         let backend = self.backend.clone();
         let state = self.state.clone();
@@ -370,8 +528,14 @@ impl JailLocalHost {
             if !matches!(cancelled.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
                 return Err(failure("start native jail", "execution cancelled".into()));
             }
+            let approved_env = env.clone();
             let child = tokio::task::spawn_blocking(move || {
-                tinybox_jail::spawn_owned_captured_with(backend.as_ref(), &jail, command)
+                tinybox_jail::spawn_owned_captured_with_backend_and_env(
+                    backend.as_ref(),
+                    &jail,
+                    command,
+                    &approved_env,
+                )
             })
             .await
             .map_err(|error| failure("start native jail", error.to_string()))?
@@ -433,6 +597,9 @@ impl JailLocalHost {
             .await
             .map_err(|error| failure("collect native jail", error.to_string()));
         drop(cancel);
+        // A failed collection (output limit, cancellation) may still have been throttled.
+        #[cfg(target_os = "linux")]
+        report_cpu_termination(cpu_event_report.as_ref(), event_observer.as_ref());
         result?
     }
 }
@@ -689,3 +856,7 @@ where
 #[cfg(all(test, unix))]
 #[path = "jailed_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "jailed_windows_tests.rs"]
+mod windows_tests;

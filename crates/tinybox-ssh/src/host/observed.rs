@@ -411,6 +411,10 @@ impl ExecutionObserver for Bridge {
         Ok(())
     }
 
+    fn termination_cause(&self, cause: tinybox_core::TerminationCause) {
+        self.observer.termination_cause(cause);
+    }
+
     async fn cancelled(&self) {
         let stopped = self.stop.notified();
         tokio::pin!(stopped);
