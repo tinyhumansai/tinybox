@@ -487,6 +487,10 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
             .any(|part| part.contains("TINYBOX_INTERNAL_CPU_EVENT_FILE"))
     );
     assert!(argv.iter().any(|part| part.contains("cpu.stat")));
+    assert!(
+        !argv.iter().any(|part| part.contains("cat \"")),
+        "the CPU report reads its stats with a shell builtin, not PATH"
+    );
     assert!(has(&argv, "--ro-bind"));
     assert!(has(&argv, grant.to_str().ok_or("grant path is not UTF-8")?));
     assert!(has(&argv, "BASH_ENV"));
@@ -907,7 +911,7 @@ fn resource_enforcement_selection_uses_cgroups_then_setrlimit_fallback() {
     }
     assert_eq!(
         fallback.enforcement(Constraint::Memory),
-        Enforcement::Enforced
+        Enforcement::BestEffort
     );
     for constraint in [Constraint::Cpu, Constraint::Pids] {
         assert_eq!(fallback.enforcement(constraint), Enforcement::Unsupported);
@@ -923,7 +927,7 @@ fn resource_enforcement_selection_uses_cgroups_then_setrlimit_fallback() {
 }
 
 #[tokio::test]
-async fn setrlimit_fallback_refuses_cpu_and_pids_hard_requirements() -> Result<()> {
+async fn setrlimit_fallback_refuses_resource_hard_requirements() -> Result<()> {
     use tinybox_core::Constraint;
 
     let sandbox = NamespaceSandbox::new(
@@ -932,13 +936,34 @@ async fn setrlimit_fallback_refuses_cpu_and_pids_hard_requirements() -> Result<(
     )
     .with_setrlimit_fallback();
 
-    let memory = spec()?.with_hard_requirements([Constraint::Memory]);
-    sandbox.require_spec(&memory)?;
-    for constraint in [Constraint::Cpu, Constraint::Pids] {
+    // A per-process address-space ceiling is not a cap on the whole box.
+    for constraint in [Constraint::Memory, Constraint::Cpu, Constraint::Pids] {
         let requested = spec()?.with_hard_requirements([constraint]);
         assert!(matches!(
             sandbox.create(&requested).await,
             Err(Error::ConstraintNotEnforced { constraint: unsupported, .. }) if unsupported == constraint
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn setrlimit_fallback_creates_a_box_only_with_a_trusted_prlimit() -> Result<()> {
+    let sandbox = NamespaceSandbox::new(
+        Arc::new(RecordingHost::default()),
+        Arc::new(MemoryStore::new()),
+    )
+    .with_setrlimit_fallback();
+    let created = sandbox.create(&spec()?).await;
+    if args::trusted_prlimit_program().is_ok() {
+        assert_eq!(created?.state, BoxState::Ready);
+    } else {
+        assert!(matches!(
+            created,
+            Err(Error::Unsupported {
+                capability: tinybox_core::Capability::ResourceLimits,
+                ..
+            })
         ));
     }
     Ok(())

@@ -57,11 +57,11 @@ pub(super) const fn resource_constraint_support(
             .with(Constraint::Cpu, Enforcement::Enforced)
             .with(Constraint::Memory, Enforcement::Enforced)
             .with(Constraint::Pids, Enforcement::Enforced),
-        // RLIMIT_AS gives each process in the box a hard address-space ceiling.
-        // It cannot cap aggregate memory, CPU rate or process count, so those
-        // constraints must stay unsupported in the preflight contract.
+        // RLIMIT_AS gives each process in the box a hard address-space ceiling,
+        // but the box's processes together can exceed it, so memory is only
+        // best effort. CPU rate and process count have no equivalent at all.
         ResourceEnforcement::Setrlimit => {
-            ConstraintSupport::NONE.with(Constraint::Memory, Enforcement::Enforced)
+            ConstraintSupport::NONE.with(Constraint::Memory, Enforcement::BestEffort)
         }
         ResourceEnforcement::Unavailable => ConstraintSupport::NONE,
     }
@@ -392,7 +392,7 @@ if [ -n "$report" ]; then
     stats=
     case $control_group in /*) stats=/sys/fs/cgroup${control_group}/cpu.stat;; esac
     if [ -r "$stats" ]; then
-        cat "$stats" > "$report" 2>/dev/null || :
+        { stat=$(<"$stats") && printf '%s\n' "$stat" > "$report"; } 2>/dev/null || :
     fi
 fi
 exit "$status"

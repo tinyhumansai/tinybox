@@ -83,8 +83,9 @@ impl NamespaceSandbox {
     }
 
     /// Use `RLIMIT_AS` for a per-process memory ceiling when cgroup v2 is not
-    /// selected. CPU quota and per-box PID limits remain unsupported in this
-    /// fallback because `setrlimit` has no equivalent aggregate controls.
+    /// selected. Memory is best effort, since processes together can exceed
+    /// it; CPU quota and per-box PID limits remain unsupported because
+    /// `setrlimit` has no equivalent aggregate controls.
     #[must_use]
     pub fn with_setrlimit_fallback(mut self) -> Self {
         self.setrlimit_fallback = true;
@@ -143,6 +144,12 @@ impl Sandbox for NamespaceSandbox {
         // source now means an unusable spec fails at `create` rather than
         // surprising the caller at the first `exec`.
         args::workspace_dir(spec)?;
+        if !self.limits && self.setrlimit_fallback {
+            args::trusted_prlimit_program().map_err(|_| Error::Unsupported {
+                sandbox: NAME.to_owned(),
+                capability: Capability::ResourceLimits,
+            })?;
+        }
 
         tinybox_core::insert_new(self.store.as_ref(), BoxState::Ready, spec, self.clock.now())
     }
