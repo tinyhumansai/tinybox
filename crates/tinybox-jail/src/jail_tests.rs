@@ -196,7 +196,10 @@ fn owned_spawn_with_an_approved_environment_drops_everything_else() -> std::io::
     let jail = Jail::new(root.path(), "owned-approved-env");
     let mut command = std::process::Command::new("/bin/sh");
     command
-        .args(["-c", r#"printf '%s|%s' "${APPROVED-}" "${UNAPPROVED-unset}""#])
+        .args([
+            "-c",
+            r#"printf '%s|%s' "${APPROVED-}" "${UNAPPROVED-unset}""#,
+        ])
         .env("UNAPPROVED", "leaked");
     let approved = std::collections::BTreeMap::from([("APPROVED".to_owned(), "yes".to_owned())]);
     let mut child = crate::spawn_owned_captured_with_backend_and_env(

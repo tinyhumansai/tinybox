@@ -142,14 +142,7 @@ pub(super) fn exec_with_prlimit_resolver(
     supports_expand_environment: bool,
     resolve_prlimit: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
 ) -> Result<Vec<String>> {
-    let prlimit = if !limits && setrlimit_fallback {
-        Some(resolve_prlimit().map_err(|_| Error::Unsupported {
-            sandbox: NAME.to_owned(),
-            capability: Capability::ResourceLimits,
-        })?)
-    } else {
-        None
-    };
+    let prlimit = fallback_prlimit(limits, setrlimit_fallback, resolve_prlimit)?;
     exec_with_prlimit_program(
         spec,
         request,
@@ -157,6 +150,26 @@ pub(super) fn exec_with_prlimit_resolver(
         prlimit.as_deref(),
         supports_expand_environment,
     )
+}
+
+/// The trusted `prlimit` the setrlimit fallback launches through, when that
+/// fallback is in use.
+///
+/// # Errors
+/// Returns [`Error::Unsupported`] for resource limits when no trusted
+/// `prlimit` exists.
+pub(super) fn fallback_prlimit(
+    limits: bool,
+    setrlimit_fallback: bool,
+    resolve_prlimit: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>> {
+    if limits || !setrlimit_fallback {
+        return Ok(None);
+    }
+    resolve_prlimit().map(Some).map_err(|_| Error::Unsupported {
+        sandbox: NAME.to_owned(),
+        capability: Capability::ResourceLimits,
+    })
 }
 
 pub(super) fn exec_with_prlimit_program(

@@ -144,12 +144,11 @@ impl Sandbox for NamespaceSandbox {
         // source now means an unusable spec fails at `create` rather than
         // surprising the caller at the first `exec`.
         args::workspace_dir(spec)?;
-        if !self.limits && self.setrlimit_fallback {
-            args::trusted_prlimit_program().map_err(|_| Error::Unsupported {
-                sandbox: NAME.to_owned(),
-                capability: Capability::ResourceLimits,
-            })?;
-        }
+        args::fallback_prlimit(
+            self.limits,
+            self.setrlimit_fallback,
+            args::trusted_prlimit_program,
+        )?;
 
         tinybox_core::insert_new(self.store.as_ref(), BoxState::Ready, spec, self.clock.now())
     }

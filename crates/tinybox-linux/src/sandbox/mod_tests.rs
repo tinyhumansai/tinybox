@@ -970,6 +970,26 @@ async fn setrlimit_fallback_creates_a_box_only_with_a_trusted_prlimit() -> Resul
 }
 
 #[test]
+fn create_and_exec_need_a_trusted_prlimit_only_under_the_fallback() -> Result<()> {
+    let missing = || Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert!(args::fallback_prlimit(true, true, missing)?.is_none());
+    assert!(args::fallback_prlimit(false, false, missing)?.is_none());
+    assert!(matches!(
+        args::fallback_prlimit(false, true, missing),
+        Err(Error::Unsupported {
+            capability: Capability::ResourceLimits,
+            ..
+        })
+    ));
+    let trusted = || Ok(Path::new("/trusted/prlimit").to_path_buf());
+    assert_eq!(
+        args::fallback_prlimit(false, true, trusted)?.as_deref(),
+        Some(Path::new("/trusted/prlimit"))
+    );
+    Ok(())
+}
+
+#[test]
 fn setrlimit_fallback_wraps_commands_with_address_space_limit() -> Result<()> {
     let spec = spec()?.with_resources(Resources {
         cpu_millis: 1_000,

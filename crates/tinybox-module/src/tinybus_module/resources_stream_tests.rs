@@ -108,7 +108,10 @@ fn a_timed_out_stream_keeps_its_cpu_event_and_exits_only_once_cleaned_up() {
     journal.termination_cause(tinybox_core::TerminationCause::CpuQuota);
     journal.finish_failed(ExecutionFailure::CleanupFailed);
     let stream = stream_with(journal.clone(), true);
-    assert_eq!(stream.terminal_events(None), vec![cpu.clone(), timeout.clone()]);
+    assert_eq!(
+        stream.terminal_events(None),
+        vec![cpu.clone(), timeout.clone()]
+    );
     journal.finish_failed(ExecutionFailure::TimedOut);
     assert_eq!(
         stream.terminal_events(None),
