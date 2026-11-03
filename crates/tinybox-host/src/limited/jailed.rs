@@ -597,10 +597,10 @@ impl JailLocalHost {
             .await
             .map_err(|error| failure("collect native jail", error.to_string()));
         drop(cancel);
-        let output = result??;
+        // A failed collection (output limit, cancellation) may still have been throttled.
         #[cfg(target_os = "linux")]
         report_cpu_termination(cpu_event_report.as_ref(), event_observer.as_ref());
-        Ok(output)
+        result?
     }
 }
 
