@@ -109,15 +109,25 @@ impl Jail {
         requirements: impl IntoIterator<Item = tinybox_core::Constraint>,
     ) -> Self {
         self.hard_requirements = requirements.into_iter().collect();
-        self
+        self.deny_required()
     }
 
     /// Copy resource defaults and hard constraints from a box specification.
-    /// Filesystem roots, grants, and network policy remain explicit Jail data.
+    /// Filesystem roots and grants remain explicit Jail data; a hard network
+    /// or subprocess requirement denies that access.
     #[must_use]
     pub fn with_box_spec(mut self, spec: &tinybox_core::BoxSpec) -> Self {
         self.resources = Some(spec.resources);
         self.hard_requirements.clone_from(&spec.hard_requirements);
+        self.deny_required()
+    }
+
+    /// A hard `Network` or `Subprocess` requirement is a denial, so the flags
+    /// backends launch from agree with what preflight checked.
+    fn deny_required(mut self) -> Self {
+        use tinybox_core::Constraint;
+        self.allow_net &= !self.hard_requirements.contains(&Constraint::Network);
+        self.allow_subprocess &= !self.hard_requirements.contains(&Constraint::Subprocess);
         self
     }
 
@@ -512,18 +522,19 @@ pub trait JailBackend: Send + Sync {
         }
     }
 
-    /// Spawn captured work with an explicit environment approved by the host.
-    /// Backends that launch through `std::process::Command` already receive
-    /// this map through `cmd`; native launchers must use it instead of
-    /// inheriting the parent environment.
+    /// Spawn captured work with exactly the environment approved by the host.
+    /// The default clears `cmd`'s environment and applies `env` before
+    /// delegating; native launchers must build the child environment from
+    /// `env` instead of inheriting the parent's.
     /// # Errors
     /// Returns a confinement or native startup error.
     fn spawn_owned_captured_with_env(
         &self,
         jail: &Jail,
-        cmd: Command,
-        _env: &std::collections::BTreeMap<String, String>,
+        mut cmd: Command,
+        env: &std::collections::BTreeMap<String, String>,
     ) -> std::io::Result<OwnedChild> {
+        cmd.env_clear().envs(env);
         self.spawn_owned_captured(jail, cmd)
     }
 }

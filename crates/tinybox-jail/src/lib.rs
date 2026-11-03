@@ -59,8 +59,9 @@ pub mod registry;
 // module is plain `std` (it shells out to `sandbox-exec`), so it compiles
 // everywhere and its profile renderer is unit-tested on every host; it is only
 // *selected* on macOS. The Windows AppContainer module (`windows.rs`) is
-// deliberately not compiled: it needs `unsafe` FFI the workspace forbids and
-// cannot yet return a waitable `std::process::Child`.
+// compiled on Windows only, under the single file-scoped `unsafe_code`
+// allowance; it serves the owned-child API, since it cannot return a waitable
+// `std::process::Child` for the legacy `spawn`.
 #[cfg(target_os = "linux")]
 pub mod bwrap;
 #[cfg(target_os = "linux")]
@@ -163,6 +164,7 @@ pub fn spawn_captured_with(
 /// The backend is responsible for retaining the process handle while callers
 /// consume the returned standard pipes. This is the extensible path for
 /// process owners that cannot be represented by `std::process::Child`.
+/// The child gets the environment `cmd` describes.
 /// # Errors
 /// Returns canonicalization, confinement, or native startup errors.
 pub fn spawn_owned_captured_with(
@@ -170,12 +172,7 @@ pub fn spawn_owned_captured_with(
     jail: &Jail,
     cmd: Command,
 ) -> std::io::Result<OwnedChild> {
-    spawn_owned_captured_with_backend_and_env(
-        backend,
-        jail,
-        cmd,
-        &std::collections::BTreeMap::new(),
-    )
+    backend.spawn_owned_captured(&checked_owned_jail(backend, jail)?, cmd)
 }
 
 /// Spawn captured work through an explicit backend and approved environment.
@@ -189,24 +186,25 @@ pub fn spawn_owned_captured_with_backend_and_env(
     cmd: Command,
     env: &std::collections::BTreeMap<String, String>,
 ) -> std::io::Result<OwnedChild> {
+    backend.spawn_owned_captured_with_env(&checked_owned_jail(backend, jail)?, cmd, env)
+}
+
+/// Canonicalize `jail` and run the hard preflight before an owned spawn.
+fn checked_owned_jail(backend: &dyn JailBackend, jail: &Jail) -> std::io::Result<Jail> {
     let mut jail = jail.clone();
     jail.canonicalize()?;
     require_resources(backend, &jail)?;
     jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
-    backend.spawn_owned_captured_with_env(&jail, cmd, env)
+    Ok(jail)
 }
 
 /// Spawn captured work with the detected backend that supports owned children.
+/// The child gets the environment `cmd` describes.
 ///
 /// # Errors
 /// Returns an error if no owned-child backend is available or jail setup fails.
 pub fn spawn_owned_captured(jail: &Jail, cmd: Command) -> std::io::Result<OwnedChild> {
-    spawn_owned_captured_with_backend_and_env(
-        default_owned_backend().as_ref(),
-        jail,
-        cmd,
-        &std::collections::BTreeMap::new(),
-    )
+    spawn_owned_captured_with(default_owned_backend().as_ref(), jail, cmd)
 }
 
 /// Spawn captured work with the detected owned-child backend and approved environment.

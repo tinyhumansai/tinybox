@@ -37,6 +37,25 @@ fn soft_resource_values_do_not_become_hard_constraints() {
 }
 
 #[test]
+fn hard_network_and_subprocess_requirements_deny_that_access() {
+    use tinybox_core::{Constraint, HostRef, Placement, SandboxRef, WorkspaceSource};
+
+    let jail =
+        Jail::new("/tmp", "x").with_hard_requirements([Constraint::Network, Constraint::Cpu]);
+    assert!(!jail.allow_net);
+    assert!(jail.allow_subprocess);
+    let placement = Placement::new(
+        HostRef::new("local").expect("valid host ref"),
+        SandboxRef::new("noop").expect("valid sandbox ref"),
+    );
+    let spec = tinybox_core::BoxSpec::new(placement, WorkspaceSource::LocalDir("/tmp".into()))
+        .with_hard_requirements([Constraint::Subprocess]);
+    let jail = Jail::new("/tmp", "x").with_box_spec(&spec);
+    assert!(jail.allow_net);
+    assert!(!jail.allow_subprocess);
+}
+
+#[test]
 fn deny_net_is_idempotent() {
     let j = Jail::new("/tmp", "x").deny_net().deny_net();
     assert!(!j.allow_net);
@@ -165,6 +184,33 @@ fn owned_captured_spawn_preserves_both_pipes_and_exit_status() -> std::io::Resul
     assert_eq!(stderr, "stderr-marker");
     assert_eq!(status.code(), Some(23));
     assert!(!status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_spawn_with_an_approved_environment_drops_everything_else() -> std::io::Result<()> {
+    use std::io::Read;
+
+    let root = tempfile::tempdir()?;
+    let jail = Jail::new(root.path(), "owned-approved-env");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .args(["-c", r#"printf '%s|%s' "${APPROVED-}" "${UNAPPROVED-unset}""#])
+        .env("UNAPPROVED", "leaked");
+    let approved = std::collections::BTreeMap::from([("APPROVED".to_owned(), "yes".to_owned())]);
+    let mut child = crate::spawn_owned_captured_with_backend_and_env(
+        &crate::NoopBackend,
+        &jail,
+        command,
+        &approved,
+    )?;
+    let mut stdout = String::new();
+    child
+        .stdout_mut()
+        .expect("captured stdout")
+        .read_to_string(&mut stdout)?;
+    assert_eq!(stdout, "yes|unset");
     Ok(())
 }
 
