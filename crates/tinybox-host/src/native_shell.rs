@@ -114,7 +114,8 @@ pub enum NativeShellError<E> {
     },
     /// The module reported a terminal failed state.
     Execution(ExecutionFailure),
-    /// An output batch did not advance its cursor despite containing chunks.
+    /// An output batch did not continue exactly at the cursor: a replayed or
+    /// skipped chunk, or a next sequence that disagrees with its chunks.
     InvalidOutputCursor,
     /// Cancellation failed, so native cleanup is not acknowledged.
     Cancellation(E),
@@ -167,9 +168,10 @@ where
             operation: "reserve resource",
             source,
         })?;
+    let mut shell = request.shell;
+    shell.timeout_ms = timeout_ms;
     let result = async {
-        let process =
-            start_native_shell(client, resource.clone(), request.create, request.shell).await?;
+        let process = start_native_shell(client, resource.clone(), request.create, shell).await?;
         collect_native_shell(
             client,
             process,
@@ -369,7 +371,13 @@ impl NativeShellCapture {
     where
         F: FnMut(&OutputChunk),
     {
-        if !batch.chunks.is_empty() && batch.next_sequence <= self.cursor {
+        // Chunks must continue exactly at the cursor, with no replay or gap.
+        let contiguous = batch
+            .chunks
+            .iter()
+            .zip(self.cursor..)
+            .all(|(chunk, sequence)| chunk.sequence == sequence);
+        if !contiguous || batch.next_sequence != self.cursor + batch.chunks.len() as u64 {
             return false;
         }
         for chunk in &batch.chunks {

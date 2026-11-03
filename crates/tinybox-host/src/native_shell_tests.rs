@@ -33,6 +33,7 @@ enum MockBehavior {
     InvalidCursorCancelFail,
     InvalidCursorReleaseFail,
     RunningStderr,
+    SkippedChunk,
 }
 
 impl NativeShellClient for MockClient {
@@ -72,6 +73,7 @@ impl NativeShellClient for MockClient {
         std::future::ready(()).await;
         self.calls.lock().map_err(|_| "poisoned")?.push("start");
         assert_eq!(request.process, ResourceId("process-1".into()));
+        assert!(request.timeout_ms > 0, "the module refuses a zero timeout");
         if matches!(self.behavior, MockBehavior::FailStart) {
             return Err("start failed");
         }
@@ -89,7 +91,12 @@ impl NativeShellClient for MockClient {
             .lock()
             .map_err(|_| "poisoned")?
             .contains(&"cancel");
-        if matches!(self.behavior, MockBehavior::TimedOut) && !cancelled {
+        // A cancellation test must reach `cancel`, so its read never wins the race.
+        if matches!(
+            self.behavior,
+            MockBehavior::TimedOut | MockBehavior::FailCancel
+        ) && !cancelled
+        {
             std::future::pending::<()>().await;
         }
         if matches!(self.behavior, MockBehavior::FailRead) {
@@ -130,7 +137,7 @@ impl NativeShellClient for MockClient {
         Ok(OutputBatch {
             chunks: if cursor == 0 {
                 vec![OutputChunk {
-                    sequence: 0,
+                    sequence: u64::from(matches!(self.behavior, MockBehavior::SkippedChunk)),
                     stream: if matches!(
                         self.behavior,
                         MockBehavior::RunningStderr
@@ -437,6 +444,13 @@ fn invalid_cursor_and_cancel_cleanup_errors_are_reported() {
         ));
     });
     futures_executor::block_on(async {
+        let client = mock(MockBehavior::SkippedChunk);
+        assert!(matches!(
+            run_native_shell(&client, request(), never_cancel(), ignore_chunk).await,
+            Err(NativeShellError::InvalidOutputCursor)
+        ));
+    });
+    futures_executor::block_on(async {
         let client = mock(MockBehavior::FailCancel);
         assert!(matches!(
             run_native_shell(&client, request(), cancel_now(), ignore_chunk).await,
@@ -474,27 +488,31 @@ fn invalid_cursor_and_cancel_cleanup_errors_are_reported() {
 
 #[test]
 fn timeout_cancels_and_returns_collected_output() -> Result<(), &'static str> {
-    futures_executor::block_on(async {
-        let client = mock(MockBehavior::TimedOut);
-        let mut req = request();
-        req.shell.timeout_ms = 1;
-        let outcome = run_native_shell(&client, req, never_cancel(), ignore_chunk)
-            .await
-            .map_err(|_| "run failed")?;
-        let NativeShellRunOutcome::Finished(output) = outcome else {
-            return Err("expected completion");
-        };
-        assert!(output.timed_out);
-        assert_eq!(output.exit_code, -1);
-        assert!(
-            client
-                .calls
-                .lock()
-                .map_err(|_| "poisoned")?
-                .contains(&"cancel")
-        );
-        Ok(())
-    })
+    // A zero timeout starts with the same one-millisecond floor it collects with.
+    for timeout_ms in [0, 1] {
+        futures_executor::block_on(async {
+            let client = mock(MockBehavior::TimedOut);
+            let mut req = request();
+            req.shell.timeout_ms = timeout_ms;
+            let outcome = run_native_shell(&client, req, never_cancel(), ignore_chunk)
+                .await
+                .map_err(|_| "run failed")?;
+            let NativeShellRunOutcome::Finished(output) = outcome else {
+                return Err("expected completion");
+            };
+            assert!(output.timed_out);
+            assert_eq!(output.exit_code, -1);
+            assert!(
+                client
+                    .calls
+                    .lock()
+                    .map_err(|_| "poisoned")?
+                    .contains(&"cancel")
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
