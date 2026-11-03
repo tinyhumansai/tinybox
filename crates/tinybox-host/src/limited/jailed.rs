@@ -469,8 +469,8 @@ impl JailLocalHost {
         .await
     }
 
-    /// Collect a prepared shell inside this host's explicit native jail.
-    /// The caller clears and supplies the approved environment before invocation.
+    /// Collect a prepared shell inside this host's explicit native jail with an
+    /// empty environment; [`Self::run_command_observed_with_env`] passes one.
     /// # Errors
     /// Reports unavailable spawn, output bounds and retained kill/reap failures.
     pub async fn run_command_observed(

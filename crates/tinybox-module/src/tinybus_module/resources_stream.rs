@@ -382,20 +382,21 @@ impl StreamExecution {
     ) -> Vec<tinybox_bus::SandboxEvent> {
         use tinybox_bus::{LimitKind, SandboxEvent};
 
-        if self.timed_out() {
-            return vec![
-                SandboxEvent::LimitHit {
-                    limit: LimitKind::Timeout,
-                },
-                SandboxEvent::Exited { status: None },
-            ];
-        }
-
         let mut events = Vec::new();
         if self.journal.cpu_quota_hit() {
             events.push(SandboxEvent::LimitHit {
                 limit: LimitKind::Cpu,
             });
+        }
+        if self.timed_out() {
+            events.push(SandboxEvent::LimitHit {
+                limit: LimitKind::Timeout,
+            });
+            // A timed-out process has ended only once its cleanup is acknowledged.
+            if self.journal.cleanup_acknowledged() {
+                events.push(SandboxEvent::Exited { status: None });
+            }
+            return events;
         }
         if let Some(status) = status {
             events.push(SandboxEvent::Exited {

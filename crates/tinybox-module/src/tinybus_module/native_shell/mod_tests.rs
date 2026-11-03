@@ -125,6 +125,11 @@ async fn native_shell_jail_adds_owned_scratch_and_refuses_unsupported_constraint
     let mut resolved = tinybox_core::ExecRequest::new(["unused"]);
     resolved.cwd = Some(state.path().to_path_buf());
     let mut request = request(state.path());
+    // The approved environment reaches the jailed shell.
+    request.shell.command = r#"test "$TINYBOX_APPROVED" = visible"#.into();
+    request
+        .extra_env
+        .insert("TINYBOX_APPROVED".into(), "visible".into());
     request.jail = Some(tinybox_bus::NativeJailConfig {
         read_only: vec![],
         read_write: vec![],

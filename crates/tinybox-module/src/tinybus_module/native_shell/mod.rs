@@ -158,8 +158,13 @@ impl ShellContext {
                     .await
             }
             ShellHost::Jailed(host) => {
-                host.run_command_observed(command, self.request.stdin.clone(), observer)
-                    .await
+                host.run_command_observed_with_env(
+                    command,
+                    self.request.stdin.clone(),
+                    observer,
+                    self.environment.clone(),
+                )
+                .await
             }
         }
     }

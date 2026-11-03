@@ -959,11 +959,15 @@ async fn start_exec_broadcasts_correlated_process_lifecycle_events() -> tinybus:
         resource: resource.clone(),
         process: process_id.clone(),
     };
+    #[cfg(windows)]
+    let argv = vec!["cmd".into(), "/C".into(), "exit 7".into()];
+    #[cfg(not(windows))]
+    let argv = vec!["/bin/sh".into(), "-c".into(), "exit 7".into()];
     let request = SpawnRequest {
         process: process_id.clone(),
         command: ExecRequest {
             resource: resource.clone(),
-            argv: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
+            argv,
             cwd: None,
             env: std::collections::BTreeMap::new(),
             stdin: None,
