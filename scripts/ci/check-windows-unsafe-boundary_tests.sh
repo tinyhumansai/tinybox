@@ -14,7 +14,7 @@ tree() {
   printf '[workspace.lints.rust]\nunsafe_code = "deny"\n' > "$dir/Cargo.toml"
   printf '//! Windows.\n#![allow(unsafe_code)]\n' > "$dir/crates/tinybox-jail/src/windows.rs"
   printf '//! Mentions `unsafe_code` in prose only.\n' > "$dir/crates/other/src/lib.rs"
-  printf '[package]\nname = "other"\n' > "$dir/crates/other/Cargo.toml"
+  printf '[package]\nname = "other"\n\n[lints]\nworkspace = true\n' > "$dir/crates/other/Cargo.toml"
   printf '%s' "$dir"
 }
 
@@ -47,6 +47,10 @@ expect fail multi-line-attribute "$dir"
 dir="$(tree manifest)"
 printf '[lints.rust]\nunsafe_code = "allow"\n' >> "$dir/crates/other/Cargo.toml"
 expect fail crate-manifest-override "$dir"
+
+dir="$(tree no-inheritance)"
+printf '[package]\nname = "other"\n' > "$dir/crates/other/Cargo.toml"
+expect fail crate-without-workspace-lints "$dir"
 
 dir="$(tree workspace-allow)"
 printf '[workspace.lints.rust]\nunsafe_code = "allow"\n' > "$dir/Cargo.toml"
