@@ -1489,7 +1489,11 @@ async fn run_native_shell_returns_finished_output_after_module_cleanup()
         return Err(format!("short shell should finish before returning: {result:?}").into());
     };
     assert_eq!(exit_code, 0, "timed_out={timed_out}, stdout={stdout:?}");
-    assert_eq!(stdout, b"finished\n");
+    // cmd ends `echo` lines with CRLF.
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).replace("\r\n", "\n"),
+        "finished\n"
+    );
     assert!(!timed_out);
     assert_eq!(
         std::fs::read_dir(state.path().join("artifacts/sandbox-scratch"))?.count(),
@@ -1575,7 +1579,12 @@ async fn run_native_shell_yields_an_owned_process_for_existing_output_operations
         .call(
             "RunNativeShell",
             (run_native_shell_request(
-                "sleep 0.2; echo yielded",
+                // The shell is cmd on Windows, where `;` does not separate commands.
+                if cfg!(windows) {
+                    "ping -n 2 127.0.0.1 >nul & echo yielded"
+                } else {
+                    "sleep 0.2; echo yielded"
+                },
                 state.path(),
                 Some(10),
             ),),
@@ -1609,7 +1618,10 @@ async fn run_native_shell_yields_an_owned_process_for_existing_output_operations
         batch.state,
         tinybox_bus::ExecutionState::Exited { exit_code: 0 }
     );
-    assert_eq!(output, b"yielded\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output).replace("\r\n", "\n"),
+        "yielded\n"
+    );
     proxy.call::<()>("ReleaseOutput", (process,)).await?;
     proxy.call::<()>("Close", (resource,)).await?;
     Ok(())
