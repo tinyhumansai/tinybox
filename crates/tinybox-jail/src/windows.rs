@@ -161,7 +161,8 @@ impl JailBackend for AppContainerBackend {
         jail: &Jail,
         cmd: Command,
     ) -> io::Result<super::jail::OwnedChild> {
-        self.spawn_owned_captured_with_env(jail, cmd, &BTreeMap::new())
+        let env = command_environment(&cmd)?;
+        self.spawn_owned_captured_with_env(jail, cmd, &env)
     }
 
     fn spawn_owned_captured_with_env(
@@ -186,6 +187,21 @@ impl JailBackend for AppContainerBackend {
     }
 }
 
+/// The variables `cmd` sets explicitly. An `AppContainer` child inherits
+/// nothing from the parent, so a removal has nothing to remove.
+fn command_environment(cmd: &Command) -> io::Result<BTreeMap<String, String>> {
+    cmd.get_envs()
+        .filter_map(|(key, value)| Some((key, value?)))
+        .map(|(key, value)| match (key.to_str(), value.to_str()) {
+            (Some(key), Some(value)) => Ok((key.to_owned(), value.to_owned())),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows environment entries must be Unicode",
+            )),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct JobObjectLimitPlan {
     process_memory_bytes: Option<usize>,
@@ -204,11 +220,19 @@ fn job_object_limit_plan(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let processor_count = u64::from(processor_count.max(1));
     let total_cpu_millis = processor_count * 1_000;
-    let cpu_rate = hard_requirements
-        .contains(&tinybox_core::Constraint::Cpu)
-        .then(|| {
-            ((u64::from(resources.cpu_millis) * 10_000) / total_cpu_millis).clamp(1, 10_000) as u32
-        });
+    let cpu_rate = if hard_requirements.contains(&tinybox_core::Constraint::Cpu) {
+        // Rounding up to the smallest rate would grant more than requested.
+        let rate = (u64::from(resources.cpu_millis) * 10_000) / total_cpu_millis;
+        if rate == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "CPU limit is below the smallest Windows job CPU rate",
+            ));
+        }
+        Some(rate.min(10_000) as u32)
+    } else {
+        None
+    };
     let process_memory_bytes = if hard_requirements.contains(&tinybox_core::Constraint::Memory) {
         Some(usize::try_from(resources.memory_bytes).map_err(|_| {
             io::Error::new(
@@ -803,7 +827,12 @@ fn to_wide(s: &str) -> Vec<u16> {
 
 fn sanitize_profile_name(label: &str) -> String {
     // AppContainer profile names must be ≤ 64 chars and use a restricted
-    // charset. Keep ASCII alnum + dot; map everything else to `_`.
+    // charset. Keep ASCII alnum + dot and map everything else to `_`; then a
+    // hash of the full label keeps labels that sanitize or truncate alike
+    // (`a-b` and `a_b`) on separate profiles, and so separate SIDs.
+    let hash = label.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
     let mut s: String = label
         .chars()
         .map(|c| {
@@ -814,8 +843,9 @@ fn sanitize_profile_name(label: &str) -> String {
             }
         })
         .collect();
-    s.truncate(60);
-    format!("openhuman.{s}")
+    // "openhuman." (10) + 37 + "." (1) + 16 hex digits = 64.
+    s.truncate(37);
+    format!("openhuman.{s}.{hash:016x}")
 }
 
 struct SidGuard(PSID);

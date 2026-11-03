@@ -40,16 +40,32 @@ fn sanitize_profile_name_keeps_alnum_and_dot() {
     assert!(s.starts_with("openhuman."));
     // hyphen mapped to underscore
     assert!(s.contains("agent.delegate_7"));
-    assert!(s.len() <= 70); // "openhuman." (10) + label (≤60)
+    assert!(s.len() <= 64);
 }
 
 #[test]
 fn sanitize_profile_name_truncates_long_labels() {
     let long: String = "a".repeat(200);
     let s = sanitize_profile_name(&long);
-    // Per the in-function comment: truncate to 60 then prefix.
-    assert!(s.len() <= 70);
+    assert_eq!(s.len(), 64);
     assert!(s.starts_with("openhuman."));
+    assert_ne!(s, sanitize_profile_name(&"a".repeat(201)));
+}
+
+#[test]
+fn labels_that_sanitize_alike_get_separate_profiles() {
+    assert_ne!(sanitize_profile_name("a-b"), sanitize_profile_name("a_b"));
+    assert_eq!(sanitize_profile_name("a-b"), sanitize_profile_name("a-b"));
+}
+
+#[test]
+fn a_command_environment_without_a_map_reaches_the_child_map() {
+    let mut command = Command::new("cmd");
+    command.env("TOKEN", "approved").env_remove("GONE");
+    assert_eq!(
+        command_environment(&command).expect("Unicode environment"),
+        BTreeMap::from([("TOKEN".to_owned(), "approved".to_owned())])
+    );
 }
 
 /// PR #4723 review — `AppContainerBackend::is_available()` must
@@ -129,6 +145,16 @@ fn job_object_limit_plan_sets_memory_process_cpu_and_kill_on_close() {
     assert_eq!(limits.active_processes, Some(17));
     assert_eq!(limits.cpu_rate, Some(3_750));
     assert!(limits.kill_on_close);
+}
+
+#[test]
+fn a_cpu_limit_below_the_smallest_job_rate_is_refused() {
+    let resources = tinybox_core::Resources {
+        cpu_millis: 1,
+        ..tinybox_core::Resources::DEFAULT
+    };
+    assert!(job_object_limit_plan(resources, 128, &[tinybox_core::Constraint::Cpu]).is_err());
+    assert!(job_object_limit_plan(resources, 1, &[tinybox_core::Constraint::Cpu]).is_ok());
 }
 
 #[test]
