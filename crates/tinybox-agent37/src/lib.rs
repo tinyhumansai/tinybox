@@ -7,8 +7,8 @@
 //!
 //! # It is an HTTP wrapper, not a `Host`-driven CLI backend
 //!
-//! Unlike [`tinybox-openshell`], which shells out to the `openshell` CLI
-//! through a [`Host`](tinybox_core) (ADR 0004), agent37 ships no CLI — it is a
+//! Unlike `tinybox-openshell`, which shells out to the `openshell` CLI
+//! through a [`Host`](tinybox_core::Host) (ADR 0004), agent37 ships no CLI — it is a
 //! native HTTP service usable by any standalone app. So this backend owns an
 //! HTTP client directly. That is a deliberate departure from ADR 0004 and is
 //! recorded in its own ADR (see this crate's `README.md`). The departure is
@@ -40,8 +40,6 @@
 //!   arbitrary limit exactly.
 //! - **Snapshots / forking:** not offered by agent37; declared unsupported
 //!   rather than emulated (tinybox rule 1).
-
-#![forbid(unsafe_code)]
 
 mod config;
 mod sandbox;

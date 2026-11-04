@@ -18,8 +18,9 @@
 //! - `DELETE {api}/v1/instances/{id}` — delete; 2xx or 404 = deleted.
 //!
 //! agent37 **mints the instance id** on create, so the backend records the box
-//! under that id (it is a valid tinybox [`BoxId`]) and addresses exec, inspect
-//! and delete with it directly — there is no client-derived name.
+//! under that id (it is a valid tinybox [`BoxId`](tinybox_core::BoxId)) and
+//! addresses exec, inspect and delete with it directly — there is no
+//! client-derived name.
 //!
 //! agent37 runs a sandbox from a **template name**, not a raw OCI image, and
 //! rejects inline image references with `400`. A custom image is registered as
@@ -57,7 +58,7 @@ pub const NAMESPACE_METADATA_KEY: &str = "tinybox.namespace";
 /// omitted field takes agent37's template default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstanceResources {
-    /// Whole vCPUs, 1..=[`MAX_VCPU`].
+    /// Whole vCPUs, 1 to 4 (agent37's ceiling).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<u32>,
     /// Memory in whole gibibytes.
@@ -172,7 +173,7 @@ fn unsupported_source(kind: &'static str) -> Error {
     }
 }
 
-/// Snap tinybox resource limits onto one of agent37's offered [`SHAPES`], or
+/// Snap tinybox resource limits onto one of agent37's offered `SHAPES`, or
 /// `None` when the spec sets neither CPU nor memory (so agent37 uses the
 /// template default).
 ///

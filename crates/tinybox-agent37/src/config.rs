@@ -100,13 +100,13 @@ impl Agent37Config {
         }
     }
 
-    /// Read the config from the environment: [`API_KEY_VAR`] (required) and the
-    /// optional [`API_BASE_VAR`] / [`SANDBOX_BASE_VAR`] overrides.
+    /// Read the config from the environment: `AGENT37_API_KEY` (required) and
+    /// the optional `AGENT37_API_BASE` / `AGENT37_SANDBOX_BASE` overrides.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Backend`] when [`API_KEY_VAR`] is unset or empty, so the
-    /// failure names agent37 rather than surfacing as a bare env error.
+    /// Returns [`Error::Backend`] when `AGENT37_API_KEY` is unset or empty, so
+    /// the failure names agent37 rather than surfacing as a bare env error.
     pub fn from_env() -> Result<Self> {
         let api_key = non_empty(API_KEY_VAR)?;
         let api_base = optional(API_BASE_VAR).unwrap_or_else(|| DEFAULT_API_BASE.to_owned());
