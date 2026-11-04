@@ -1,0 +1,40 @@
+[package]
+name = "tinybox-agent37"
+description = "A tinybox sandbox backed by the agent37 hosted HTTP sandbox API."
+documentation = "https://docs.rs/tinybox-agent37"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+# The `Sandbox` and `Store` traits this backend implements and the model types
+# (`BoxSpec`, `ExecRequest`, `ExecOutput`) it exchanges.
+tinybox-core.workspace = true
+# `Sandbox` is an async trait; its methods are declared with this macro.
+async-trait.workspace = true
+# agent37 speaks JSON over HTTP; request bodies and responses are (de)serialized
+# with these two.
+serde.workspace = true
+serde_json.workspace = true
+# base64-encode command stdin so arbitrary bytes survive JSON and the shell
+# (agent37's exec is a single `sh -c` string; its output comes back as plain text).
+base64.workspace = true
+# NOTE(ADR-0004 deviation): agent37 is HTTP-native with no CLI, so this backend
+# owns an HTTP client instead of driving a tool through `Host`. This is the one
+# crate in tinybox that links an HTTP stack; see this crate's README and the new
+# ADR it references. The client is confined behind the `Transport` seam so the
+# request builders and the `Sandbox` impl stay unit-testable without a network.
+reqwest.workspace = true
+
+[dev-dependencies]
+# The async runtime the `#[tokio::test]` tests run on.
+tokio.workspace = true
+
+[lints]
+workspace = true

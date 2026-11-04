@@ -40,6 +40,8 @@ tinybox-linux.workspace = true
 tinybox-microvm.workspace = true
 # OpenShell sandboxes are driven through the same host the module already owns.
 tinybox-openshell.workspace = true
+# agent37 sandboxes run on a hosted HTTP service, with no owned host.
+tinybox-agent37.workspace = true
 tinybus.workspace = true
 tinybus-module.workspace = true
 # Box records live on the host's storage ports, reached over the storage bus;
