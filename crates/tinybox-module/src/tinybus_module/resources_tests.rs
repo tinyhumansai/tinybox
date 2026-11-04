@@ -3230,3 +3230,181 @@ async fn uncertain_openshell_create_keeps_sandbox_cleanup_retryable() -> Result<
     );
     Ok(())
 }
+
+/// Live: an agent37 box runs a command through the **module** path
+/// (`reserve → create → exec → close`), the path a host such as OpenHuman
+/// drives over the bus — not `Agent37Sandbox::exec` called directly. This is
+/// the seam the crate-level smoke cannot cover: it crosses the module Exec
+/// guard against the real service. Gated on `AGENT37_API_KEY`; without it the
+/// test is a no-op, so CI stays offline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_agent37_exec_round_trips_through_the_module() -> Result<()> {
+    if std::env::var_os("AGENT37_API_KEY").is_none() {
+        eprintln!(
+            "skipping live_agent37_exec_round_trips_through_the_module: AGENT37_API_KEY unset"
+        );
+        return Ok(());
+    }
+    let resources = Resources::test_resources();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: id.clone(),
+            backend: "agent37".into(),
+            workspace: Workspace::Image("agent37-base".into()),
+            network: tinybox_bus::NetworkPolicy::Denied,
+            ..Default::default()
+        })
+        .await?;
+    let output = resources
+        .exec(ExecRequest {
+            resource: id.clone(),
+            argv: vec!["uname".into(), "-s".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            stdin: None,
+        })
+        .await;
+    // Close the real box before asserting, so a failed exec cannot leak an
+    // instance on the service.
+    let closed = resources.close(&id).await;
+    let output = output?;
+    closed?;
+    assert_eq!(
+        output.exit_code,
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.is_empty(),
+        "expected uname output from the agent37 box"
+    );
+    Ok(())
+}
+
+/// A stand-in agent37 sandbox: it reports the agent37 name and returns canned
+/// exec output, so the module Exec guard can be exercised offline (CI has no
+/// `AGENT37_API_KEY`). Only `name`, `capabilities` and `exec` are reached; the
+/// lifecycle methods are never called because the entry is inserted directly.
+#[derive(Debug)]
+struct FakeAgent37Sandbox;
+
+fn agent37_unused(operation: &'static str) -> tinybox_core::Error {
+    tinybox_core::Error::Backend {
+        sandbox: tinybox_agent37::NAME.to_owned(),
+        operation,
+        message: "unused by the exec-guard test".to_owned(),
+    }
+}
+
+#[async_trait::async_trait]
+impl tinybox_core::Sandbox for FakeAgent37Sandbox {
+    fn name(&self) -> &str {
+        tinybox_agent37::NAME
+    }
+
+    fn capabilities(&self) -> tinybox_core::SandboxCapabilities {
+        tinybox_agent37::Agent37Sandbox::declared_capabilities()
+    }
+
+    async fn create(
+        &self,
+        _spec: &tinybox_core::BoxSpec,
+    ) -> tinybox_core::Result<tinybox_core::BoxInfo> {
+        Err(agent37_unused("create"))
+    }
+
+    async fn exec(
+        &self,
+        _id: &tinybox_core::BoxId,
+        _request: &tinybox_core::ExecRequest,
+    ) -> tinybox_core::Result<tinybox_core::ExecOutput> {
+        Ok(tinybox_core::ExecOutput::new(
+            0,
+            b"agent37-offline\n".to_vec(),
+            Vec::new(),
+        ))
+    }
+
+    async fn snapshot(
+        &self,
+        _id: &tinybox_core::BoxId,
+    ) -> tinybox_core::Result<tinybox_core::SnapshotId> {
+        Err(agent37_unused("snapshot"))
+    }
+
+    async fn fork(
+        &self,
+        _snapshot: &tinybox_core::SnapshotId,
+        _spec: &tinybox_core::BoxSpec,
+    ) -> tinybox_core::Result<tinybox_core::BoxInfo> {
+        Err(agent37_unused("fork"))
+    }
+
+    async fn inspect(
+        &self,
+        _id: &tinybox_core::BoxId,
+    ) -> tinybox_core::Result<tinybox_core::BoxInfo> {
+        Err(agent37_unused("inspect"))
+    }
+
+    async fn destroy(&self, _id: &tinybox_core::BoxId) -> tinybox_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Offline regression for the module Exec guard: an agent37 resource carries a
+/// collector and no local sandbox (`make_sandbox` builds it that way), yet Exec
+/// must be admitted because agent37 runs the command over its own HTTP channel.
+/// Before the guard learned about agent37 this failed with
+/// `UNSUPPORTED_OPERATION: module Exec requires supervised local passthrough
+/// ownership`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent37_exec_is_admitted_through_the_module_guard() -> Result<()> {
+    let resources = Resources::test_resources();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    let request = CreateRequest {
+        resource: id.clone(),
+        backend: tinybox_agent37::NAME.into(),
+        workspace: Workspace::Image("agent37-base".into()),
+        network: tinybox_bus::NetworkPolicy::Denied,
+        ..Default::default()
+    };
+    // The exact shape `make_sandbox("agent37", ..)` produces: a collector is
+    // allocated, but there is no owned local passthrough sandbox.
+    let entry = Resource::new(
+        &request,
+        Arc::new(SshArgumentHost::default()),
+        SandboxSelection {
+            sandbox: Arc::new(FakeAgent37Sandbox),
+            docker_sandbox: None,
+            local_sandbox: None,
+        },
+        BoxId::new("agent37-box").map_err(|error| backend_error(&error))?,
+        // agent37 execution does not depend on the local platform, so the module
+        // marks it supported everywhere (`supports_execution`).
+        true,
+        Some(Arc::new(tinybox_host::LimitedLocalHost::new(100))),
+    );
+    resources
+        .state
+        .lock()
+        .await
+        .entries
+        .insert(id.clone(), Arc::new(tokio::sync::Mutex::new(Some(entry))));
+
+    let output = resources
+        .exec(ExecRequest {
+            resource: id.clone(),
+            argv: vec!["uname".into(), "-s".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            stdin: None,
+        })
+        .await?;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, b"agent37-offline\n");
+    resources.close(&id).await?;
+    Ok(())
+}

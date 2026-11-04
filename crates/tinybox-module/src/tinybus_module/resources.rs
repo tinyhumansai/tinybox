@@ -975,10 +975,16 @@ impl Resources {
                 "module Exec is not supported for this backend on this platform",
             ));
         }
+        // A collector is allocated for every resource, but Exec only needs the
+        // owned local passthrough for backends that run the command on this
+        // host. Docker, OpenShell and agent37 each carry their own exec channel
+        // (a container, the gateway, or agent37's HTTP service) and run through
+        // their own `Sandbox::exec`, so the collector stays idle for them.
         if entry.collector.is_some()
             && entry.local_sandbox.is_none()
             && entry.sandbox.name() != tinybox_docker::NAME
             && entry.sandbox.name() != tinybox_openshell::NAME
+            && entry.sandbox.name() != tinybox_agent37::NAME
         {
             return Err(failure(
                 tinybox_bus::UNSUPPORTED_OPERATION,
