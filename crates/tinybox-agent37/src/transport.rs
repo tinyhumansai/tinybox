@@ -173,3 +173,7 @@ fn status_error(operation: &'static str, status: StatusCode) -> Error {
         message: format!("agent37 returned HTTP {}", status.as_u16()),
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

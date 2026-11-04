@@ -100,37 +100,45 @@ impl Agent37Config {
         }
     }
 
-    /// Read the config from the environment: `AGENT37_API_KEY` (required) and
-    /// the optional `AGENT37_API_BASE` / `AGENT37_SANDBOX_BASE` overrides.
+    /// Read the config from the process environment: `AGENT37_API_KEY`
+    /// (required) and the optional `AGENT37_API_BASE` / `AGENT37_SANDBOX_BASE`
+    /// overrides.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Backend`] when `AGENT37_API_KEY` is unset or empty, so
     /// the failure names agent37 rather than surfacing as a bare env error.
     pub fn from_env() -> Result<Self> {
-        let api_key = non_empty(API_KEY_VAR)?;
-        let api_base = optional(API_BASE_VAR).unwrap_or_else(|| DEFAULT_API_BASE.to_owned());
+        Self::from_lookup(|key| env::var(key).ok())
+    }
+
+    /// Read the config from a `lookup` of variable names to values — the
+    /// process environment in production ([`Self::from_env`]), or a closure in
+    /// tests. The key is required; the two bases default to agent37's public
+    /// hosts when the lookup returns nothing (or only whitespace) for them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`] when `AGENT37_API_KEY` is unset or empty.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let Some(api_key) = present(&lookup, API_KEY_VAR) else {
+            return Err(Error::Backend {
+                sandbox: crate::NAME.to_owned(),
+                operation: "read configuration",
+                message: format!("environment variable {API_KEY_VAR} is unset or empty"),
+            });
+        };
+        let api_base =
+            present(&lookup, API_BASE_VAR).unwrap_or_else(|| DEFAULT_API_BASE.to_owned());
         let sandbox_base =
-            optional(SANDBOX_BASE_VAR).unwrap_or_else(|| DEFAULT_SANDBOX_BASE.to_owned());
+            present(&lookup, SANDBOX_BASE_VAR).unwrap_or_else(|| DEFAULT_SANDBOX_BASE.to_owned());
         Ok(Self::with_bases(api_base, sandbox_base, api_key))
     }
 }
 
-/// Read a required, non-empty environment variable.
-fn non_empty(var: &'static str) -> Result<String> {
-    match env::var(var) {
-        Ok(value) if !value.trim().is_empty() => Ok(value),
-        _ => Err(Error::Backend {
-            sandbox: crate::NAME.to_owned(),
-            operation: "read configuration",
-            message: format!("environment variable {var} is unset or empty"),
-        }),
-    }
-}
-
-/// Read an optional environment variable, treating empty as unset.
-fn optional(var: &str) -> Option<String> {
-    env::var(var).ok().filter(|value| !value.trim().is_empty())
+/// Look a variable up, treating an absent or whitespace-only value as unset.
+fn present(lookup: &impl Fn(&str) -> Option<String>, var: &str) -> Option<String> {
+    lookup(var).filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]

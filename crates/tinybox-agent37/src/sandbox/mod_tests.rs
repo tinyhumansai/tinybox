@@ -204,3 +204,65 @@ async fn destroy_deletes_the_instance_and_removes_the_record() -> Result<()> {
     assert!(store.get(&info.id).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn with_namespace_accepts_a_valid_namespace() -> Result<()> {
+    let transport = Arc::new(FakeTransport::new());
+    let backend = Agent37Sandbox::with_namespace(
+        transport.clone(),
+        Arc::new(MemoryStore::new()),
+        "acme-prod-1",
+    )?;
+    // The namespace-carrying sandbox still creates a box.
+    backend.create(&spec()?).await?;
+    assert_eq!(transport.calls(), ["create"]);
+    Ok(())
+}
+
+#[test]
+fn it_reports_its_name_capabilities_and_constraint_support() {
+    let (backend, _store) = sandbox(Arc::new(FakeTransport::new()));
+    assert_eq!(backend.name(), NAME);
+    // Capabilities come from the static declaration; kernel isolation, no
+    // snapshots.
+    assert_eq!(
+        backend.capabilities(),
+        Agent37Sandbox::declared_capabilities()
+    );
+    assert_eq!(
+        Agent37Sandbox::declared_capabilities(),
+        SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None)
+    );
+    // Exercise the constraint-support declaration (filesystem/network enforced,
+    // cpu/memory/disk best-effort).
+    let _support = backend.constraint_support();
+}
+
+#[tokio::test]
+async fn fork_is_unsupported() -> Result<()> {
+    let (backend, _store) = sandbox(Arc::new(FakeTransport::new()));
+    let snapshot = SnapshotId::new("snap-1")?;
+    assert!(matches!(
+        backend.fork(&snapshot, &spec()?).await,
+        Err(Error::Unsupported { .. })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exec_on_a_stopped_instance_is_an_invalid_state_error() -> Result<()> {
+    let mut fake = FakeTransport::new();
+    // The box records fine on create, but inspect then reports it stopped, so
+    // exec must refuse rather than send a command to a box that is down.
+    fake.inspect_status = Some("stopped".to_owned());
+    let transport = Arc::new(fake);
+    let (backend, _store) = sandbox(transport);
+    let info = backend.create(&spec()?).await?;
+    assert!(matches!(
+        backend
+            .exec(&info.id, &ExecRequest::new(["echo", "hi"]))
+            .await,
+        Err(Error::InvalidState { .. })
+    ));
+    Ok(())
+}
