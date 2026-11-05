@@ -715,6 +715,6 @@ async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Resul
             ..
         })
     ));
-    assert!(store.list()?.is_empty());
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }
