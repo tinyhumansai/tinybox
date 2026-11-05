@@ -33,6 +33,21 @@ const SETTLE_BACKOFF: [Duration; 7] = [
     Duration::from_secs(15),
 ];
 
+/// The process-wide lock serializing lookup-and-create for one retained owner
+/// key within a namespace.
+fn owner_gate(namespace: &str, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let mut gates = GATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    gates
+        .entry((namespace.to_owned(), key.to_owned()))
+        .or_default()
+        .clone()
+}
+
 /// A sandbox that runs each box as an agent37 instance.
 ///
 /// It holds an agent37 [`Transport`] (the HTTP client), a [`Store`] for box
@@ -208,6 +223,13 @@ impl Sandbox for Agent37Sandbox {
         // Refuse an unsupported spec before touching agent37, so a refusal
         // leaves no instance.
         let body = api::create_body(&self.namespace, spec)?;
+        // Lookup and create for one owner key must not interleave: two creates
+        // that both list before either creates would mint two instances for one
+        // owner. Sandboxes are built per resource, so the gate is process-wide.
+        let _gate = match &spec.retention {
+            Some(retention) => Some(owner_gate(&self.namespace, &retention.key).lock_owned().await),
+            None => None,
+        };
         if let Some(retention) = &spec.retention
             && let Some(info) = self.adopt(spec, retention).await?
         {
