@@ -277,14 +277,14 @@ fn it_reports_its_name_capabilities_and_constraint_support() {
     let (backend, _store) = sandbox(Arc::new(FakeTransport::new()));
     assert_eq!(backend.name(), NAME);
     // Capabilities come from the static declaration; kernel isolation, no
-    // snapshots.
+    // snapshots, retained boxes.
     assert_eq!(
         backend.capabilities(),
         Agent37Sandbox::declared_capabilities()
     );
     assert_eq!(
         Agent37Sandbox::declared_capabilities(),
-        SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None)
+        SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None).with_retention()
     );
     // Exercise the constraint-support declaration (filesystem/network enforced,
     // cpu/memory/disk best-effort).
