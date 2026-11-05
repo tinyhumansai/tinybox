@@ -5,6 +5,8 @@ use super::*;
 
 use std::collections::BTreeMap;
 
+use crate::api::KEY_METADATA_KEY;
+
 const NOW: u64 = 10_000_000;
 const DAY: u64 = 86_400;
 

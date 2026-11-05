@@ -8,7 +8,7 @@
 
 use tinybox_core::BoxState;
 
-use crate::api::{InstanceView, KEY_METADATA_KEY};
+use crate::api::InstanceView;
 
 /// The most instances one pass deletes, so a workspace with a long backlog
 /// never turns a single create into an unbounded burst of delete calls. The

@@ -42,6 +42,7 @@
 //!   rather than emulated (tinybox rule 1).
 
 mod config;
+mod retention;
 mod sandbox;
 
 pub mod api;
