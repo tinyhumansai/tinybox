@@ -32,6 +32,9 @@ struct FakeTransport {
     /// What `list` reports.
     listed: Vec<InstanceView>,
     list_fails: bool,
+    /// Make `list` report instances already created through this transport, as
+    /// the real service does, and yield mid-call so concurrent callers interleave.
+    stateful: bool,
     delete_fails: bool,
     /// Statuses `inspect` reports first, one per call, before falling back to
     /// `inspect_status`.
@@ -54,6 +57,7 @@ impl FakeTransport {
             },
             listed: Vec::new(),
             list_fails: false,
+            stateful: false,
             delete_fails: false,
             inspect_script: Mutex::new(VecDeque::new()),
             created_bodies: Mutex::new(Vec::new()),
@@ -93,6 +97,9 @@ impl FakeTransport {
 impl Transport for FakeTransport {
     async fn create(&self, body: &CreateBody) -> Result<InstanceView> {
         self.record("create".to_owned());
+        if self.stateful {
+            tokio::task::yield_now().await;
+        }
         if let Ok(mut bodies) = self.created_bodies.lock() {
             bodies.push(body.clone());
         }
@@ -107,6 +114,22 @@ impl Transport for FakeTransport {
                 operation: "list the instances",
                 message: "agent37 returned HTTP 500".to_owned(),
             });
+        }
+        if self.stateful {
+            let seen = self.created_bodies();
+            tokio::task::yield_now().await;
+            let mut listed = self.listed.clone();
+            for (n, body) in seen.iter().enumerate() {
+                let key = body.metadata.get(api::KEY_METADATA_KEY).cloned();
+                listed.push(kept(
+                    &format!("{}{n}", self.created_id),
+                    "running",
+                    key.as_deref().unwrap_or_default(),
+                    1,
+                    None,
+                ));
+            }
+            return Ok(listed);
         }
         Ok(self.listed.clone())
     }
@@ -712,5 +735,21 @@ async fn exec_on_a_sleeping_instance_runs_at_once_because_exec_wakes_it() -> Res
     let started = tokio::time::Instant::now();
     backend.exec(&info.id, &ExecRequest::new(["true"])).await?;
     assert_eq!(started.elapsed(), Duration::ZERO);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_retained_creates_for_one_owner_make_one_instance() -> Result<()> {
+    let mut fake = FakeTransport::new();
+    fake.stateful = true;
+    let transport = Arc::new(fake);
+    // Each resource builds its own sandbox, so the two share only the service.
+    let (first, _) = sandbox(transport.clone());
+    let (second, _) = sandbox(transport.clone());
+    let spec = retained("user-race")?;
+    let (a, b) = tokio::join!(first.create(&spec), second.create(&spec));
+    let (a, b) = (a?, b?);
+    assert_eq!(transport.created_bodies().len(), 1);
+    assert_eq!(a.id, b.id);
     Ok(())
 }

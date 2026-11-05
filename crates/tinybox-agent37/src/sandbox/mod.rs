@@ -227,7 +227,11 @@ impl Sandbox for Agent37Sandbox {
         // that both list before either creates would mint two instances for one
         // owner. Sandboxes are built per resource, so the gate is process-wide.
         let _gate = match &spec.retention {
-            Some(retention) => Some(owner_gate(&self.namespace, &retention.key).lock_owned().await),
+            Some(retention) => Some(
+                owner_gate(&self.namespace, &retention.key)
+                    .lock_owned()
+                    .await,
+            ),
             None => None,
         };
         if let Some(retention) = &spec.retention
