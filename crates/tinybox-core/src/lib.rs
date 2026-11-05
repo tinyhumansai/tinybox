@@ -90,7 +90,7 @@ pub use runtime::{
 };
 pub use spec::{
     BoxSpec, EgressAllowlist, Lifecycle, NetworkPolicy, Placement, PortMapping, Resources,
-    WorkspaceSource,
+    Retention, WorkspaceSource,
 };
 pub use store::{MemoryStore, Store, insert_new};
 pub use template::{MemoryTemplates, Templates};

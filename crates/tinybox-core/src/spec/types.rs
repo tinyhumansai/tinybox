@@ -184,6 +184,63 @@ impl Default for Lifecycle {
     }
 }
 
+/// How long a box is kept for its owner, so one owner keeps one box across
+/// uses.
+///
+/// Retention is not a lifetime: a retained box sleeps when idle and wakes on
+/// the next command, and only [`Retention::delete_after_secs`] of sleeping ends
+/// it. A backend that cannot honour it refuses the spec with
+/// [`Error::Unsupported`] naming [`Capability::Retention`]; it never runs the
+/// box as a disposable one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retention {
+    /// An opaque, stable identifier the host chooses for the box's owner.
+    ///
+    /// A later create with the same key finds the same box again, so a host
+    /// must keep it unguessable-by-others and stable per owner. 1 to
+    /// [`Retention::MAX_KEY_LEN`] characters of `[A-Za-z0-9_-]`.
+    pub key: String,
+    /// Seconds without a command before the box falls asleep. A backend clamps
+    /// this to the range its service allows.
+    pub idle_sleep_secs: u32,
+    /// Seconds a box may sleep before it is deleted. Must be greater than zero.
+    pub delete_after_secs: u64,
+}
+
+impl Retention {
+    /// The longest accepted [`Retention::key`], in characters.
+    pub const MAX_KEY_LEN: usize = 128;
+
+    /// Check the key and the deletion delay.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidIdentifier`] when the key is empty, over-long, or has
+    ///   a character outside `[A-Za-z0-9_-]`.
+    /// - [`Error::InvalidRetention`] when `delete_after_secs` is zero, which
+    ///   would read as "delete as soon as it sleeps".
+    pub fn validate(&self) -> Result<()> {
+        let key_ok = !self.key.is_empty()
+            && self.key.len() <= Self::MAX_KEY_LEN
+            && self
+                .key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !key_ok {
+            return Err(Error::InvalidIdentifier {
+                kind: "retention key",
+                value: self.key.clone(),
+            });
+        }
+        if self.delete_after_secs == 0 {
+            return Err(Error::InvalidRetention {
+                reason: "delete_after_secs must be greater than zero",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// One published port: a guest port made reachable from the host.
 ///
 /// Ports live on the spec rather than behind a handle because that is when they

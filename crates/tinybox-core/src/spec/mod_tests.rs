@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::{BoxSpec, Lifecycle, NetworkPolicy, Placement, Resources, WorkspaceSource};
+use super::{BoxSpec, Lifecycle, NetworkPolicy, Placement, Resources, Retention, WorkspaceSource};
 use crate::error::{Error, Result};
 use crate::identity::{HostRef, SandboxRef, SnapshotId};
 
@@ -334,4 +334,95 @@ fn refuse_allowlist_is_a_typed_network_refusal() {
         })
     ));
     assert!(NetworkPolicy::Egress.refuse_allowlist("docker").is_ok());
+}
+
+fn retention(key: &str) -> Retention {
+    Retention {
+        key: key.to_owned(),
+        idle_sleep_secs: 900,
+        delete_after_secs: 86_400,
+    }
+}
+
+#[test]
+fn a_new_spec_has_no_retention() -> Result<()> {
+    assert_eq!(spec()?.retention, None);
+    Ok(())
+}
+
+#[test]
+fn a_spec_with_retention_round_trips_through_json() -> Result<()> {
+    let spec = spec()?.with_retention(retention("user-42"));
+    let json = serde_json::to_string(&spec).map_err(|_| Error::UnsupportedGitIncludePath)?;
+    let back: BoxSpec =
+        serde_json::from_str(&json).map_err(|_| Error::UnsupportedGitIncludePath)?;
+    assert_eq!(back.retention, Some(retention("user-42")));
+    Ok(())
+}
+
+#[test]
+fn a_stored_spec_without_a_retention_field_still_loads() -> Result<()> {
+    let mut value = serde_json::to_value(spec()?).map_err(|_| Error::UnsupportedGitIncludePath)?;
+    value
+        .as_object_mut()
+        .ok_or(Error::UnsupportedGitIncludePath)?
+        .remove("retention");
+    let back: BoxSpec =
+        serde_json::from_value(value).map_err(|_| Error::UnsupportedGitIncludePath)?;
+    assert_eq!(back.retention, None);
+    Ok(())
+}
+
+#[test]
+fn retention_accepts_letters_digits_underscore_and_hyphen() -> Result<()> {
+    let key = "Ab0_-".repeat(25);
+    assert_eq!(key.len(), 125);
+    spec()?.with_retention(retention(&key)).validate()?;
+    spec()?
+        .with_retention(retention(&"k".repeat(128)))
+        .validate()
+}
+
+#[test]
+fn retention_rejects_an_empty_over_long_or_unsafe_key() -> Result<()> {
+    for key in [
+        "",
+        &"k".repeat(129),
+        "has space",
+        "dot.ted",
+        "slash/ed",
+        "uni\u{e9}",
+    ] {
+        let result = spec()?.with_retention(retention(key)).validate();
+        assert!(
+            matches!(result, Err(Error::InvalidIdentifier { .. })),
+            "{key:?} must be refused"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn retention_rejects_a_zero_delete_after() -> Result<()> {
+    let mut zero = retention("user-42");
+    zero.delete_after_secs = 0;
+    let result = spec()?.with_retention(zero).validate();
+    assert!(matches!(result, Err(Error::InvalidRetention { .. })));
+    Ok(())
+}
+
+#[test]
+fn refuse_retention_names_the_sandbox_and_the_capability() -> Result<()> {
+    assert!(spec()?.refuse_retention("docker").is_ok());
+    let refused = spec()?
+        .with_retention(retention("user-42"))
+        .refuse_retention("docker");
+    assert!(matches!(
+        refused,
+        Err(Error::Unsupported {
+            capability: crate::Capability::Retention,
+            ref sandbox,
+        }) if sandbox == "docker"
+    ));
+    Ok(())
 }
