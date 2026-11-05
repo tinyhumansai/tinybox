@@ -124,7 +124,7 @@ fn only_sleeping_boxes_slept_longer_than_the_delay_expire() {
 #[test]
 fn an_instance_without_the_key_entry_is_never_expired() {
     let listed = [view("foreign", "sleeping", None, 1, Some(1))];
-    assert!(plan_for(&listed).expired.is_empty());
+    assert_eq!(plan_for(&listed).expired.len(), 0);
 }
 
 #[test]
@@ -163,5 +163,5 @@ fn at_most_twenty_are_expired_per_pass_oldest_sleepers_first() {
 #[test]
 fn a_delay_longer_than_the_clock_expires_nothing() {
     let listed = [view("a", "sleeping", Some("other"), 1, Some(0))];
-    assert!(plan(&listed, "user-42", 10, u64::MAX).expired.is_empty());
+    assert_eq!(plan(&listed, "user-42", 10, u64::MAX).expired.len(), 0);
 }

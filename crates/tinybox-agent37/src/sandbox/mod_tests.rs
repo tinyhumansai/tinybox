@@ -453,7 +453,7 @@ async fn instances_without_a_key_are_never_deleted() -> Result<()> {
     ]);
     let (backend, _store) = sandbox(transport.clone());
     backend.create(&retained("user-42")?).await?;
-    assert!(transport.deletes().is_empty());
+    assert_eq!(transport.deletes().len(), 0);
     Ok(())
 }
 
@@ -551,7 +551,7 @@ async fn a_failed_record_insert_on_an_adopted_box_keeps_the_instance() -> Result
     let result = backend.create(&retained("user-42")?).await;
     assert!(result.is_err());
     // The instance holds a user's files: it must not be deleted.
-    assert!(transport.deletes().is_empty());
+    assert_eq!(transport.deletes().len(), 0);
     Ok(())
 }
 
@@ -561,7 +561,7 @@ async fn destroying_a_retained_box_keeps_the_instance_and_drops_the_record() -> 
     let (backend, store) = sandbox(transport.clone());
     let info = backend.create(&retained("user-42")?).await?;
     backend.destroy(&info.id).await?;
-    assert!(transport.deletes().is_empty());
+    assert_eq!(transport.deletes().len(), 0);
     assert!(store.get(&info.id).is_err());
     Ok(())
 }
