@@ -5,6 +5,8 @@
 //! is a value returned from this module, so it can be asserted without a
 //! gateway.
 
+use std::fmt::Write as _;
+
 use sha2::{Digest, Sha256};
 use tinybox_core::{
     BoxId, BoxSpec, BoxState, Capability, Constraint, Enforcement, Error, ExecRequest,
@@ -50,11 +52,11 @@ pub fn sandbox_name(namespace: &str, id: &BoxId) -> String {
         .chain_update([0])
         .chain_update(id.as_str())
         .finalize();
-    let hex: String = digest[..NAME_DIGEST_BYTES]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("tb-{hex}")
+    let mut name = String::from("tb-");
+    for byte in &digest[..NAME_DIGEST_BYTES] {
+        let _ = write!(name, "{byte:02x}");
+    }
+    name
 }
 
 /// Whether `value` is a usable namespace.
