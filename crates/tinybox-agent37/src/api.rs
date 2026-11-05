@@ -161,6 +161,10 @@ pub struct InstanceView {
     /// When the instance was created, in unix seconds, when reported.
     #[serde(default)]
     pub created: Option<u64>,
+    /// Whether the workspace's wallet lapsed: every instance is force-slept, so
+    /// a sleep then says nothing about whether the box is in use.
+    #[serde(default)]
+    pub past_due: bool,
     /// When the instance fell asleep, in unix seconds; set only while it
     /// sleeps.
     #[serde(default)]

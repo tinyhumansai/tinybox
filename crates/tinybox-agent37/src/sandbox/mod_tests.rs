@@ -436,6 +436,26 @@ async fn the_oldest_matching_box_wins() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_host_that_crashed_with_the_box_recorded_still_adopts_it() -> Result<()> {
+    let transport = with_listed(vec![kept(
+        "adopted01",
+        "sleeping",
+        "user-42",
+        NOW_SECS - 5 * DAY,
+        Some(NOW_SECS - DAY),
+    )]);
+    let (backend, store) = sandbox(transport.clone());
+    // The store outlives the process, and a crash skips destroy, so the record
+    // is still there when the restarted host adopts the box.
+    backend.create(&retained("user-42")?).await?;
+    let info = backend.create(&retained("user-42")?).await?;
+    assert_eq!(info.id.as_str(), "adopted01");
+    assert_eq!(store.get(&info.id)?.id, info.id);
+    assert_eq!(transport.calls(), ["list", "list"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn another_owners_box_is_not_adopted() -> Result<()> {
     let transport = with_listed(vec![kept("theirs", "running", "user-99", 1, None)]);
     let (backend, _store) = sandbox(transport.clone());

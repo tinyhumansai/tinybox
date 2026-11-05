@@ -165,3 +165,18 @@ fn a_delay_longer_than_the_clock_expires_nothing() {
     let listed = [view("a", "sleeping", Some("other"), 1, Some(0))];
     assert_eq!(plan(&listed, "user-42", 10, u64::MAX).expired.len(), 0);
 }
+
+#[test]
+fn a_box_slept_by_an_unpaid_wallet_is_never_expired() {
+    // A lapsed wallet force-sleeps every instance, in use or not, so its
+    // `slept_at` says nothing about whether the owner still wants it.
+    let mut suspended = view(
+        "suspended",
+        "sleeping",
+        Some("someone"),
+        NOW - 90 * DAY,
+        Some(NOW - 60 * DAY),
+    );
+    suspended.past_due = true;
+    assert!(plan_for(&[suspended]).expired.is_empty());
+}
