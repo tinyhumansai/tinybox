@@ -30,8 +30,8 @@ pub const NAMESPACE_LABEL: &str = "tinybox-namespace";
 /// the tinybox module uses.
 const MAX_NAMESPACE_LENGTH: usize = 49;
 
-/// The hex digits of a sandbox name's digest: `tb-` and these are 19
-/// characters, the longest name a gateway accepts.
+/// How much of the digest a sandbox name keeps: `tb-` and these bytes in hex
+/// are 19 characters, the longest name a gateway accepts.
 const NAME_DIGEST_BYTES: usize = 8;
 
 /// The `OpenShell` sandbox name for a box.

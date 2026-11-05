@@ -190,12 +190,16 @@ fn refuses_published_ports() -> Result<()> {
 }
 
 #[test]
-fn refuses_a_box_name_that_is_not_a_dns_label() -> Result<()> {
-    let refused = create("chottu", &BoxId::new("Box_0")?, &spec()?);
-    assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
-    let long = BoxId::new("b".repeat(60))?;
-    let refused = create("chottu", &long, &spec()?);
-    assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
+fn any_box_id_gets_a_name_a_gateway_accepts() -> Result<()> {
+    for id in [BoxId::new("Box_0")?, BoxId::new("b".repeat(60))?] {
+        let name = sandbox_name("chottu", &id);
+        assert_eq!(name.len(), 19, "{name}");
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "{name}"
+        );
+    }
     Ok(())
 }
 
@@ -212,7 +216,7 @@ fn execs_without_a_terminal_or_login_shell() -> Result<()> {
             "sandbox",
             "exec",
             "--name",
-            "tinybox-chottu-box-0",
+            &sandbox_name("chottu", &id()?),
             "--no-tty",
             "--no-login-shell",
             "--workdir",
@@ -243,14 +247,19 @@ fn gets_and_deletes_by_sandbox_name() -> Result<()> {
             "openshell",
             "sandbox",
             "get",
-            "tinybox-chottu-box-0",
+            &sandbox_name("chottu", &id()?),
             "-o",
             "json"
         ]
     );
     assert_eq!(
         delete("chottu", &id()?),
-        ["openshell", "sandbox", "delete", "tinybox-chottu-box-0"]
+        [
+            "openshell",
+            "sandbox",
+            "delete",
+            &sandbox_name("chottu", &id()?)
+        ]
     );
     Ok(())
 }

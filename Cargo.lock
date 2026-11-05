@@ -1983,6 +1983,7 @@ version = "0.2.4"
 dependencies = [
  "async-trait",
  "serde_json",
+ "sha2 0.10.9",
  "tinybox-core",
  "tokio",
 ]
