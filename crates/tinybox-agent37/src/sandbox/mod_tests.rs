@@ -170,7 +170,7 @@ impl Store for BrokenStore {
         Ok(Vec::new())
     }
 
-    fn update(&self, _info: &BoxInfo) -> Result<()> {
+    fn set_state(&self, _id: &BoxId, _state: BoxState) -> Result<()> {
         Ok(())
     }
 
