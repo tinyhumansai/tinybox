@@ -21,6 +21,10 @@ Retention { key: String, idle_sleep_secs: u32, delete_after_secs: u64 }
   It must be greater than zero; zero would read as "delete as soon as it
   sleeps" and is refused.
 
+For example, `Retention { key: "user-42", idle_sleep_secs: 900,
+delete_after_secs: 2_592_000 }` sleeps after 15 idle minutes and is deleted after
+30 days asleep.
+
 A retained box falls asleep when idle and wakes on the next command. It ends
 only by expiry: `Close` (and so a host shutting down or dropping an idle
 handle) forgets the local record and leaves the box, and its files, in place.
@@ -31,6 +35,10 @@ load) and declared by a sandbox as `Capability::Retention`. `BoxSpec::validate`
 checks the key and delay; every backend that cannot retain calls
 `BoxSpec::refuse_retention` from `create` and returns
 `Error::Unsupported { capability: Retention, .. }`.
+
+The box record in the module's store carries `retention` too (omitted when
+unset, so the stored body of every other box is unchanged), which is what lets a
+retained box survive a store round trip.
 
 A host that needs retention requires `contract_version >= (2, 4)`. A module
 that reports 2.3 or lower does not know the field and would ignore it, so a
