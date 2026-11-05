@@ -16,8 +16,29 @@ fn id() -> Result<BoxId> {
 }
 
 #[test]
-fn names_a_sandbox_after_its_namespace_and_box() -> Result<()> {
-    assert_eq!(sandbox_name("chottu", &id()?), "tinybox-chottu-box-0");
+fn every_name_fits_the_gateways_limit() -> Result<()> {
+    // A gateway refuses a sandbox name over 19 characters, however long the
+    // namespace and box are: "name exceeds maximum length (50 > 19)".
+    let namespace = "0f8fad5b-d9cb-469f-a165-70867728950e-1";
+    for box_id in ["box-0", "box-123456789"] {
+        let name = sandbox_name(namespace, &BoxId::new(box_id)?);
+        assert_eq!(name.len(), 19, "{name}");
+        assert!(name.starts_with("tb-"), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn names_differ_by_namespace_and_by_box() -> Result<()> {
+    let name = sandbox_name("chottu", &id()?);
+    assert_eq!(name, sandbox_name("chottu", &id()?));
+    assert_ne!(name, sandbox_name("chottu-2", &id()?));
+    assert_ne!(name, sandbox_name("chottu", &BoxId::new("box-1")?));
+    // The two parts stay apart: this is not "chottu-box" and "0".
+    assert_ne!(
+        sandbox_name("chottu-box", &BoxId::new("0")?),
+        sandbox_name("chottu", &BoxId::new("box-0")?)
+    );
     Ok(())
 }
 
@@ -35,25 +56,6 @@ fn accepts_only_dns_label_namespaces() {
 }
 
 #[test]
-fn accepts_a_uuid_namespace_and_still_fits_a_box_name() -> Result<()> {
-    let namespace = "0f8fad5b-d9cb-469f-a165-70867728950e-1";
-    assert!(is_valid_namespace(namespace));
-    let argv = create(namespace, &BoxId::new("box-12")?, &spec()?)?;
-    assert!(
-        argv.iter()
-            .any(|part| part == "tinybox-0f8fad5b-d9cb-469f-a165-70867728950e-1-box-12")
-    );
-    Ok(())
-}
-
-#[test]
-fn refuses_a_box_that_pushes_a_long_namespace_past_the_name_limit() -> Result<()> {
-    let refused = create(&"a".repeat(49), &BoxId::new("box-10")?, &spec()?);
-    assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
-    Ok(())
-}
-
-#[test]
 fn creates_from_the_image_with_limits_labels_and_no_prompts() -> Result<()> {
     let argv = create("chottu", &id()?, &spec()?)?;
     assert_eq!(
@@ -63,7 +65,7 @@ fn creates_from_the_image_with_limits_labels_and_no_prompts() -> Result<()> {
             "sandbox",
             "create",
             "--name",
-            "tinybox-chottu-box-0",
+            &sandbox_name("chottu", &id()?),
             "--from",
             "ghcr.io/example/agent:1",
             "--cpu",
@@ -188,12 +190,16 @@ fn refuses_published_ports() -> Result<()> {
 }
 
 #[test]
-fn refuses_a_box_name_that_is_not_a_dns_label() -> Result<()> {
-    let refused = create("chottu", &BoxId::new("Box_0")?, &spec()?);
-    assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
-    let long = BoxId::new("b".repeat(60))?;
-    let refused = create("chottu", &long, &spec()?);
-    assert!(matches!(refused, Err(Error::InvalidIdentifier { .. })));
+fn any_box_id_gets_a_name_a_gateway_accepts() -> Result<()> {
+    for id in [BoxId::new("Box_0")?, BoxId::new("b".repeat(60))?] {
+        let name = sandbox_name("chottu", &id);
+        assert_eq!(name.len(), 19, "{name}");
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "{name}"
+        );
+    }
     Ok(())
 }
 
@@ -210,7 +216,7 @@ fn execs_without_a_terminal_or_login_shell() -> Result<()> {
             "sandbox",
             "exec",
             "--name",
-            "tinybox-chottu-box-0",
+            &sandbox_name("chottu", &id()?),
             "--no-tty",
             "--no-login-shell",
             "--workdir",
@@ -241,14 +247,19 @@ fn gets_and_deletes_by_sandbox_name() -> Result<()> {
             "openshell",
             "sandbox",
             "get",
-            "tinybox-chottu-box-0",
+            &sandbox_name("chottu", &id()?),
             "-o",
             "json"
         ]
     );
     assert_eq!(
         delete("chottu", &id()?),
-        ["openshell", "sandbox", "delete", "tinybox-chottu-box-0"]
+        [
+            "openshell",
+            "sandbox",
+            "delete",
+            &sandbox_name("chottu", &id()?)
+        ]
     );
     Ok(())
 }
@@ -280,6 +291,17 @@ fn maps_every_phase_to_a_box_state() -> Result<()> {
         let json = format!(r#"{{"name":"tinybox-chottu-box-0","phase":"{phase}"}}"#);
         assert_eq!(state_of(&json)?, state, "phase {phase}");
     }
+    Ok(())
+}
+
+#[test]
+fn reads_the_lifecycle_phase_over_the_provisioning_step() -> Result<()> {
+    // What a 0.1.7 gateway answers: the sandbox's phase at the top, and the
+    // step provisioning reached, in its own words, beneath it.
+    let ready = r#"{"phase":"Ready","provisioning":{"phase":"ready"}}"#;
+    assert_eq!(state_of(ready)?, BoxState::Ready);
+    let starting = r#"{"phase":"Provisioning","provisioning":{"phase":"admission"}}"#;
+    assert_eq!(state_of(starting)?, BoxState::Creating);
     Ok(())
 }
 

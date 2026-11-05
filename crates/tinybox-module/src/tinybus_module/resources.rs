@@ -975,10 +975,16 @@ impl Resources {
                 "module Exec is not supported for this backend on this platform",
             ));
         }
+        // A collector is allocated for every resource, but Exec only needs the
+        // owned local passthrough for backends that run the command on this
+        // host. Docker, OpenShell and agent37 each carry their own exec channel
+        // (a container, the gateway, or agent37's HTTP service) and run through
+        // their own `Sandbox::exec`, so the collector stays idle for them.
         if entry.collector.is_some()
             && entry.local_sandbox.is_none()
             && entry.sandbox.name() != tinybox_docker::NAME
             && entry.sandbox.name() != tinybox_openshell::NAME
+            && entry.sandbox.name() != tinybox_agent37::NAME
         {
             return Err(failure(
                 tinybox_bus::UNSUPPORTED_OPERATION,
@@ -1607,6 +1613,25 @@ fn make_sandbox(
             docker_sandbox: None,
             local_sandbox: None,
         }),
+        // agent37 is HTTP-native: it ignores the owned `host` and talks to its
+        // service over the `Transport` built from the environment (AGENT37_API_KEY,
+        // with the hosts fixed and overridable via AGENT37_API_BASE /
+        // AGENT37_SANDBOX_BASE), which errors here if the key is unset.
+        "agent37" => Ok(SandboxSelection {
+            sandbox: Arc::new(
+                tinybox_agent37::Agent37Sandbox::with_namespace(
+                    Arc::new(
+                        tinybox_agent37::HttpTransport::from_env()
+                            .map_err(|error| backend_error(&error))?,
+                    ),
+                    store,
+                    namespace,
+                )
+                .map_err(|error| backend_error(&error))?,
+            ),
+            docker_sandbox: None,
+            local_sandbox: None,
+        }),
         _ => Err(failure(
             tinybox_bus::UNSUPPORTED_BACKEND,
             "unsupported sandbox backend",
@@ -1708,6 +1733,10 @@ fn validate_platform_backend(platform: super::Platform, backend: &str) -> Result
 }
 
 pub(super) fn supports_execution(platform: super::Platform, backend: &str) -> bool {
+    // agent37 is HTTP-hosted, so execution does not depend on the local platform.
+    if backend == "agent37" {
+        return true;
+    }
     matches!(
         platform,
         super::Platform::Linux | super::Platform::Unix | super::Platform::Windows

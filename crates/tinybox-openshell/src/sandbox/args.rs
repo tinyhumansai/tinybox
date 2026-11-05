@@ -5,6 +5,9 @@
 //! is a value returned from this module, so it can be asserted without a
 //! gateway.
 
+use std::fmt::Write as _;
+
+use sha2::{Digest, Sha256};
 use tinybox_core::{
     BoxId, BoxSpec, BoxState, Capability, Constraint, Enforcement, Error, ExecRequest,
     NetworkPolicy, Resources, Result, WorkspaceSource,
@@ -21,36 +24,46 @@ pub const BOX_LABEL: &str = "tinybox-box";
 /// restarted host can tell its own sandboxes from anyone else's.
 pub const NAMESPACE_LABEL: &str = "tinybox-namespace";
 
-/// The longest sandbox name this backend produces.
-///
-/// `OpenShell`'s Kubernetes driver names pods and services after the sandbox,
-/// and a Kubernetes name is a DNS label: at most 63 characters.
-const MAX_NAME_LENGTH: usize = 63;
-
 /// The longest namespace this backend accepts.
 ///
-/// What is left of a sandbox name once the `tinybox-` prefix and the shortest
-/// box suffix (`-box-0`) are taken out, so a valid namespace always leaves room
-/// for a box. Long enough for a UUID-based namespace, such as the resource
-/// identifiers the tinybox module uses. [`checked_name`] still refuses a name
-/// that a long box identifier pushes past the limit.
-const MAX_NAMESPACE_LENGTH: usize = MAX_NAME_LENGTH - "tinybox-".len() - "-box-0".len();
+/// A namespace is carried whole only in [`NAMESPACE_LABEL`], whose value a
+/// Kubernetes gateway holds to 63 characters. This leaves room under that, and
+/// is long enough for a UUID-based namespace, such as the resource identifiers
+/// the tinybox module uses.
+const MAX_NAMESPACE_LENGTH: usize = 49;
+
+/// How much of the digest a sandbox name keeps: `tb-` and these bytes in hex
+/// are 19 characters, the longest name a gateway accepts.
+const NAME_DIGEST_BYTES: usize = 8;
 
 /// The `OpenShell` sandbox name for a box.
 ///
 /// Box identifiers are unique within a store; `OpenShell` names are unique
-/// within a gateway workspace. The namespace bridges those scopes, as it does
-/// for Docker container names, and the `tinybox-` prefix says where the
-/// sandbox came from.
+/// within a gateway workspace, and a gateway refuses a name over 19 characters
+/// because it routes by it. So the name is a digest of the namespace and box,
+/// not the two spelled out: it always fits, and a namespace holding a UUID
+/// still gets a name of its own. [`BOX_LABEL`] and [`NAMESPACE_LABEL`] keep the
+/// readable parts. A collision makes `create` fail as a taken name, which is
+/// never mistaken for this box.
 #[must_use]
 pub fn sandbox_name(namespace: &str, id: &BoxId) -> String {
-    format!("tinybox-{namespace}-{id}")
+    let digest = Sha256::new()
+        .chain_update(namespace)
+        .chain_update([0])
+        .chain_update(id.as_str())
+        .finalize();
+    let mut name = String::from("tb-");
+    for byte in &digest[..NAME_DIGEST_BYTES] {
+        let _ = write!(name, "{byte:02x}");
+    }
+    name
 }
 
 /// Whether `value` is a usable namespace.
 ///
-/// A namespace ends up inside a DNS label, so it is held to that alphabet:
-/// lowercase ASCII letters, digits and `-`, not starting or ending with `-`.
+/// A namespace ends up in a label value, so it is held to a DNS label's
+/// alphabet: lowercase ASCII letters, digits and `-`, not starting or ending
+/// with `-`.
 pub(super) fn is_valid_namespace(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_NAMESPACE_LENGTH
@@ -59,30 +72,6 @@ pub(super) fn is_valid_namespace(value: &str) -> bool {
         && value.chars().all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         })
-}
-
-/// Check that a box's sandbox name is a DNS label.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidIdentifier`] when the box identifier carries a
-/// character a DNS label refuses (uppercase, `_` or `.`) or the name is too
-/// long. A store that allocates `box-<n>` never trips this.
-fn checked_name(namespace: &str, id: &BoxId) -> Result<String> {
-    let name = sandbox_name(namespace, id);
-    let valid = name.len() <= MAX_NAME_LENGTH
-        && !name.ends_with('-')
-        && name.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        });
-    if valid {
-        Ok(name)
-    } else {
-        Err(Error::InvalidIdentifier {
-            kind: "openshell sandbox name",
-            value: name,
-        })
-    }
 }
 
 /// Refuse what `OpenShell` cannot honor for this spec, before anything runs.
@@ -133,12 +122,11 @@ fn unsupported_source(kind: &'static str) -> Error {
 ///
 /// # Errors
 ///
-/// Everything [`check_spec`] and [`resource_flags`] refuse, and [`Error::InvalidIdentifier`] when
-/// the box's name is not a DNS label.
+/// Everything [`check_spec`] and [`resource_flags`] refuse.
 pub(super) fn create(namespace: &str, id: &BoxId, spec: &BoxSpec) -> Result<Vec<String>> {
     let image = check_spec(spec)?;
     let mut argv = openshell(["sandbox", "create", "--name"]);
-    argv.push(checked_name(namespace, id)?);
+    argv.push(sandbox_name(namespace, id));
     argv.extend(["--from".to_owned(), image]);
     argv.extend(resource_flags(&spec.resources)?);
     argv.extend([
@@ -255,17 +243,21 @@ pub(super) fn is_already_exists(stderr: &str) -> bool {
 
 /// The box state a `sandbox get -o json` answer describes.
 ///
+/// The top-level `phase` is the sandbox's lifecycle. `provisioning.phase` is
+/// the step provisioning reached, in its own words (`admission`, `ready`), and
+/// is read only from an answer without the first.
+///
 /// # Errors
 ///
 /// Returns [`Error::Backend`] when the output is not JSON or has no string
-/// phase (`provisioning.phase`, or a top-level `phase`), rather than guessing a state from a shape this code does not know.
+/// phase, rather than guessing a state from a shape this code does not know.
 pub(super) fn state_of(json: &str) -> Result<BoxState> {
     let phase = serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|value| {
             value
-                .pointer("/provisioning/phase")
-                .or_else(|| value.get("phase"))?
+                .get("phase")
+                .or_else(|| value.pointer("/provisioning/phase"))?
                 .as_str()
                 .map(str::to_owned)
         })

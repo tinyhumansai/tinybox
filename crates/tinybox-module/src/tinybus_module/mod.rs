@@ -558,6 +558,10 @@ fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
     if !supervised.is_empty() {
         exec_backends.push("openshell".into());
     }
+    // agent37 is a hosted HTTP sandbox: it needs no owned host, so it is offered
+    // on every platform, including ones without Docker/OpenShell. It has no
+    // detached processes, so like OpenShell it never lists under Spawn.
+    exec_backends.push("agent37".into());
     let mut create_backends = vec!["passthrough".into()];
     if matches!(
         platform,
@@ -569,6 +573,7 @@ fn capabilities_for(platform: Platform) -> tinybox_bus::ModuleCapabilities {
     if platform == Platform::Linux {
         create_backends.push("namespace".into());
     }
+    create_backends.push("agent37".into());
     tinybox_bus::ModuleCapabilities {
         contract_version: tinybox_bus::CONTRACT_VERSION,
         create_backends,
@@ -581,7 +586,9 @@ fn supports_create_backend(platform: Platform, backend: &str) -> bool {
     match backend {
         // Passthrough only records the caller's workspace; execution remains
         // unadvertised on hosts where TinyBox cannot supervise native children.
-        "passthrough" => true,
+        // agent37 is HTTP-hosted and needs no owned host — both are creatable on
+        // every platform.
+        "passthrough" | "agent37" => true,
         "docker" | "openshell" => matches!(
             platform,
             Platform::Linux | Platform::Unix | Platform::Windows
@@ -663,6 +670,10 @@ fn registered_sandboxes() -> Vec<(&'static str, SandboxCapabilities)> {
         (
             tinybox_openshell::NAME,
             tinybox_openshell::OpenShellSandbox::declared_capabilities(),
+        ),
+        (
+            tinybox_agent37::NAME,
+            tinybox_agent37::Agent37Sandbox::declared_capabilities(),
         ),
     ]
 }

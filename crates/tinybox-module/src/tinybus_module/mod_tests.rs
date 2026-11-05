@@ -85,36 +85,44 @@ async fn jail_status_reports_the_detected_backend_without_starting_a_process() -
 
 #[test]
 fn backend_capabilities_match_supervision_and_confinement_platforms() {
+    // agent37 is HTTP-hosted, so it joins create and exec on every platform
+    // (including Other, which has no owned host) but never spawn.
     let other = capabilities_for(Platform::Other);
-    assert_eq!(other.create_backends, ["passthrough"]);
-    assert_eq!(other.exec_backends, Vec::<String>::new());
+    assert_eq!(other.create_backends, ["passthrough", "agent37"]);
+    assert_eq!(other.exec_backends, ["agent37"]);
     assert_eq!(other.spawn_backends, Vec::<String>::new());
 
     let macos = capabilities_for(Platform::Unix);
     assert_eq!(
         macos.create_backends,
-        ["passthrough", "docker", "openshell"]
+        ["passthrough", "docker", "openshell", "agent37"]
     );
-    assert_eq!(macos.exec_backends, ["passthrough", "docker", "openshell"]);
+    assert_eq!(
+        macos.exec_backends,
+        ["passthrough", "docker", "openshell", "agent37"]
+    );
     assert_eq!(macos.spawn_backends, ["passthrough", "docker"]);
 
     let windows = capabilities_for(Platform::Windows);
     assert_eq!(
         windows.create_backends,
-        ["passthrough", "docker", "openshell"]
+        ["passthrough", "docker", "openshell", "agent37"]
     );
     assert_eq!(
         windows.exec_backends,
-        ["passthrough", "docker", "openshell"]
+        ["passthrough", "docker", "openshell", "agent37"]
     );
     assert_eq!(windows.spawn_backends, ["passthrough", "docker"]);
 
     let linux = capabilities_for(Platform::Linux);
     assert_eq!(
         linux.create_backends,
-        ["passthrough", "docker", "openshell", "namespace"]
+        ["passthrough", "docker", "openshell", "namespace", "agent37"]
     );
-    assert_eq!(linux.exec_backends, ["passthrough", "docker", "openshell"]);
+    assert_eq!(
+        linux.exec_backends,
+        ["passthrough", "docker", "openshell", "agent37"]
+    );
     assert_eq!(linux.spawn_backends, ["passthrough", "docker"]);
 }
 
@@ -338,11 +346,14 @@ fn an_empty_registry_is_reported_as_none_rather_than_omitted() {
 fn the_registry_reports_every_backend_and_only_the_safe_ones_as_capable() {
     let description = describe(&registered_sandboxes());
 
-    // Both backends are listed as present...
-    assert!(description.contains("sandboxes: passthrough, docker, namespace, microvm, openshell"));
-    // ...but only Docker clears the isolation floor, and passthrough says so
-    // through its own declaration rather than a special case here.
-    assert!(description.ends_with("docker, namespace, microvm, openshell"));
+    // Every backend is listed as present...
+    assert!(
+        description
+            .contains("sandboxes: passthrough, docker, namespace, microvm, openshell, agent37")
+    );
+    // ...and the kernel-isolated ones (not passthrough) are the untrusted-capable
+    // set, each saying so through its own declaration rather than a special case.
+    assert!(description.ends_with("docker, namespace, microvm, openshell, agent37"));
 
     let names = registered_sandboxes()
         .into_iter()
@@ -350,7 +361,14 @@ fn the_registry_reports_every_backend_and_only_the_safe_ones_as_capable() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        ["passthrough", "docker", "namespace", "microvm", "openshell"]
+        [
+            "passthrough",
+            "docker",
+            "namespace",
+            "microvm",
+            "openshell",
+            "agent37"
+        ]
     );
 }
 

@@ -21,6 +21,9 @@ async-trait.workspace = true
 # `openshell sandbox get -o json` is the one structured answer this backend
 # reads: the sandbox's lifecycle phase.
 serde_json.workspace = true
+# A sandbox name is a digest of its namespace and box: a gateway caps names at
+# 19 characters, and a namespace alone can be a UUID.
+sha2 = "0.11.1"
 
 [dev-dependencies]
 # The async runtime the `#[tokio::test]` tests run on.

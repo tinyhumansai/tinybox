@@ -249,7 +249,9 @@ Box identifiers are unique within a `Store`; Docker container names are unique
 across a whole daemon. Those are different scopes, so two stores that both
 allocate `box-0` would fight over one container name. Containers are therefore
 named `tinybox-<namespace>-<box id>`, with the namespace defaulting to
-`default` and settable per sandbox.
+`default` and settable per sandbox. `OpenShell` gateways cap a sandbox name at 19
+characters, so that backend uses `tb-` and a digest of the same two parts, and
+keeps them readable in the sandbox's labels.
 
 This was found by the live suite rather than by review, and it is a real
 multi-user constraint, not a test artifact.
