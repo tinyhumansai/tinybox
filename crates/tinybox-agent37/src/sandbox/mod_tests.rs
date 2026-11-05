@@ -119,10 +119,10 @@ impl Transport for FakeTransport {
             let seen = self.created_bodies();
             tokio::task::yield_now().await;
             let mut listed = self.listed.clone();
-            for (n, body) in seen.iter().enumerate() {
+            for body in &seen {
                 let key = body.metadata.get(api::KEY_METADATA_KEY).cloned();
                 listed.push(kept(
-                    &format!("{}{n}", self.created_id),
+                    &self.created_id,
                     "running",
                     key.as_deref().unwrap_or_default(),
                     1,
