@@ -10,13 +10,18 @@ use crate::api::KEY_METADATA_KEY;
 const NOW: u64 = 10_000_000;
 const DAY: u64 = 86_400;
 
-fn view(id: &str, status: &str, key: Option<&str>, created: u64, slept_at: Option<u64>) -> InstanceView {
+fn view(
+    id: &str,
+    status: &str,
+    key: Option<&str>,
+    created: u64,
+    slept_at: Option<u64>,
+) -> InstanceView {
     let mut view = InstanceView::new(id, status);
     view.created = Some(created);
     view.slept_at = slept_at;
-    view.metadata = key.map(|key| {
-        BTreeMap::from([(KEY_METADATA_KEY.to_owned(), serde_json::Value::from(key))])
-    });
+    view.metadata = key
+        .map(|key| BTreeMap::from([(KEY_METADATA_KEY.to_owned(), serde_json::Value::from(key))]));
     view
 }
 
@@ -40,7 +45,10 @@ fn the_oldest_usable_match_is_adopted() {
         view("oldest", "sleeping", Some("user-42"), 100, Some(NOW - 5)),
         view("middle", "running", Some("user-42"), 200, None),
     ];
-    assert_eq!(plan_for(&listed).adopt.map(|v| v.id), Some("oldest".to_owned()));
+    assert_eq!(
+        plan_for(&listed).adopt.map(|v| v.id),
+        Some("oldest".to_owned())
+    );
 }
 
 #[test]
@@ -50,26 +58,65 @@ fn a_transitional_match_is_usable_but_a_stopped_or_failed_one_is_not() {
         view("broken", "error", Some("user-42"), 2, None),
         view("waking", "waking", Some("user-42"), 3, None),
     ];
-    assert_eq!(plan_for(&listed).adopt.map(|v| v.id), Some("waking".to_owned()));
+    assert_eq!(
+        plan_for(&listed).adopt.map(|v| v.id),
+        Some("waking".to_owned())
+    );
 }
 
 #[test]
 fn an_instance_without_a_created_time_counts_as_newest() {
     let mut undated = view("undated", "running", Some("user-42"), 0, None);
     undated.created = None;
-    let listed = [undated, view("dated", "running", Some("user-42"), 500, None)];
-    assert_eq!(plan_for(&listed).adopt.map(|v| v.id), Some("dated".to_owned()));
+    let listed = [
+        undated,
+        view("dated", "running", Some("user-42"), 500, None),
+    ];
+    assert_eq!(
+        plan_for(&listed).adopt.map(|v| v.id),
+        Some("dated".to_owned())
+    );
 }
 
 #[test]
 fn only_sleeping_boxes_slept_longer_than_the_delay_expire() {
     let cutoff = NOW - 30 * DAY;
     let listed = [
-        view("old-sleeper", "sleeping", Some("other"), 1, Some(cutoff - 1)),
-        view("exactly-at-the-limit", "sleeping", Some("other"), 1, Some(cutoff)),
-        view("recent-sleeper", "sleeping", Some("other"), 1, Some(NOW - DAY)),
-        view("old-but-running", "running", Some("other"), 1, Some(cutoff - 100)),
-        view("sleeping-without-a-time", "sleeping", Some("other"), 1, None),
+        view(
+            "old-sleeper",
+            "sleeping",
+            Some("other"),
+            1,
+            Some(cutoff - 1),
+        ),
+        view(
+            "exactly-at-the-limit",
+            "sleeping",
+            Some("other"),
+            1,
+            Some(cutoff),
+        ),
+        view(
+            "recent-sleeper",
+            "sleeping",
+            Some("other"),
+            1,
+            Some(NOW - DAY),
+        ),
+        view(
+            "old-but-running",
+            "running",
+            Some("other"),
+            1,
+            Some(cutoff - 100),
+        ),
+        view(
+            "sleeping-without-a-time",
+            "sleeping",
+            Some("other"),
+            1,
+            None,
+        ),
     ];
     assert_eq!(plan_for(&listed).expired, ["old-sleeper"]);
 }
@@ -95,7 +142,15 @@ fn the_adopted_box_is_never_expired() {
 #[test]
 fn at_most_twenty_are_expired_per_pass_oldest_sleepers_first() {
     let listed: Vec<InstanceView> = (0..25)
-        .map(|n| view(&format!("box-{n:02}"), "sleeping", Some("other"), 1, Some(100 + (24 - n))))
+        .map(|n| {
+            view(
+                &format!("box-{n:02}"),
+                "sleeping",
+                Some("other"),
+                1,
+                Some(100 + (24 - n)),
+            )
+        })
         .collect();
     let expired = plan_for(&listed).expired;
     assert_eq!(expired.len(), MAX_EXPIRIES_PER_PASS);

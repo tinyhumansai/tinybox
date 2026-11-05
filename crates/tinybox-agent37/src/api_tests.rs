@@ -202,12 +202,13 @@ fn retained_spec(idle_sleep_secs: u32) -> Result<BoxSpec> {
 
 #[test]
 fn a_create_body_without_retention_serializes_exactly_as_before() -> Result<()> {
-    let json = serde_json::to_value(create_body("acme", &oci_spec()?)?)
-        .map_err(|error| Error::Backend {
+    let json = serde_json::to_value(create_body("acme", &oci_spec()?)?).map_err(|error| {
+        Error::Backend {
             sandbox: NAME.to_owned(),
             operation: "serialize",
             message: error.to_string(),
-        })?;
+        }
+    })?;
     let object = json.as_object().ok_or(Error::UnsupportedGitIncludePath)?;
     assert!(!object.contains_key("auto_sleep"));
     assert!(!object.contains_key("idle_timeout_seconds"));

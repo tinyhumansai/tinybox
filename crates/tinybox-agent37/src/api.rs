@@ -194,10 +194,7 @@ impl InstanceView {
     /// The owner key this instance was created for, when it has a string one.
     #[must_use]
     pub fn retention_key(&self) -> Option<&str> {
-        self.metadata
-            .as_ref()?
-            .get(KEY_METADATA_KEY)?
-            .as_str()
+        self.metadata.as_ref()?.get(KEY_METADATA_KEY)?.as_str()
     }
 
     /// The tinybox state this instance's status maps to.

@@ -1,15 +1,17 @@
 //! A sandbox that runs each box as an agent37 instance over HTTP.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use tinybox_core::{
     BoxId, BoxInfo, BoxSpec, BoxState, Capability, Clock, ConstraintSupport, Error, ExecOutput,
-    ExecRequest, IsolationLevel, Result, Sandbox, SandboxCapabilities, SnapshotId, SnapshotSupport,
-    Store, SystemClock,
+    ExecRequest, IsolationLevel, Result, Retention, Sandbox, SandboxCapabilities, SnapshotId,
+    SnapshotSupport, Store, SystemClock,
 };
 
-use crate::api;
+use crate::api::{self, InstanceView};
+use crate::retention;
 use crate::transport::Transport;
 
 /// The name this sandbox registers under.
@@ -17,6 +19,19 @@ pub const NAME: &str = "agent37";
 
 /// The namespace stamped onto an instance's metadata when none is given.
 pub const DEFAULT_NAMESPACE: &str = "default";
+
+/// How long [`Sandbox::exec`] waits before each re-inspection of an instance
+/// that is still provisioning, starting or waking: 60 s in all. After that the
+/// instance is reported in the state it is in rather than waited on forever.
+const SETTLE_BACKOFF: [Duration; 7] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(15),
+    Duration::from_secs(15),
+];
 
 /// A sandbox that runs each box as an agent37 instance.
 ///
@@ -26,6 +41,19 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 /// (exec, inspect, destroy) addresses the instance with it directly — there is
 /// no client-derived name or stored mapping. The namespace is carried only as
 /// instance metadata, for observability.
+///
+/// # Retained boxes
+///
+/// A spec with [`Retention`] makes the box one an owner keeps across uses. It
+/// is created with agent37's auto-sleep on, so an idle box costs disk only and
+/// the next command wakes it. Its owner key is stored in the instance's
+/// metadata, so a later [`create`](Sandbox::create) with the same key — even
+/// from a restarted host whose store is empty — lists the workspace and
+/// *adopts* the existing instance instead of making another. The same pass
+/// deletes retained instances that have slept longer than
+/// [`Retention::delete_after_secs`], which is the only way a retained box ends:
+/// [`destroy`](Sandbox::destroy) forgets the local record and leaves the
+/// instance (and the owner's files) in place.
 #[derive(Debug, Clone)]
 pub struct Agent37Sandbox {
     transport: Arc<dyn Transport>,
@@ -82,7 +110,63 @@ impl Agent37Sandbox {
     /// What this backend can do, independent of any instance.
     #[must_use]
     pub const fn declared_capabilities() -> SandboxCapabilities {
-        SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None)
+        SandboxCapabilities::new(IsolationLevel::Kernel, SnapshotSupport::None).with_retention()
+    }
+
+    /// Record `view` as the box for `spec`, keeping the instance whatever
+    /// happens: an adopted instance holds an owner's files, so no failure here
+    /// may delete it.
+    fn record_adopted(&self, view: &InstanceView, spec: &BoxSpec) -> Result<BoxInfo> {
+        let id = BoxId::new(view.id.clone())?;
+        let created_at = view.created.map_or_else(
+            || self.clock.now(),
+            |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+        );
+        let info = BoxInfo::new(id, view.state(), spec.clone()).created_at(created_at);
+        self.store.insert(&info)?;
+        Ok(info)
+    }
+
+    /// List the workspace, delete retained boxes that expired, and return the
+    /// existing box for `retention.key` when there is one.
+    ///
+    /// A failed delete is ignored — the instance is picked up again by the next
+    /// pass — but a failed listing is an error: creating anyway could mint a
+    /// second box for an owner whose first one is merely unreachable.
+    async fn adopt(&self, spec: &BoxSpec, retention: &Retention) -> Result<Option<BoxInfo>> {
+        let listed = self.transport.list().await?;
+        let now_secs = self
+            .clock
+            .now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let plan = retention::plan(
+            &listed,
+            &retention.key,
+            now_secs,
+            retention.delete_after_secs,
+        );
+        for id in &plan.expired {
+            let _ = self.transport.delete(id).await;
+        }
+        plan.adopt
+            .map(|view| self.record_adopted(&view, spec))
+            .transpose()
+    }
+
+    /// Inspect `id`, re-inspecting with backoff while it is still
+    /// provisioning, starting or waking so a command is not sent to an
+    /// instance that cannot take it yet.
+    async fn inspect_settled(&self, id: &BoxId) -> Result<BoxInfo> {
+        let mut info = self.inspect(id).await?;
+        for delay in SETTLE_BACKOFF {
+            if info.state != BoxState::Creating {
+                break;
+            }
+            tokio::time::sleep(delay).await;
+            info = self.inspect(id).await?;
+        }
+        Ok(info)
     }
 }
 
@@ -116,6 +200,11 @@ impl Sandbox for Agent37Sandbox {
         // Refuse an unsupported spec before touching agent37, so a refusal
         // leaves no instance.
         let body = api::create_body(&self.namespace, spec)?;
+        if let Some(retention) = &spec.retention
+            && let Some(info) = self.adopt(spec, retention).await?
+        {
+            return Ok(info);
+        }
         // agent37 mints the id, so the instance is created first and the record
         // is keyed by the id it returns.
         let view = self.transport.create(&body).await?;
@@ -140,7 +229,7 @@ impl Sandbox for Agent37Sandbox {
     }
 
     async fn exec(&self, id: &BoxId, request: &ExecRequest) -> Result<ExecOutput> {
-        let info = self.inspect(id).await?;
+        let info = self.inspect_settled(id).await?;
         if !info.state.accepts_commands() {
             return Err(Error::InvalidState {
                 id: id.as_str().to_owned(),
@@ -189,8 +278,13 @@ impl Sandbox for Agent37Sandbox {
 
     async fn destroy(&self, id: &BoxId) -> Result<()> {
         // Fail on an unknown box before calling agent37.
-        self.store.get(id)?;
-        self.transport.delete(id.as_str()).await?;
+        let info = self.store.get(id)?;
+        // A retained box outlives its handle: closing it on idle or at shutdown
+        // must keep the owner's files, so only the local record goes and the
+        // retention pass deletes the instance once it has slept long enough.
+        if info.spec.retention.is_none() {
+            self.transport.delete(id.as_str()).await?;
+        }
         self.store.remove(id)
     }
 }

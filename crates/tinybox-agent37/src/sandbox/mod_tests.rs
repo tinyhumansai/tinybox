@@ -372,7 +372,10 @@ async fn a_retained_create_asks_agent37_to_sleep_and_stamps_the_key() -> Result<
     assert_eq!(bodies[0].auto_sleep, Some(true));
     assert_eq!(bodies[0].idle_timeout_seconds, Some(900));
     assert_eq!(
-        bodies[0].metadata.get(api::KEY_METADATA_KEY).map(String::as_str),
+        bodies[0]
+            .metadata
+            .get(api::KEY_METADATA_KEY)
+            .map(String::as_str),
         Some("user-42")
     );
     Ok(())
@@ -402,7 +405,10 @@ async fn a_retained_create_after_a_restart_adopts_the_existing_box() -> Result<(
     let info = backend.create(&retained("user-42")?).await?;
     assert_eq!(info.id.as_str(), "adopted01");
     assert_eq!(info.state, BoxState::Ready);
-    assert_eq!(info.spec.retention.as_ref().map(|r| r.key.as_str()), Some("user-42"));
+    assert_eq!(
+        info.spec.retention.as_ref().map(|r| r.key.as_str()),
+        Some("user-42")
+    );
     assert_eq!(store.get(&info.id)?.id, info.id);
     // No second instance was created.
     assert_eq!(transport.calls(), ["list"]);
@@ -422,7 +428,10 @@ async fn the_oldest_matching_box_wins() -> Result<()> {
         kept("middle", "running", "user-42", 200, None),
     ]);
     let (backend, _store) = sandbox(transport);
-    assert_eq!(backend.create(&retained("user-42")?).await?.id.as_str(), "oldest");
+    assert_eq!(
+        backend.create(&retained("user-42")?).await?.id.as_str(),
+        "oldest"
+    );
     Ok(())
 }
 
@@ -485,7 +494,15 @@ async fn expiry_also_runs_when_the_create_makes_a_new_box() -> Result<()> {
 async fn a_pass_deletes_at_most_twenty_boxes() -> Result<()> {
     let old = NOW_SECS - 40 * DAY;
     let listed = (0..25)
-        .map(|n| kept(&format!("expired{n:02}"), "sleeping", "user-7", 1, Some(old + n)))
+        .map(|n| {
+            kept(
+                &format!("expired{n:02}"),
+                "sleeping",
+                "user-7",
+                1,
+                Some(old + n),
+            )
+        })
         .collect();
     let transport = with_listed(listed);
     let (backend, _store) = sandbox(transport.clone());
@@ -525,7 +542,11 @@ async fn a_failed_record_insert_on_an_adopted_box_keeps_the_instance() -> Result
     let transport = with_listed(vec![kept("adopted01", "running", "user-42", 1, None)]);
     let (backend, store) = sandbox(transport.clone());
     // The record is already there, so adopting it again collides in the store.
-    let existing = BoxInfo::new(BoxId::new("adopted01")?, BoxState::Ready, retained("user-42")?);
+    let existing = BoxInfo::new(
+        BoxId::new("adopted01")?,
+        BoxState::Ready,
+        retained("user-42")?,
+    );
     store.insert(&existing)?;
     let result = backend.create(&retained("user-42")?).await;
     assert!(result.is_err());
@@ -586,7 +607,10 @@ async fn exec_waits_through_a_waking_instance_before_running() -> Result<()> {
     assert_eq!(inspects, 3);
     // The command ran only after the instance settled, and the backoff was
     // virtual time: 1s then 2s.
-    assert_eq!(transport.calls().last(), Some(&format!("exec:{INSTANCE_ID}")));
+    assert_eq!(
+        transport.calls().last(),
+        Some(&format!("exec:{INSTANCE_ID}"))
+    );
     assert_eq!(started.elapsed(), Duration::from_secs(3));
     Ok(())
 }
@@ -599,10 +623,11 @@ async fn exec_waits_for_a_freshly_created_instance_that_is_still_provisioning() 
     let (backend, _store) = sandbox(transport.clone());
     let info = backend.create(&spec()?).await?;
     assert_eq!(info.state, BoxState::Creating);
-    backend
-        .exec(&info.id, &ExecRequest::new(["true"]))
-        .await?;
-    assert_eq!(transport.calls().last(), Some(&format!("exec:{INSTANCE_ID}")));
+    backend.exec(&info.id, &ExecRequest::new(["true"])).await?;
+    assert_eq!(
+        transport.calls().last(),
+        Some(&format!("exec:{INSTANCE_ID}"))
+    );
     Ok(())
 }
 
@@ -614,16 +639,22 @@ async fn exec_gives_up_on_an_instance_that_never_wakes_after_about_a_minute() ->
     let (backend, _store) = sandbox(transport.clone());
     let info = backend.create(&spec()?).await?;
     let started = tokio::time::Instant::now();
-    let result = backend
-        .exec(&info.id, &ExecRequest::new(["true"]))
-        .await;
+    let result = backend.exec(&info.id, &ExecRequest::new(["true"])).await;
     assert!(matches!(
         result,
-        Err(Error::InvalidState { actual: BoxState::Creating, .. })
+        Err(Error::InvalidState {
+            actual: BoxState::Creating,
+            ..
+        })
     ));
     assert_eq!(started.elapsed(), Duration::from_secs(60));
     // The command was never sent.
-    assert!(!transport.calls().iter().any(|call| call.starts_with("exec:")));
+    assert!(
+        !transport
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("exec:"))
+    );
     Ok(())
 }
 

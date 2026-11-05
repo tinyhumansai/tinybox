@@ -283,7 +283,10 @@ async fn list_gets_v1_instances_and_reads_the_data_array() -> TestResult {
     assert_eq!(listed[1].retention_key(), None);
 
     let request = server.await?.to_lowercase();
-    assert!(request.starts_with("get /v1/instances "), "request: {request}");
+    assert!(
+        request.starts_with("get /v1/instances "),
+        "request: {request}"
+    );
     assert!(
         request.contains("authorization: bearer sk_test"),
         "request: {request}"
@@ -337,7 +340,10 @@ async fn exec_gives_up_after_a_bounded_number_of_retries() -> TestResult {
         "{error:?}"
     );
     assert_eq!(server.await?.len(), EXEC_RETRY_BACKOFF.len() + 1);
-    assert_eq!(started.elapsed(), EXEC_RETRY_BACKOFF.iter().sum::<Duration>());
+    assert_eq!(
+        started.elapsed(),
+        EXEC_RETRY_BACKOFF.iter().sum::<Duration>()
+    );
     Ok(())
 }
 
@@ -360,7 +366,11 @@ async fn exec_never_retries_a_504_because_the_command_may_still_be_running() -> 
 
 #[tokio::test(start_paused = true)]
 async fn exec_does_not_retry_other_failures() -> TestResult {
-    for status_line in ["400 Bad Request", "402 Payment Required", "500 Internal Server Error"] {
+    for status_line in [
+        "400 Bad Request",
+        "402 Payment Required",
+        "500 Internal Server Error",
+    ] {
         let (base, server) = serve_sequence(vec![
             response(status_line, r#"{"error":"nope"}"#),
             response("200 OK", EXEC_OK),

@@ -13,15 +13,15 @@ use crate::api::InstanceView;
 /// The most instances one pass deletes, so a workspace with a long backlog
 /// never turns a single create into an unbounded burst of delete calls. The
 /// rest go on later passes.
-pub const MAX_EXPIRIES_PER_PASS: usize = 20;
+pub(crate) const MAX_EXPIRIES_PER_PASS: usize = 20;
 
 /// What one retention pass decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetentionPlan {
+pub(crate) struct RetentionPlan {
     /// The existing instance to hand back instead of creating one.
-    pub adopt: Option<InstanceView>,
+    pub(crate) adopt: Option<InstanceView>,
     /// Ids to delete, longest-asleep first, at most [`MAX_EXPIRIES_PER_PASS`].
-    pub expired: Vec<String>,
+    pub(crate) expired: Vec<String>,
 }
 
 /// Decide a pass over `instances` for the owner `key` at `now_secs` (unix
@@ -35,7 +35,7 @@ pub struct RetentionPlan {
 ///   `now_secs - delete_after_secs`. Instances without that entry belong to
 ///   someone else and are never listed here.
 #[must_use]
-pub fn plan(
+pub(crate) fn plan(
     instances: &[InstanceView],
     key: &str,
     now_secs: u64,
