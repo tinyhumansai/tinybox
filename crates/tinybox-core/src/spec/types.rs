@@ -190,7 +190,7 @@ impl Default for Lifecycle {
 /// Retention is not a lifetime: a retained box sleeps when idle and wakes on
 /// the next command, and only [`Retention::delete_after_secs`] of sleeping ends
 /// it. A backend that cannot honour it refuses the spec with
-/// [`Error::Unsupported`] naming [`Capability::Retention`]; it never runs the
+/// [`Error::Unsupported`] naming [`Capability::Retention`](crate::Capability::Retention); it never runs the
 /// box as a disposable one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Retention {

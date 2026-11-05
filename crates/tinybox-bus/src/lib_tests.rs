@@ -468,7 +468,7 @@ fn retention_wire_shape_is_additive_and_pinned() -> Result<(), serde_json::Error
         delete_after_secs: 2_592_000,
     };
     let snapshot =
-        serde_json::json!({"key":"user-42","idle_sleep_secs":900,"delete_after_secs":2592000});
+        serde_json::json!({"key":"user-42","idle_sleep_secs":900,"delete_after_secs":2_592_000});
     assert_eq!(serde_json::to_value(&retention)?, snapshot);
     assert_eq!(
         serde_json::from_value::<Retention>(snapshot.clone())?,
