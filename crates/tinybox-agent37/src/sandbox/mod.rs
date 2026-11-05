@@ -33,12 +33,13 @@ const SETTLE_BACKOFF: [Duration; 7] = [
     Duration::from_secs(15),
 ];
 
+type OwnerGate = Arc<tokio::sync::Mutex<()>>;
+
 /// The process-wide lock serializing lookup-and-create for one retained owner
 /// key within a namespace.
-fn owner_gate(namespace: &str, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static GATES: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>,
-    > = std::sync::LazyLock::new(Default::default);
+fn owner_gate(namespace: &str, key: &str) -> OwnerGate {
+    type Gates = std::sync::Mutex<std::collections::HashMap<(String, String), OwnerGate>>;
+    static GATES: std::sync::LazyLock<Gates> = std::sync::LazyLock::new(Default::default);
     let mut gates = GATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
