@@ -123,7 +123,15 @@ impl Agent37Sandbox {
             |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
         );
         let info = BoxInfo::new(id, view.state(), spec.clone()).created_at(created_at);
-        self.store.insert(&info)?;
+        match self.store.insert(&info) {
+            // The store outlives the host, and a crash skips destroy, so the
+            // record of a box being adopted again may still be there.
+            Err(Error::DuplicateBox { .. }) => {
+                self.store.remove(&info.id)?;
+                self.store.insert(&info)?;
+            }
+            other => other?,
+        }
         Ok(info)
     }
 

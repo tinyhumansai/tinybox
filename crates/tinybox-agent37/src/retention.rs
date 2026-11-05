@@ -33,7 +33,8 @@ pub(crate) struct RetentionPlan {
 /// - **Expire** every other instance that has a `tinybox.key` entry, is
 ///   `sleeping`, and whose `slept_at` is strictly older than
 ///   `now_secs - delete_after_secs`. Instances without that entry belong to
-///   someone else and are never listed here.
+///   someone else and are never listed here, and neither is one force-slept by
+///   an unpaid wallet: that sleep says nothing about whether it is in use.
 #[must_use]
 pub(crate) fn plan(
     instances: &[InstanceView],
@@ -51,7 +52,7 @@ pub(crate) fn plan(
     let cutoff = now_secs.saturating_sub(delete_after_secs);
     let mut expired: Vec<(u64, &str)> = instances
         .iter()
-        .filter(|view| view.has_retention_key() && view.is_sleeping())
+        .filter(|view| view.has_retention_key() && view.is_sleeping() && !view.past_due)
         .filter(|view| adopt.as_ref().is_none_or(|adopted| adopted.id != view.id))
         .filter_map(|view| {
             view.slept_at

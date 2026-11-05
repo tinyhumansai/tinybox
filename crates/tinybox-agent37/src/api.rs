@@ -181,6 +181,7 @@ impl InstanceView {
             status: status.into(),
             metadata: None,
             created: None,
+            past_due: false,
             slept_at: None,
         }
     }
