@@ -3232,7 +3232,7 @@ async fn uncertain_openshell_create_keeps_sandbox_cleanup_retryable() -> Result<
 }
 
 /// Live: an agent37 box runs a command through the **module** path
-/// (`reserve → create → exec → close`), the path a host such as OpenHuman
+/// (`reserve → create → exec → close`), the path a host such as `OpenHuman`
 /// drives over the bus — not `Agent37Sandbox::exec` called directly. This is
 /// the seam the crate-level smoke cannot cover: it crosses the module Exec
 /// guard against the real service. Gated on `AGENT37_API_KEY`; without it the
