@@ -1053,3 +1053,24 @@ fn trusted_resource_launcher_resolution_accepts_only_fixed_trusted_paths() -> st
     assert!(args::trusted_prlimit_program()?.is_absolute());
     Ok(())
 }
+
+#[tokio::test]
+async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Result<()> {
+    let store = Arc::new(MemoryStore::new());
+    let sandbox = NamespaceSandbox::new(Arc::new(RecordingHost::default()), store.clone());
+    let retained = spec()?.with_retention(tinybox_core::Retention {
+        key: "user-42".to_owned(),
+        idle_sleep_secs: 900,
+        delete_after_secs: 86_400,
+    });
+    let result = sandbox.create(&retained).await;
+    assert!(matches!(
+        result,
+        Err(Error::Unsupported {
+            capability: tinybox_core::Capability::Retention,
+            ..
+        })
+    ));
+    assert!(store.list()?.is_empty());
+    Ok(())
+}

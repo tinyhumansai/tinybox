@@ -453,3 +453,24 @@ fn unexpected<T: std::fmt::Debug>(outcome: &Result<T>) -> Error {
         message: format!("{outcome:?}"),
     }
 }
+
+#[tokio::test]
+async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Result<()> {
+    let host = ScriptedHost::silent();
+    let (sandbox, store) = sandbox(&host);
+    let retained = spec()?.with_retention(tinybox_core::Retention {
+        key: "user-42".to_owned(),
+        idle_sleep_secs: 900,
+        delete_after_secs: 86_400,
+    });
+    let result = sandbox.create(&retained).await;
+    assert!(matches!(
+        result,
+        Err(Error::Unsupported {
+            capability: tinybox_core::Capability::Retention,
+            ..
+        })
+    ));
+    assert!(store.list()?.is_empty());
+    Ok(())
+}
