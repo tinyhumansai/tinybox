@@ -1694,6 +1694,14 @@ fn make_spec(request: &CreateRequest, host: &str) -> Result<BoxSpec> {
             guest: port.guest,
             host: port.host,
         }));
+    spec.retention = request
+        .retention
+        .as_ref()
+        .map(|retention| tinybox_core::Retention {
+            key: retention.key.clone(),
+            idle_sleep_secs: retention.idle_sleep_secs,
+            delete_after_secs: retention.delete_after_secs,
+        });
     Ok(spec)
 }
 

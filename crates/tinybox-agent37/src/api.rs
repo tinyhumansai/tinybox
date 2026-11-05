@@ -14,6 +14,8 @@
 //! - `POST {sandbox}/v1/instances/{id}/exec` — run one command; returns
 //!   `{ exit_code, stdout, stderr, truncated }` with **plain** (not base64)
 //!   output.
+//! - `GET {api}/v1/instances` — list; `{ data: [ <instance>, … ] }`, newest
+//!   first, with no filter parameters.
 //! - `GET {api}/v1/instances/{id}` — inspect; `{ id, status, … }`; 404 = gone.
 //! - `DELETE {api}/v1/instances/{id}` — delete; 2xx or 404 = deleted.
 //!
@@ -53,6 +55,18 @@ const SHAPES: [(u32, u64); 4] = [(2, 4), (4, 8), (4, 16), (4, 32)];
 /// Metadata key carrying the tinybox namespace on the agent37 instance. agent37
 /// stores metadata and never interprets it; this is for observability only.
 pub const NAMESPACE_METADATA_KEY: &str = "tinybox.namespace";
+
+/// Metadata key carrying a retained box's owner key (see
+/// [`Retention::key`](tinybox_core::Retention::key)). agent37 echoes metadata
+/// back on list, which is how a box is found again after the host restarts.
+/// Instances without this key are never touched by the retention pass.
+pub const KEY_METADATA_KEY: &str = "tinybox.key";
+
+/// The shortest idle timeout agent37 accepts, in seconds.
+pub const MIN_IDLE_TIMEOUT_SECS: u32 = 300;
+
+/// The longest idle timeout agent37 accepts, in seconds.
+pub const MAX_IDLE_TIMEOUT_SECS: u32 = 86_400;
 
 /// The CPU, memory and disk shape for an agent37 instance. All optional: an
 /// omitted field takes agent37's template default.
@@ -94,6 +108,15 @@ pub struct CreateBody {
     /// Workspace-defined key/value pairs; carries the namespace.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    /// Put the instance to sleep when idle. Sent only for a retained box, so
+    /// every other create serializes exactly as it always has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_sleep: Option<bool>,
+    /// Seconds idle before the instance sleeps, clamped to
+    /// [`MIN_IDLE_TIMEOUT_SECS`]`..=`[`MAX_IDLE_TIMEOUT_SECS`]. Sent with
+    /// `auto_sleep`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_seconds: Option<u32>,
 }
 
 /// `POST /v1/instances/{id}/exec` body.
@@ -129,6 +152,74 @@ pub struct InstanceView {
     pub id: String,
     /// The lifecycle status string (see [`box_state_from_status`]).
     pub status: String,
+    /// The free key/value metadata the instance was created with, echoed back
+    /// and never interpreted by agent37. Values are kept as JSON because the
+    /// workspace is shared: another tenant's instance may hold a non-string,
+    /// and that must not fail a whole listing.
+    #[serde(default)]
+    pub metadata: Option<BTreeMap<String, serde_json::Value>>,
+    /// When the instance was created, in unix seconds, when reported.
+    #[serde(default)]
+    pub created: Option<u64>,
+    /// Whether the workspace's wallet lapsed: every instance is force-slept, so
+    /// a sleep then says nothing about whether the box is in use.
+    #[serde(default)]
+    pub past_due: bool,
+    /// When the instance fell asleep, in unix seconds; set only while it
+    /// sleeps.
+    #[serde(default)]
+    pub slept_at: Option<u64>,
+}
+
+impl InstanceView {
+    /// A view with only an id and a status, as create and inspect minimally
+    /// report one; the lifecycle fields are unset.
+    #[must_use]
+    pub fn new(id: impl Into<String>, status: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            status: status.into(),
+            metadata: None,
+            created: None,
+            past_due: false,
+            slept_at: None,
+        }
+    }
+
+    /// Whether the instance carries a [`KEY_METADATA_KEY`] entry, whatever its
+    /// value: it was made by a retaining tinybox, so the retention pass may
+    /// expire it.
+    #[must_use]
+    pub fn has_retention_key(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.contains_key(KEY_METADATA_KEY))
+    }
+
+    /// The owner key this instance was created for, when it has a string one.
+    #[must_use]
+    pub fn retention_key(&self) -> Option<&str> {
+        self.metadata.as_ref()?.get(KEY_METADATA_KEY)?.as_str()
+    }
+
+    /// The tinybox state this instance's status maps to.
+    #[must_use]
+    pub fn state(&self) -> BoxState {
+        box_state_from_status(&self.status)
+    }
+
+    /// Whether the status is exactly `sleeping`.
+    #[must_use]
+    pub fn is_sleeping(&self) -> bool {
+        self.status.eq_ignore_ascii_case("sleeping")
+    }
+}
+
+/// `GET /v1/instances` response.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ListResponse {
+    /// Every instance in the workspace, newest first.
+    pub data: Vec<InstanceView>,
 }
 
 /// The template a spec asks for, or the reason this backend refuses it.
@@ -205,18 +296,38 @@ pub fn instance_resources(resources: &Resources) -> Option<InstanceResources> {
 
 /// Build the create body for `spec` under `namespace`.
 ///
+/// A spec with [`Retention`](tinybox_core::Retention) also turns on agent37's
+/// auto-sleep and stamps the owner key into the metadata; without one the body
+/// carries neither.
+///
 /// # Errors
 ///
 /// Everything [`check_spec`] refuses.
 pub fn create_body(namespace: &str, spec: &BoxSpec) -> Result<CreateBody> {
     let template = check_spec(spec)?;
-    let metadata = BTreeMap::from([(NAMESPACE_METADATA_KEY.to_owned(), namespace.to_owned())]);
+    let mut metadata = BTreeMap::from([(NAMESPACE_METADATA_KEY.to_owned(), namespace.to_owned())]);
+    let (auto_sleep, idle_timeout_seconds) = match &spec.retention {
+        Some(retention) => {
+            metadata.insert(KEY_METADATA_KEY.to_owned(), retention.key.clone());
+            (
+                Some(true),
+                Some(
+                    retention
+                        .idle_sleep_secs
+                        .clamp(MIN_IDLE_TIMEOUT_SECS, MAX_IDLE_TIMEOUT_SECS),
+                ),
+            )
+        }
+        None => (None, None),
+    };
     Ok(CreateBody {
         template,
         resources: instance_resources(&spec.resources),
         network: Network::DenyAll,
         env: spec.env.clone(),
         metadata,
+        auto_sleep,
+        idle_timeout_seconds,
     })
 }
 

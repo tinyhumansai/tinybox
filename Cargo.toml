@@ -53,7 +53,7 @@ thiserror = "2"
 # provider registry, which native `async fn` in traits cannot express yet.
 async-trait = "0.1"
 # The workspace's single async runtime, matching the one the module SDK owns.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 # Module integration tests and the release verifier pass explicit JSON config,
 # and the CLI persists its box store as JSON.
 serde_json = "1"

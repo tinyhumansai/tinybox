@@ -38,10 +38,21 @@
 //!   and declared [`BestEffort`](tinybox_core::Enforcement::BestEffort), since
 //!   agent37 offers fixed shapes and caps CPU rather than honouring an
 //!   arbitrary limit exactly.
+//! - **Retention:** declares [`Capability::Retention`](tinybox_core::Capability::Retention).
+//!   A spec with [`Retention`](tinybox_core::Retention) makes a box one owner
+//!   keeps across uses: it sleeps when idle, wakes on the next command, is
+//!   adopted by owner key on a later create (after a host restart too), and is
+//!   deleted only by the expiry pass of a later create once it has slept past
+//!   `delete_after_secs`. [`destroy`](tinybox_core::Sandbox::destroy) on such a
+//!   box forgets the local record and leaves the instance.
+//! - **Waking:** `exec` waits (about a minute) for a provisioning, starting or
+//!   waking instance, and the transport retries the exec refusals that prove
+//!   the command never started (`409`, `503`) but never `504`.
 //! - **Snapshots / forking:** not offered by agent37; declared unsupported
 //!   rather than emulated (tinybox rule 1).
 
 mod config;
+mod retention;
 mod sandbox;
 
 pub mod api;

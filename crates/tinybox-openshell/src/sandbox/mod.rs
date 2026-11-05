@@ -155,6 +155,7 @@ impl Sandbox for OpenShellSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        spec.refuse_retention(self.name())?;
         // Claim the record first: it is cheap, and it allocates the identifier
         // the sandbox is named after. Building the command next means a spec
         // this backend refuses leaves no sandbox, and only a record to drop.

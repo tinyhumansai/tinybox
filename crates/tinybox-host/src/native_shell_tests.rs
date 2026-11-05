@@ -564,6 +564,7 @@ fn request() -> NativeShellRunRequest {
             resources: ResourceLimits::default(),
             ports: Vec::new(),
             env: BTreeMap::new(),
+            retention: None,
         },
         shell: ShellExecRequest {
             process: ResourceId("placeholder-process".into()),

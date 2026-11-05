@@ -31,10 +31,14 @@ base64.workspace = true
 # ADR it references. The client is confined behind the `Transport` seam so the
 # request builders and the `Sandbox` impl stay unit-testable without a network.
 reqwest.workspace = true
+# Backoff between exec retries and while waiting for an instance to wake is
+# `tokio::time::sleep`; reqwest already brings tokio, so this adds no new tree.
+tokio.workspace = true
 
 [dev-dependencies]
-# The async runtime the `#[tokio::test]` tests run on.
-tokio.workspace = true
+# The async runtime the `#[tokio::test]` tests run on; `test-util` pauses its
+# clock so backoff is asserted in virtual time instead of slept.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

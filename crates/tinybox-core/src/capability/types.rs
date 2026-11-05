@@ -120,13 +120,26 @@ pub enum Capability {
     /// a command printed, must decline: a background process it cannot later
     /// find or stop is worse than a refusal.
     Detach,
+    /// Keeping a box for its owner between uses, so a later create for the
+    /// same owner finds it again.
+    ///
+    /// A sandbox declares this when it can put an idle box to sleep, wake it
+    /// on the next command, find it again by [`Retention::key`] after the host
+    /// process restarts, and delete it once it has been unused for the
+    /// requested time. A sandbox that cannot must refuse a spec carrying a
+    /// [`Retention`] — a box that silently dies with its handle is the failure
+    /// this capability exists to prevent.
+    ///
+    /// [`Retention`]: crate::spec::Retention
+    /// [`Retention::key`]: crate::spec::Retention::key
+    Retention,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
     ///
     /// Used to render a declared set; keep it in step with the enum.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::FilesystemSnapshot,
         Self::MemorySnapshot,
         Self::Fork,
@@ -134,6 +147,7 @@ impl Capability {
         Self::PortForward,
         Self::ResourceLimits,
         Self::Detach,
+        Self::Retention,
     ];
 
     /// This capability's bit within a [`SandboxCapabilities`] feature set.
@@ -148,6 +162,7 @@ impl Capability {
             Self::PortForward => 1 << 4,
             Self::ResourceLimits => 1 << 5,
             Self::Detach => 1 << 6,
+            Self::Retention => 1 << 7,
         }
     }
 }
@@ -162,6 +177,7 @@ impl fmt::Display for Capability {
             Self::PortForward => "port forwarding",
             Self::ResourceLimits => "resource limits",
             Self::Detach => "detached processes",
+            Self::Retention => "retained boxes",
         };
         formatter.write_str(text)
     }

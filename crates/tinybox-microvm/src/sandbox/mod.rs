@@ -169,6 +169,7 @@ impl Sandbox for MicroVmSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        spec.refuse_retention(self.name())?;
         self.require_spec(spec)?;
         spec.network.refuse_allowlist(self.name())?;
         // Nothing boots here: a box is a record and a directory, and the VM

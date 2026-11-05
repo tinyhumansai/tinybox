@@ -126,3 +126,17 @@ fn a_box_without_a_creation_time_keeps_it_unknown() {
     row.as_object_mut().expect("row").remove("created_at");
     assert_eq!(to_body(row).expect("decodes")["created_ms"], Value::Null);
 }
+
+#[test]
+fn a_retention_in_a_row_survives_the_v1_conversion_and_a_null_one_is_dropped() {
+    let mut retained = v1();
+    retained["spec"]["retention"] =
+        json!({"key": "user-42", "idle_sleep_secs": 900, "delete_after_secs": 60});
+    let body = to_body(retained).expect("decodes");
+    assert_eq!(body["spec"]["retention"]["key"], "user-42");
+
+    let mut unset = v1();
+    unset["spec"]["retention"] = Value::Null;
+    let body = to_body(unset).expect("decodes");
+    assert!(body["spec"].get("retention").is_none());
+}

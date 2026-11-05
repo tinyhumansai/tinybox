@@ -84,6 +84,14 @@ pub enum Error {
         limit: &'static str,
     },
 
+    /// A retention policy was unusable, such as one that would delete a box the
+    /// moment it sleeps.
+    #[error("invalid retention: {reason}")]
+    InvalidRetention {
+        /// What was wrong, in lowercase and without punctuation.
+        reason: &'static str,
+    },
+
     /// A network policy was malformed, such as an empty allowlist or one that
     /// names a cloud metadata endpoint.
     #[error("invalid network policy: {reason}")]

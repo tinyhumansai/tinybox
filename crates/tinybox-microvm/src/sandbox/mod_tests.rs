@@ -697,3 +697,24 @@ async fn an_unenforceable_network_allowlist_is_refused_at_creation() -> Result<(
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Result<()> {
+    let store = Arc::new(MemoryStore::new());
+    let sandbox = MicroVmSandbox::new(ScriptedHost::booting("", 0), store.clone(), image());
+    let retained = spec()?.with_retention(tinybox_core::Retention {
+        key: "user-42".to_owned(),
+        idle_sleep_secs: 900,
+        delete_after_secs: 86_400,
+    });
+    let result = sandbox.create(&retained).await;
+    assert!(matches!(
+        result,
+        Err(Error::Unsupported {
+            capability: tinybox_core::Capability::Retention,
+            ..
+        })
+    ));
+    assert_eq!(store.list()?.len(), 0);
+    Ok(())
+}

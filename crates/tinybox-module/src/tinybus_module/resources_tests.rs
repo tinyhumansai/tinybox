@@ -70,6 +70,7 @@ fn sandbox_selection_and_spec_mapping_preserve_host_policy() -> Result<()> {
                 host: Some(18080),
             }],
             env: BTreeMap::from([("MODE".into(), "test".into())]),
+            retention: None,
         };
         let spec = make_spec(&request, "ssh")?;
         assert_eq!(spec.workspace.host.as_str(), "ssh");
@@ -80,7 +81,56 @@ fn sandbox_selection_and_spec_mapping_preserve_host_policy() -> Result<()> {
         assert_eq!(spec.resources.disk_bytes, 2_000_000);
         assert_eq!(spec.ports.len(), 1);
         assert_eq!(spec.env.get("MODE").map(String::as_str), Some("test"));
+        assert_eq!(spec.retention, None);
     }
+    Ok(())
+}
+
+#[test]
+fn spec_mapping_carries_retention_into_the_box_spec() -> Result<()> {
+    let request = CreateRequest {
+        resource: ResourceId("retention-test".into()),
+        backend: "agent37".into(),
+        workspace: Workspace::Image("base".into()),
+        retention: Some(tinybox_bus::Retention {
+            key: "user-42".into(),
+            idle_sleep_secs: 900,
+            delete_after_secs: 86_400,
+        }),
+        ..Default::default()
+    };
+    let spec = make_spec(&request, "local")?;
+    assert_eq!(
+        spec.retention,
+        Some(tinybox_core::Retention {
+            key: "user-42".into(),
+            idle_sleep_secs: 900,
+            delete_after_secs: 86_400,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backend_that_cannot_retain_refuses_a_retained_create_and_frees_the_resource()
+-> Result<()> {
+    let resources = Resources::test_resources();
+    let id = resources.reserve(ReserveRequest::Resource).await?;
+    let refused = resources
+        .create(CreateRequest {
+            resource: id.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(".".into()),
+            retention: Some(tinybox_bus::Retention {
+                key: "user-42".into(),
+                idle_sleep_secs: 900,
+                delete_after_secs: 86_400,
+            }),
+            ..Default::default()
+        })
+        .await;
+    assert!(refused.is_err());
+    assert!(resources.inspect(&id).await.is_err());
     Ok(())
 }
 
@@ -1548,6 +1598,7 @@ async fn queued_spawn_stays_fenced_after_close_cleanup_fails() -> Result<()> {
                 network: tinybox_bus::NetworkPolicy::default(),
                 resources: tinybox_bus::ResourceLimits::default(),
                 ports: Vec::new(),
+                retention: None,
             },
             host.clone(),
         )
