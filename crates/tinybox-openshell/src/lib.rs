@@ -34,9 +34,9 @@
 //!
 //! The tinybox module serves this backend as `openshell` wherever it serves
 //! Docker: `Create` and `Exec` accept it, and `Spawn` does not, because a
-//! sandbox has no detached processes. The module names each sandbox after its
-//! resource identifier, so sandboxes from different module instances sharing a
-//! gateway never collide.
+//! sandbox has no detached processes. The module names each sandbox from a
+//! digest of its resource identifier, so sandboxes from different module
+//! instances sharing a gateway keep names of their own.
 //!
 //! ```no_run
 //! use std::sync::Arc;

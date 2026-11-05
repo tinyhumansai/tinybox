@@ -160,7 +160,7 @@ async fn creates_a_labelled_sandbox_and_records_the_box() -> Result<()> {
     let runs = host.runs();
     assert_eq!(runs.len(), 1);
     let create = &runs[0];
-    assert!(create.argv.contains(&"tinybox-chottu-box-0".to_owned()));
+    assert!(create.argv.contains(&sandbox_name("chottu", &info.id)));
     assert!(!create.argv.contains(&"--policy".to_owned()));
     // The value rides in the CLI's environment, never its argv.
     assert_eq!(
