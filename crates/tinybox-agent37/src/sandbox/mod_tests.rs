@@ -148,6 +148,37 @@ fn spec() -> Result<BoxSpec> {
     ))
 }
 
+/// A store whose every write fails, as an unreachable database's would.
+#[derive(Debug)]
+struct BrokenStore;
+
+impl Store for BrokenStore {
+    fn insert(&self, _info: &BoxInfo) -> Result<()> {
+        Err(Error::Store {
+            operation: "insert",
+            message: "unreachable".to_owned(),
+        })
+    }
+
+    fn get(&self, id: &BoxId) -> Result<BoxInfo> {
+        Err(Error::UnknownBox {
+            id: id.as_str().to_owned(),
+        })
+    }
+
+    fn list(&self) -> Result<Vec<BoxInfo>> {
+        Ok(Vec::new())
+    }
+
+    fn update(&self, _info: &BoxInfo) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove(&self, _id: &BoxId) -> Result<()> {
+        Ok(())
+    }
+}
+
 fn sandbox(transport: Arc<FakeTransport>) -> (Agent37Sandbox, Arc<MemoryStore>) {
     let store = Arc::new(MemoryStore::new());
     let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -560,14 +591,7 @@ async fn a_failed_listing_fails_the_create_rather_than_minting_a_duplicate() -> 
 #[tokio::test]
 async fn a_failed_record_insert_on_an_adopted_box_keeps_the_instance() -> Result<()> {
     let transport = with_listed(vec![kept("adopted01", "running", "user-42", 1, None)]);
-    let (backend, store) = sandbox(transport.clone());
-    // The record is already there, so adopting it again collides in the store.
-    let existing = BoxInfo::new(
-        BoxId::new("adopted01")?,
-        BoxState::Ready,
-        retained("user-42")?,
-    );
-    store.insert(&existing)?;
+    let backend = Agent37Sandbox::new(transport.clone(), Arc::new(BrokenStore));
     let result = backend.create(&retained("user-42")?).await;
     assert!(result.is_err());
     // The instance holds a user's files: it must not be deleted.

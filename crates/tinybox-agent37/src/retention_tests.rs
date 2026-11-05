@@ -178,5 +178,5 @@ fn a_box_slept_by_an_unpaid_wallet_is_never_expired() {
         Some(NOW - 60 * DAY),
     );
     suspended.past_due = true;
-    assert!(plan_for(&[suspended]).expired.is_empty());
+    assert_eq!(plan_for(&[suspended]).expired.len(), 0);
 }
