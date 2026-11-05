@@ -59,6 +59,8 @@ fn create_body() -> CreateBody {
         network: Network::DenyAll,
         env: BTreeMap::new(),
         metadata: BTreeMap::new(),
+        auto_sleep: None,
+        idle_timeout_seconds: None,
     }
 }
 
