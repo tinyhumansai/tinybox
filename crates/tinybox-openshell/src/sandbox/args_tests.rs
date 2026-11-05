@@ -16,8 +16,29 @@ fn id() -> Result<BoxId> {
 }
 
 #[test]
-fn names_a_sandbox_after_its_namespace_and_box() -> Result<()> {
-    assert_eq!(sandbox_name("chottu", &id()?), "tinybox-chottu-box-0");
+fn every_name_fits_the_gateways_limit() -> Result<()> {
+    // A gateway refuses a sandbox name over 19 characters, however long the
+    // namespace and box are: "name exceeds maximum length (50 > 19)".
+    let namespace = "0f8fad5b-d9cb-469f-a165-70867728950e-1";
+    for box_id in ["box-0", "box-123456789"] {
+        let name = sandbox_name(namespace, &BoxId::new(box_id)?);
+        assert_eq!(name.len(), 19, "{name}");
+        assert!(name.starts_with("tb-"), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn names_differ_by_namespace_and_by_box() -> Result<()> {
+    let name = sandbox_name("chottu", &id()?);
+    assert_eq!(name, sandbox_name("chottu", &id()?));
+    assert_ne!(name, sandbox_name("chottu-2", &id()?));
+    assert_ne!(name, sandbox_name("chottu", &BoxId::new("box-1")?));
+    // The two parts stay apart: this is not "chottu-box" and "0".
+    assert_ne!(
+        sandbox_name("chottu-box", &BoxId::new("0")?),
+        sandbox_name("chottu", &BoxId::new("box-0")?)
+    );
     Ok(())
 }
 
@@ -280,6 +301,17 @@ fn maps_every_phase_to_a_box_state() -> Result<()> {
         let json = format!(r#"{{"name":"tinybox-chottu-box-0","phase":"{phase}"}}"#);
         assert_eq!(state_of(&json)?, state, "phase {phase}");
     }
+    Ok(())
+}
+
+#[test]
+fn reads_the_lifecycle_phase_over_the_provisioning_step() -> Result<()> {
+    // What a 0.1.7 gateway answers: the sandbox's phase at the top, and the
+    // step provisioning reached, in its own words, beneath it.
+    let ready = r#"{"phase":"Ready","provisioning":{"phase":"ready"}}"#;
+    assert_eq!(state_of(ready)?, BoxState::Ready);
+    let starting = r#"{"phase":"Provisioning","provisioning":{"phase":"admission"}}"#;
+    assert_eq!(state_of(starting)?, BoxState::Creating);
     Ok(())
 }
 
