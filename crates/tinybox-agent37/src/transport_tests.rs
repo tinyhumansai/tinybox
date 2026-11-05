@@ -7,6 +7,7 @@ use super::*;
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -37,6 +38,31 @@ async fn serve_once(
             let mut buf = [0u8; 4096];
             if let Ok(read) = socket.read(&mut buf).await {
                 captured = String::from_utf8_lossy(&buf[..read]).into_owned();
+            }
+            let _ = socket.write_all(reply.as_bytes()).await;
+            let _ = socket.flush().await;
+        }
+        captured
+    });
+    Ok((base, handle))
+}
+
+/// Bind a loopback listener and answer successive requests with `replies` in
+/// order, one connection each; the handle yields the raw requests received.
+async fn serve_sequence(
+    replies: Vec<String>,
+) -> std::result::Result<(String, tokio::task::JoinHandle<Vec<String>>), Box<dyn StdError>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut captured = Vec::new();
+        for reply in replies {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            if let Ok(read) = socket.read(&mut buf).await {
+                captured.push(String::from_utf8_lossy(&buf[..read]).into_owned());
             }
             let _ = socket.write_all(reply.as_bytes()).await;
             let _ = socket.flush().await;
@@ -233,4 +259,116 @@ fn from_env_runs_the_config_delegation() {
     // The ambient environment decides the outcome, so this only exercises the
     // delegation to `Agent37Config::from_env` — it asserts no particular result.
     let _ = HttpTransport::from_env();
+}
+
+const EXEC_OK: &str = r#"{"exit_code":0,"stdout":"hi\n","stderr":"","truncated":false}"#;
+
+fn exec_body() -> ExecBody {
+    ExecBody {
+        command: "echo hi".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn list_gets_v1_instances_and_reads_the_data_array() -> TestResult {
+    let (base, server) = serve_once(response(
+        "200 OK",
+        r#"{"data":[{"id":"a1","status":"sleeping","created":5,"slept_at":9,"metadata":{"tinybox.key":"u"}},{"id":"b2","status":"running","metadata":null}]}"#,
+    ))
+    .await?;
+    let listed = transport_to(&base)?.list().await?;
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].retention_key(), Some("u"));
+    assert_eq!(listed[0].slept_at, Some(9));
+    assert_eq!(listed[1].retention_key(), None);
+
+    let request = server.await?.to_lowercase();
+    assert!(request.starts_with("get /v1/instances "), "request: {request}");
+    assert!(
+        request.contains("authorization: bearer sk_test"),
+        "request: {request}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_list_failure_is_a_backend_error() -> TestResult {
+    let (base, server) = serve_once(response("500 Internal Server Error", "")).await?;
+    assert!(matches!(
+        transport_to(&base)?.list().await,
+        Err(Error::Backend { .. })
+    ));
+    let _ = server.await;
+    let base = dead_base().await?;
+    assert!(matches!(
+        transport_to(&base)?.list().await,
+        Err(Error::Backend { .. })
+    ));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn exec_retries_409_then_503_with_backoff_and_returns_the_result() -> TestResult {
+    let (base, server) = serve_sequence(vec![
+        response("409 Conflict", r#"{"error":"try_again"}"#),
+        response("503 Service Unavailable", r#"{"error":"wake_timeout"}"#),
+        response("200 OK", EXEC_OK),
+    ])
+    .await?;
+    let started = tokio::time::Instant::now();
+    let result = transport_to(&base)?.exec("ab12", &exec_body()).await?;
+    assert_eq!(result.stdout, "hi\n");
+    assert_eq!(server.await?.len(), 3);
+    // 500 ms, then 1 s.
+    assert_eq!(started.elapsed(), Duration::from_millis(1500));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn exec_gives_up_after_a_bounded_number_of_retries() -> TestResult {
+    let replies = (0..=EXEC_RETRY_BACKOFF.len())
+        .map(|_| response("409 Conflict", r#"{"error":"try_again"}"#))
+        .collect();
+    let (base, server) = serve_sequence(replies).await?;
+    let started = tokio::time::Instant::now();
+    let error = transport_to(&base)?.exec("ab12", &exec_body()).await;
+    assert!(
+        matches!(&error, Err(Error::Backend { message, .. }) if message.contains("409")),
+        "{error:?}"
+    );
+    assert_eq!(server.await?.len(), EXEC_RETRY_BACKOFF.len() + 1);
+    assert_eq!(started.elapsed(), EXEC_RETRY_BACKOFF.iter().sum::<Duration>());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn exec_never_retries_a_504_because_the_command_may_still_be_running() -> TestResult {
+    // The second reply would succeed; a retry would reach it and run the
+    // command twice.
+    let (base, server) = serve_sequence(vec![
+        response("504 Gateway Timeout", r#"{"error":"try_again"}"#),
+        response("200 OK", EXEC_OK),
+    ])
+    .await?;
+    let started = tokio::time::Instant::now();
+    let error = transport_to(&base)?.exec("ab12", &exec_body()).await;
+    assert!(matches!(&error, Err(Error::Backend { message, .. }) if message.contains("504")));
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    drop(server);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn exec_does_not_retry_other_failures() -> TestResult {
+    for status_line in ["400 Bad Request", "402 Payment Required", "500 Internal Server Error"] {
+        let (base, server) = serve_sequence(vec![
+            response(status_line, r#"{"error":"nope"}"#),
+            response("200 OK", EXEC_OK),
+        ])
+        .await?;
+        let error = transport_to(&base)?.exec("ab12", &exec_body()).await;
+        assert!(matches!(error, Err(Error::Backend { .. })), "{status_line}");
+        drop(server);
+    }
+    Ok(())
 }
