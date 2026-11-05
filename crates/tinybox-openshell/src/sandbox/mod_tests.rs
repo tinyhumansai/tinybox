@@ -456,7 +456,7 @@ fn unexpected<T: std::fmt::Debug>(outcome: &Result<T>) -> Error {
 
 #[tokio::test]
 async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Result<()> {
-    let host = ScriptedHost::silent();
+    let host = ScriptedHost::new([]);
     let (sandbox, store) = sandbox(&host);
     let retained = spec()?.with_retention(tinybox_core::Retention {
         key: "user-42".to_owned(),

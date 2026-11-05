@@ -137,6 +137,7 @@ impl Sandbox for NamespaceSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        spec.refuse_retention(self.name())?;
         self.require_spec(spec)?;
         spec.network.refuse_allowlist(self.name())?;
         // Nothing is started here: a box is a record plus a directory, and the
