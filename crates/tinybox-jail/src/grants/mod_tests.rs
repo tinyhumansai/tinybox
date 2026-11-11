@@ -10,7 +10,7 @@ fn resolve_hermetic(
     cfg: &LocalGrantConfig,
     protected: &ProtectedPaths,
 ) -> tinybox_core::Result<JailGrants> {
-    resolve_local_jail_grants_in(home, None, cfg, protected)
+    resolve_local_jail_grants_in(home, None, &ConfiguredHomes::default(), cfg, protected)
 }
 
 fn fake_home() -> std::io::Result<tempfile::TempDir> {
@@ -1119,5 +1119,103 @@ fn missing_git_include_locations_cannot_be_created_from_writable_grants()
     let grants = resolve_hermetic(Some(home.path()), &config, &ProtectedPaths::default())?;
     assert_eq!(grants.read_write, Vec::<PathBuf>::new());
     assert!(!has(&grants.read_only, &home.path().join("future/config")));
+    Ok(())
+}
+
+/// A Cargo and a rustup home moved away from `~` with `CARGO_HOME` and
+/// `RUSTUP_HOME`, laid out like the real ones.
+fn moved_homes() -> std::io::Result<(tempfile::TempDir, ConfiguredHomes)> {
+    let moved = tempfile::tempdir()?;
+    let cargo = moved.path().join("cargo");
+    let rustup = moved.path().join("rustup");
+    for dir in ["bin", "registry", "git"] {
+        fs::create_dir_all(cargo.join(dir))?;
+    }
+    fs::write(cargo.join("config.toml"), "")?;
+    fs::write(cargo.join("credentials.toml"), "token = \"secret\"")?;
+    fs::create_dir_all(rustup.join("toolchains"))?;
+    Ok((
+        moved,
+        ConfiguredHomes {
+            cargo: Some(cargo),
+            rustup: Some(rustup),
+        },
+    ))
+}
+
+#[test]
+fn configured_cargo_and_rustup_homes_are_granted_like_the_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = fake_home()?;
+    let (_moved, homes) = moved_homes()?;
+    let cargo = homes.cargo.clone().ok_or("cargo home")?;
+    let rustup = homes.rustup.clone().ok_or("rustup home")?;
+
+    let grants = resolve_local_jail_grants_in(
+        Some(home.path()),
+        None,
+        &homes,
+        &LocalGrantConfig::default(),
+        &ProtectedPaths::default(),
+    )?;
+
+    for part in ["bin", "registry", "git", "config.toml"] {
+        assert!(has(&grants.read_only, &canon(&cargo.join(part))?), "{part}");
+    }
+    assert!(has(&grants.read_only, &canon(&rustup)?));
+    // The root and its credentials never: only the parts Cargo needs.
+    assert!(!has(&all(&grants), &canon(&cargo)?));
+    assert!(!has(
+        &all(&grants),
+        &canon(&cargo.join("credentials.toml"))?
+    ));
+    assert!(
+        grants
+            .read_write
+            .iter()
+            .all(|granted| !granted.starts_with(canon(&cargo).unwrap_or_default())),
+        "{:?}",
+        grants.read_write
+    );
+    Ok(())
+}
+
+#[test]
+fn a_writable_extra_cannot_reach_a_configured_cargo_homes_host_parts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = fake_home()?;
+    let (_moved, homes) = moved_homes()?;
+    let cargo = homes.cargo.clone().ok_or("cargo home")?;
+    let config = LocalGrantConfig {
+        extra_read_write: vec![cargo.join("bin").to_string_lossy().into_owned()],
+        ..LocalGrantConfig::default()
+    };
+
+    let grants = resolve_local_jail_grants_in(
+        Some(home.path()),
+        None,
+        &homes,
+        &config,
+        &ProtectedPaths::default(),
+    )?;
+
+    assert!(!has(&grants.read_write, &canon(&cargo.join("bin"))?));
+    Ok(())
+}
+
+#[test]
+fn configured_homes_are_not_granted_when_toolchain_homes_is_off()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_moved, homes) = moved_homes()?;
+    let rustup = homes.rustup.clone().ok_or("rustup home")?;
+    let config = LocalGrantConfig {
+        toolchain_homes: false,
+        ..LocalGrantConfig::default()
+    };
+
+    let grants =
+        resolve_local_jail_grants_in(None, None, &homes, &config, &ProtectedPaths::default())?;
+
+    assert!(!has(&grants.read_only, &canon(&rustup)?));
     Ok(())
 }
