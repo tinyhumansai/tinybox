@@ -180,9 +180,13 @@ impl Sandbox for NamespaceSandbox {
             self.setrlimit_fallback,
             supports_expand_environment,
         )?;
+        let mut run = ExecRequest::new(argv);
+        if let Some(environment) = args::environment(&info.spec, request)? {
+            run = run.with_stdin(environment);
+        }
         // A command that runs and fails is a result, so the raw output is
         // returned rather than being turned into a backend error.
-        self.host.run(&ExecRequest::new(argv)).await
+        self.host.run(&run).await
     }
 
     async fn snapshot(&self, _id: &BoxId) -> Result<SnapshotId> {
