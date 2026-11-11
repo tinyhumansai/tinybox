@@ -11,6 +11,7 @@ fn jail() -> NativeJailConfig {
         enforcement: crate::JailEnforcement::Enforced,
         require_process_isolation: true,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     }
 }

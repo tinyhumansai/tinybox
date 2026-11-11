@@ -55,6 +55,10 @@ impl JailBackend for SeatbeltBackend {
         true
     }
 
+    fn denies_by_name(&self) -> bool {
+        true
+    }
+
     fn validate_carved_denials(&self, jail: &Jail) -> std::io::Result<()> {
         validate_denials(jail)
     }
@@ -264,6 +268,17 @@ fn render_profile(jail: &Jail) -> String {
         out.push_str(")\n");
     }
 
+    // Names denied wherever they appear: the file itself and, for a
+    // directory, everything under it. Last, so even a carved-out scratch
+    // cannot hold a readable `.npmrc`.
+    if !jail.deny_read_names.is_empty() {
+        out.push_str("(deny file-read* file-write*\n");
+        for name in &jail.deny_read_names {
+            let _ = writeln!(out, "  (regex #\"/{}(/|$)\")", regex_escape(name));
+        }
+        out.push_str(")\n");
+    }
+
     // `read_only` is informational on macOS — reads are already allowed
     // by `(allow default)`. We keep the field on `Jail` because Landlock
     // and AppContainer use it, and it lets callers express intent
@@ -275,6 +290,19 @@ fn render_profile(jail: &Jail) -> String {
 
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `name` as a literal inside a Seatbelt regex. The module refuses names with
+/// a quote, separator or NUL before they get here.
+fn regex_escape(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for character in name.chars() {
+        if r"\.^$|?*+()[]{}".contains(character) {
+            out.push('\\');
+        }
+        out.push(character);
+    }
+    out
 }
 
 #[cfg(test)]

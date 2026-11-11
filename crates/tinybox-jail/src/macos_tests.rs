@@ -103,6 +103,59 @@ fn a_scratch_inside_a_denied_folder_stays_usable_while_the_folder_is_denied() {
 }
 
 #[test]
+fn names_are_denied_by_a_regex_after_every_allow() {
+    let mut jail = Jail::new("/Users/a/project", "x");
+    assert!(!render_profile(&jail).contains("regex"));
+    jail.deny_read = vec!["/Users/a/.openhuman".into()];
+    jail.read_write = vec!["/Users/a/.openhuman/scratch".into()];
+    jail.deny_read_names = vec![".npmrc".into(), "a+b".into()];
+    let p = render_profile(&jail);
+    let names = p.find("(regex #\"/\\.npmrc(/|$)\")").expect("name rule");
+    assert!(p.contains("(regex #\"/a\\+b(/|$)\")"), "{p}");
+    // Last of all, so a carved-out scratch cannot hold a readable `.npmrc`.
+    assert!(names > p.rfind("(allow file-read* file-write*").expect("carve-out"));
+    assert!(SeatbeltBackend::new().denies_by_name());
+}
+
+#[test]
+fn regex_escape_quotes_every_metacharacter() {
+    assert_eq!(regex_escape(".npmrc"), "\\.npmrc");
+    assert_eq!(regex_escape("a(b)[c]{d}^$|?*+"), "a\\(b\\)\\[c\\]\\{d\\}\\^\\$\\|\\?\\*\\+");
+    assert_eq!(regex_escape("plain"), "plain");
+}
+
+/// Live: a name is denied at any depth and as a directory, a sibling is not.
+#[test]
+fn a_denied_name_is_unreadable_wherever_it_appears() {
+    let backend = SeatbeltBackend::new();
+    if !backend.is_available() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path().canonicalize().expect("canonical root");
+    fs::create_dir_all(root.join("a").join("b")).expect("mkdir");
+    fs::write(root.join(".npmrc"), "top-token").expect("write");
+    fs::write(root.join("a").join("b").join(".npmrc"), "deep-token").expect("write");
+    fs::write(root.join("a").join("other.txt"), "visible").expect("write");
+    let mut jail = Jail::new(&root, "test.names");
+    jail.deny_read_names = vec![".npmrc".into()];
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "cat a/other.txt; ! cat .npmrc 2>/dev/null && ! cat a/b/.npmrc 2>/dev/null",
+    ])
+    .current_dir(&root);
+
+    let child = backend.spawn_captured(&jail, cmd).expect("spawn");
+    let output = child.wait_with_output().expect("wait");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "visible");
+    assert!(!stdout.contains("token"));
+}
+
+#[test]
 fn escape_handles_backslash_and_quote() {
     assert_eq!(escape("a\\b"), "a\\\\b");
     assert_eq!(escape("a\"b"), "a\\\"b");

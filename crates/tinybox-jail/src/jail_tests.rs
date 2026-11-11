@@ -320,3 +320,18 @@ fn nested_denial_refuses_only_paths_deeper_than_a_direct_child() {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{nested}");
     }
 }
+
+#[test]
+fn a_backend_that_cannot_deny_by_name_refuses_a_name_denial() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut jail = Jail::new(root.path(), "names");
+    jail.deny_read_names = vec![".npmrc".into()];
+    let command = std::process::Command::new("/bin/true");
+
+    let error = crate::spawn_owned_captured_with(&crate::NoopBackend, &jail, command)
+        .err()
+        .expect("refused");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("cannot deny paths by name"), "{error}");
+}
