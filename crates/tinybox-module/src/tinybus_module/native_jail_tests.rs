@@ -207,6 +207,47 @@ fn requested_native_resource_limits_are_refused_before_spawn()
     Ok(())
 }
 
+#[test]
+fn a_limit_whose_controller_is_not_delegated_is_refused_not_dropped()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // A user manager that was delegated cpu and memory, but not pids.
+    let scope = tinybox_linux::ScopeProbe::from_parts(true, Some("cpu memory"));
+    let backend = super::NativeResourceBackend::with_scope(scope);
+    let support = backend.constraint_support();
+    assert_eq!(
+        support.enforcement(tinybox_core::Constraint::Cpu),
+        tinybox_core::Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(tinybox_core::Constraint::Pids),
+        tinybox_core::Enforcement::Unsupported
+    );
+
+    let root = tempfile::tempdir()?;
+    let mut command = tinybox_core::ExecRequest::new(["target-program"]);
+    command.cwd = Some(root.path().into());
+    let original = command.clone();
+    // Everything else about the request is acceptable, so only the missing
+    // controller can refuse it.
+    let mut jail = config();
+    jail.allow_subprocess = true;
+    let request = NativeJailRequest {
+        jail,
+        resources: Some(tinybox_bus::NativeJailResourceRequest {
+            cpu_millis: Some(1000),
+            memory_bytes: None,
+            pids_max: Some(16),
+            disk_bytes: None,
+        }),
+    };
+    let error = prepare_with_resources(root.path(), &request, &mut command, &backend)
+        .err()
+        .ok_or("a pids limit with no pids controller must be refused")?;
+    assert_eq!(error.wire_name(), tinybox_bus::UNSUPPORTED_OPERATION);
+    assert_eq!(command.argv, original.argv);
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn contract_21_resource_requests_refuse_before_spawn_on_non_linux()
