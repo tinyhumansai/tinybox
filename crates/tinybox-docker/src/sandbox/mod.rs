@@ -779,6 +779,7 @@ impl Sandbox for DockerSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        spec.refuse_retention(self.name())?;
         self.require_spec(spec)?;
         self.validate_network_policy(spec).await?;
         // The workspace is bind-mounted read-write, so it gets the one-shot

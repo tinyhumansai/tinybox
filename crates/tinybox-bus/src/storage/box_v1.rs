@@ -47,6 +47,10 @@ struct V1Spec {
     #[serde(default)]
     ports: Vec<Value>,
     env: BTreeMap<String, String>,
+    /// Absent in rows written before retention existed; a current writer
+    /// serializes an unset one as `null`.
+    #[serde(default)]
+    retention: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -167,7 +171,8 @@ pub fn to_body(source: Value) -> Result<Value, String> {
         spec,
         ..
     } = old;
-    Ok(json!({
+    let retention = spec.retention.clone();
+    let mut body = json!({
         "state": state_name(&state),
         "created_ms": created_at.as_ref().map(time_ms),
         "spec": {
@@ -181,7 +186,13 @@ pub fn to_body(source: Value) -> Result<Value, String> {
             "ports": spec.ports,
             "env": spec.env,
         },
-    }))
+    });
+    // Left out when unset, so a box that was never retained keeps the exact
+    // body it always had.
+    if let (Some(retention), Some(spec_body)) = (retention, body["spec"].as_object_mut()) {
+        spec_body.insert("retention".to_owned(), retention);
+    }
+    Ok(body)
 }
 
 #[cfg(test)]

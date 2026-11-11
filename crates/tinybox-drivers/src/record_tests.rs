@@ -195,3 +195,35 @@ fn the_contracts_v1_migration_matches_the_record_encoding() {
     let stored = serde_json::to_value(BoxRecord::try_from(&info).expect("record")).expect("json");
     assert_eq!(migrated, stored);
 }
+
+#[test]
+fn a_retained_box_keeps_its_retention_through_the_record() -> Result<()> {
+    let retention = tinybox_core::Retention {
+        key: "user-42".to_owned(),
+        idle_sleep_secs: 900,
+        delete_after_secs: 2_592_000,
+    };
+    let spec = base_spec(WorkspaceSource::OciImage("base".into()))?.with_retention(retention);
+    let info = info_with(spec)?;
+    assert_eq!(round_trip(&info)?.spec.retention, info.spec.retention);
+    let body = serde_json::to_value(BoxRecord::try_from(&info)?).map_err(|e| Error::Store {
+        operation: "encode",
+        message: e.to_string(),
+    })?;
+    assert_eq!(
+        body["spec"]["retention"],
+        json!({"key": "user-42", "idle_sleep_secs": 900, "delete_after_secs": 2_592_000})
+    );
+    Ok(())
+}
+
+#[test]
+fn a_box_without_retention_encodes_exactly_as_before() -> Result<()> {
+    let info = info_with(base_spec(WorkspaceSource::OciImage("base".into()))?)?;
+    let body = serde_json::to_value(BoxRecord::try_from(&info)?).map_err(|e| Error::Store {
+        operation: "encode",
+        message: e.to_string(),
+    })?;
+    assert!(body["spec"].get("retention").is_none());
+    Ok(())
+}

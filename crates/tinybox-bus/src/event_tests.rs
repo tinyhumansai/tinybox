@@ -44,7 +44,7 @@ fn process_events_keep_their_correlation_and_signal_wire_shape() -> Result<(), s
     );
     assert_eq!(names::PROCESS_EVENT, "ProcessEvent");
     assert_eq!(SIGNALS, &["ProcessEvent"]);
-    assert_eq!(CONTRACT_VERSION, (2, 3));
+    assert_eq!(CONTRACT_VERSION, (2, 4));
     Ok(())
 }
 
