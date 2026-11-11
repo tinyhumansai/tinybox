@@ -422,10 +422,13 @@ where
 {
     let remaining = deadline.saturating_duration_since(Instant::now());
     let poll = client.read_output(process.clone(), cursor).fuse();
+    // Before cancellation this delay is the run's deadline, so it must cover
+    // all of the remaining time. A shorter tick reported a read that was merely
+    // slow (a loaded host, or a busy bus) as a timeout with time still left.
     let delay = futures_timer::Delay::new(if cancellation_requested {
         Duration::from_millis(20)
     } else {
-        remaining.min(Duration::from_millis(20))
+        remaining
     })
     .fuse();
     pin_mut!(poll, delay);
