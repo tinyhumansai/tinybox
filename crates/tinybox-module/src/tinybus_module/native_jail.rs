@@ -263,6 +263,7 @@ fn unavailable() -> Error {
 struct NativeResourceBackend {
     expected: Mutex<Option<Vec<OsString>>>,
     requested: Mutex<Option<tinybox_bus::NativeJailResourceRequest>>,
+    launch: Mutex<Option<tinybox_linux::NativeJailLaunch>>,
 }
 
 impl NativeResourceBackend {
@@ -270,7 +271,19 @@ impl NativeResourceBackend {
         Self {
             expected: Mutex::new(None),
             requested: Mutex::new(None),
+            launch: Mutex::new(None),
         }
+    }
+
+    /// Holds the launch, and with it the private environment file, until this
+    /// execution's backend is dropped.
+    fn keep(&self, launch: tinybox_linux::NativeJailLaunch) -> Result<()> {
+        let mut held = self.launch.lock().map_err(|_| unavailable())?;
+        if held.is_some() {
+            return Err(unavailable());
+        }
+        *held = Some(launch);
+        Ok(())
     }
 
     fn bind(&self, argv: &[String]) -> Result<()> {
@@ -423,10 +436,14 @@ fn configure_resource_launcher(
         .map(Path::to_path_buf)
         .ok_or_else(unavailable)?;
     let systemd_run = tinybox_linux::trusted_systemd_run_program().map_err(|_| unavailable())?;
-    let argv = tinybox_linux::native_jail_argv_with_programs(native, &systemd_run, &bwrap)
+    let launch = tinybox_linux::native_jail_argv_with_programs(native, &systemd_run, &bwrap)
         .map_err(|_| unavailable())?;
-    backend.bind(&argv)?;
-    command.argv = argv;
+    backend.bind(&launch.argv)?;
+    command.argv.clone_from(&launch.argv);
+    // Held for the execution: the launcher opens and deletes the private file
+    // carrying the target's environment, and dropping this removes it if the
+    // launcher never ran.
+    backend.keep(launch)?;
     command.env = launcher_environment();
     command.cwd = None;
     Ok(())

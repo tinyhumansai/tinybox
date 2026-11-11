@@ -342,7 +342,7 @@ pub struct NativeJailCommand {
 /// # Errors
 /// Returns an error when a request is invalid, unsupported, or systemd's
 /// command-argument expansion behavior cannot be verified.
-pub fn native_jail_argv(request: &NativeJailCommand) -> std::io::Result<Vec<String>> {
+pub fn native_jail_argv(request: &NativeJailCommand) -> std::io::Result<NativeJailLaunch> {
     native_jail_argv_with_programs(
         request,
         &trusted_systemd_run_program()?,
@@ -360,13 +360,50 @@ pub fn native_jail_argv_with_programs(
     request: &NativeJailCommand,
     systemd_run: &Path,
     bwrap: &Path,
-) -> std::io::Result<Vec<String>> {
+) -> std::io::Result<NativeJailLaunch> {
     validate_native_jail_command(request)?;
     let systemd_run = validate_trusted_program(systemd_run)?;
     let bwrap = validate_trusted_program(bwrap)?;
     let supports_expand_environment = systemd_run_supports_safe_arguments(&systemd_run)?;
+    let env_file = if request.env.is_empty() {
+        None
+    } else {
+        let avoid: Vec<&Path> = std::iter::once(request.root.as_path())
+            .chain(request.read_only.iter().map(PathBuf::as_path))
+            .chain(request.read_write.iter().map(PathBuf::as_path))
+            .collect();
+        Some(super::env_file::EnvArgsFile::create(&request.env, &avoid)?)
+    };
     let argv = native_bwrap_argv(request, supports_expand_environment, &systemd_run, &bwrap);
-    Ok(native_launcher_argv(wrap_scope_command(argv)))
+    Ok(NativeJailLaunch {
+        argv: native_launcher_argv(
+            env_file.as_ref().map(super::env_file::EnvArgsFile::path),
+            wrap_scope_command(argv),
+        ),
+        env_file,
+    })
+}
+
+/// A native jail's launcher command, and the private file carrying its
+/// environment (see `env_file`).
+///
+/// Keep it alive until the launcher has started: the launcher deletes the file
+/// once it has it open, and dropping this removes it if the launcher never ran.
+#[derive(Debug)]
+pub struct NativeJailLaunch {
+    /// The launcher's program and arguments. Holds no environment value.
+    pub argv: Vec<String>,
+    env_file: Option<super::env_file::EnvArgsFile>,
+}
+
+impl NativeJailLaunch {
+    /// Where the target's environment waits for the launcher, if it has one.
+    #[must_use]
+    pub fn env_file(&self) -> Option<&Path> {
+        self.env_file
+            .as_ref()
+            .map(super::env_file::EnvArgsFile::path)
+    }
 }
 
 /// Sample cgroup counters from inside the transient scope before it is stopped.
@@ -658,27 +695,33 @@ fn native_bwrap_argv(
         request.cwd.display().to_string(),
         "--clearenv".into(),
     ]);
-    for (key, value) in &request.env {
-        argv.extend(["--setenv".into(), key.clone(), value.clone()]);
+    // The target environment is read from the private file the launcher opened
+    // as descriptor 9, never from this command line (see `env_file`).
+    if !request.env.is_empty() {
+        argv.extend(["--args".into(), super::env_file::ENV_ARGS_FD.into()]);
     }
     argv.push("--".into());
     argv.extend(request.argv.iter().cloned());
     // A scope launcher inherits the host process's descriptors. The trusted
     // shim closes every non-stdio descriptor before opening systemd's bus or
     // starting bubblewrap, preventing a pre-opened manager/cgroup FD from
-    // bypassing the mount and network namespaces. Target values remain argv
-    // data and the shim receives only a fixed, sanitized launcher environment.
+    // bypassing the mount and network namespaces. The target environment is
+    // not argv data: it travels in the private file on descriptor 9, and the
+    // shim receives only a fixed, sanitized launcher environment.
     argv
 }
 
-fn native_launcher_argv(argv: Vec<String>) -> Vec<String> {
+/// The launcher shim, given the private environment file (or `-` when the
+/// target has no environment) and then the scope command.
+fn native_launcher_argv(env_file: Option<&Path>, argv: Vec<String>) -> Vec<String> {
     let mut launcher = vec![
         "/bin/bash".to_owned(),
         "--noprofile".to_owned(),
         "--norc".to_owned(),
         "-c".to_owned(),
-        "[ -d /proc/self/fd ] || exit 125; shopt -s nullglob; fdpaths=(/proc/self/fd/*); ((${#fdpaths[@]} > 0)) || exit 125; for fdpath in \"${fdpaths[@]}\"; do fd=${fdpath##*/}; case $fd in 0|1|2|*[!0-9]*) continue;; esac; eval \"exec ${fd}>&-\" || exit 125; done; unit=; for arg in \"$@\"; do case $arg in --unit=*) unit=${arg#--unit=};; esac; done; [ -n \"$unit\" ] || exit 125; \"$@\"; status=$?; if ! /usr/bin/systemctl --user stop \"$unit\"; then /usr/bin/systemctl --user is-active --quiet \"$unit\" && exit 125; fi; exit \"$status\"".to_owned(),
+        "[ -d /proc/self/fd ] || exit 125; shopt -s nullglob; envfile=$1; shift; keep=; if [ \"$envfile\" != - ]; then exec 9<\"$envfile\" || exit 125; command -p rm -f -- \"$envfile\" || exit 125; command -p rmdir -- \"${envfile%/*}\" 2>/dev/null; keep=9; fi; fdpaths=(/proc/self/fd/*); ((${#fdpaths[@]} > 0)) || exit 125; for fdpath in \"${fdpaths[@]}\"; do fd=${fdpath##*/}; case $fd in 0|1|2|*[!0-9]*) continue;; esac; [ \"$fd\" = \"$keep\" ] && continue; eval \"exec ${fd}>&-\" || exit 125; done; unit=; for arg in \"$@\"; do case $arg in --unit=*) unit=${arg#--unit=};; esac; done; [ -n \"$unit\" ] || exit 125; \"$@\"; status=$?; if ! /usr/bin/systemctl --user stop \"$unit\"; then /usr/bin/systemctl --user is-active --quiet \"$unit\" && exit 125; fi; exit \"$status\"".to_owned(),
         "tinybox-native-launcher".to_owned(),
+        env_file.map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
     ];
     launcher.extend(argv);
     launcher
