@@ -1615,16 +1615,27 @@ async fn an_oom_kill_in_a_live_scope_is_reported_as_a_memory_limit_hit()
         eprintln!("skipped: rootless systemd scope and bubblewrap namespaces are unavailable");
         return Ok(());
     }
-    // 32 MiB of memory with no swap; the command tries to hold 256 MiB in one
-    // shell variable, so the kernel kills it inside the scope.
+    if !std::process::Command::new("python3")
+        .arg("--version")
+        .status()?
+        .success()
+    {
+        eprintln!("skipped: python3 is unavailable for the memory pressure fixture");
+        return Ok(());
+    }
+    // 64 MiB with no swap; a child touches every page of 256 MiB, so the
+    // kernel kills it inside the scope. The same fixture as
+    // native_memory_limit_kills_a_workload_that_touches_past_its_budget,
+    // which the GitHub and our runners both OOM-kill (a shell variable that
+    // only grows does not reliably reach the OOM killer on every kernel).
     let journal = run_in_live_scope(
         tinybox_bus::NativeJailResourceRequest {
             cpu_millis: None,
-            memory_bytes: Some(32 * 1024 * 1024),
+            memory_bytes: Some(64 * 1024 * 1024),
             pids_max: Some(16),
             disk_bytes: None,
         },
-        "x=$(head -c 268435456 /dev/zero | tr '\\0' a); echo survived ${#x}",
+        "python3 -c 'data=bytearray(256*1024*1024)\nfor i in range(0,len(data),4096): data[i]=1'; true",
     )
     .await?;
 
