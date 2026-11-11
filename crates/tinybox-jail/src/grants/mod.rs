@@ -83,6 +83,11 @@ pub(crate) fn resolve_local_jail_grants_in(
 ) -> tinybox_core::Result<JailGrants> {
     let home = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
     let mut b = Builder::new(home.as_deref(), protected);
+    // Protected whether or not toolchain homes are granted, like `~/.cargo`:
+    // a writable extra must not reach host-run parts of a moved home either.
+    if let Some(cargo) = &homes.cargo {
+        b.protect_cargo_home(cargo);
+    }
 
     if cfg.toolchain_homes {
         if let Some(h) = home.as_deref() {
@@ -258,15 +263,21 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Refuse writable extras on `cargo`, its ancestors and its descendants
+    /// (see [`Self::add_cargo_home`]), without granting anything.
+    fn protect_cargo_home(&mut self, cargo: &Path) {
+        if !self.cargo_homes.iter().any(|known| known == cargo) {
+            self.cargo_homes.push(cargo.to_path_buf());
+        }
+    }
+
     /// Grant only the parts of `~/.cargo` that jailed Cargo needs. The root is
     /// never writable: `bin` and Cargo configuration run later outside the
     /// jail, so writable access there would persist an escape for host tools.
     /// Shared dependency sources are also read-only: a cached build script can
     /// execute during a later host build. Fetches need a disposable Cargo home.
     fn add_cargo_home(&mut self, cargo: &Path) {
-        if !self.cargo_homes.iter().any(|known| known == cargo) {
-            self.cargo_homes.push(cargo.to_path_buf());
-        }
+        self.protect_cargo_home(cargo);
         if !cargo.is_dir() {
             return;
         }

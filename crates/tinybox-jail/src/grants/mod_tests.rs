@@ -1204,6 +1204,38 @@ fn a_writable_extra_cannot_reach_a_configured_cargo_homes_host_parts()
 }
 
 #[test]
+fn a_configured_cargo_home_stays_protected_when_toolchain_homes_is_off()
+-> Result<(), Box<dyn std::error::Error>> {
+    let home = fake_home()?;
+    let (_moved, homes) = moved_homes()?;
+    let cargo = homes.cargo.clone().ok_or("cargo home")?;
+    for writable in [cargo.clone(), cargo.join("bin")] {
+        let config = LocalGrantConfig {
+            toolchain_homes: false,
+            extra_read_write: vec![writable.to_string_lossy().into_owned()],
+            ..LocalGrantConfig::default()
+        };
+
+        let grants = resolve_local_jail_grants_in(
+            Some(home.path()),
+            None,
+            &homes,
+            &config,
+            &ProtectedPaths::default(),
+        )?;
+
+        // `bin` and the Cargo config files run later on the host, so a
+        // writable grant there would persist an escape.
+        assert!(
+            !has(&grants.read_write, &canon(&writable)?),
+            "{} was granted writable",
+            writable.display()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn configured_homes_are_not_granted_when_toolchain_homes_is_off()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_moved, homes) = moved_homes()?;
