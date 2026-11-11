@@ -56,7 +56,7 @@ fn live_a_private_network_reaches_out_but_not_the_host() -> io::Result<()> {
     let _abstract = UnixListener::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes())?)?;
     let script = format!(
         r#"echo started
-reach() {{ (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null && echo "$3=reached" || echo "$3=refused"; }}
+reach() {{ timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>/dev/null && echo "$3=reached" || echo "$3=refused"; }}
 reach example.com 443 outbound
 reach 127.0.0.1 {port} loopback
 gw=$(ip route 2>/dev/null | awk '/default/{{print $3; exit}}')
@@ -173,7 +173,9 @@ fn pasta_of(jail: u32) -> Option<u32> {
         .ok()?
         .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
         .filter(|pid| {
-            std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "pasta")
+            // On x86 with AVX2, pasta re-executes itself as `pasta.avx2`.
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|c| c.trim().starts_with("pasta"))
         })
         .find(|pid| {
             std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
