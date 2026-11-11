@@ -528,3 +528,79 @@ fn nested_user_namespaces_are_blocked_on_a_hardened_backend() -> io::Result<()> 
     done("disable-userns", start);
     Ok(())
 }
+
+/// Runs `script` with the jail's `python3`, or `None` when the host has none.
+fn python(
+    backend: &tinybox_jail::BubblewrapBackend,
+    jail: &tinybox_jail::Jail,
+    script: &str,
+) -> io::Result<Option<String>> {
+    if !Path::new("/usr/bin/python3").exists() {
+        eprintln!("skipped: no /usr/bin/python3 to issue raw syscalls");
+        return Ok(None);
+    }
+    let (_, out) = sh(backend, jail, &format!("/usr/bin/python3 -c '{script}'"))?;
+    Ok(Some(out))
+}
+
+/// Raw syscalls from inside the jail: keyctl (denied), getpid (allowed) and a
+/// ptrace attach to the jail's own child (allowed on Linux 4.8+).
+const SYSCALL_PROBE: &str = r#"
+import ctypes, errno, os, platform, time
+libc = ctypes.CDLL(None, use_errno=True)
+keyctl, getpid = {"x86_64": (250, 39), "aarch64": (219, 172)}[platform.machine()]
+r = libc.syscall(keyctl, 0, -3, 0)
+print("keyctl", r, errno.errorcode.get(ctypes.get_errno(), "none"))
+print("getpid", libc.syscall(getpid) == os.getpid())
+pid = os.fork()
+if pid == 0:
+    time.sleep(5)
+    os._exit(0)
+r = libc.ptrace(16, pid, 0, 0)
+print("ptrace", r, errno.errorcode.get(ctypes.get_errno(), "none") if r else "ok")
+os.kill(pid, 9)
+os.waitpid(pid, 0)
+"#;
+
+#[test]
+fn a_denied_syscall_fails_with_eperm_and_allowed_ones_still_work() -> io::Result<()> {
+    let Some(backend) = backend()? else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    assert!(backend.installs_seccomp());
+    let root = tempfile::tempdir()?;
+    let Some(out) = python(&backend, &jail(root.path()), SYSCALL_PROBE)? else {
+        return Ok(());
+    };
+
+    assert!(
+        out.contains("keyctl -1 EPERM"),
+        "keyctl was not denied: {out}"
+    );
+    assert!(
+        out.contains("getpid True"),
+        "an allowed syscall failed: {out}"
+    );
+    done("seccomp", start);
+    Ok(())
+}
+
+#[test]
+fn a_jailed_process_can_trace_its_own_child() -> io::Result<()> {
+    let Some(backend) = backend()? else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    let root = tempfile::tempdir()?;
+    let Some(out) = python(&backend, &jail(root.path()), SYSCALL_PROBE)? else {
+        return Ok(());
+    };
+
+    assert!(
+        out.contains("ptrace 0 ok"),
+        "ptrace of a jail child failed: {out}"
+    );
+    done("seccomp-ptrace", start);
+    Ok(())
+}

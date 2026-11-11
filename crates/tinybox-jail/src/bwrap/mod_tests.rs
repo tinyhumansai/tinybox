@@ -16,6 +16,7 @@ fn verified(program: &str) -> Verified {
         program: program.into(),
         disable_userns: true,
         bind_fds: false,
+        seccomp: Vec::new(),
     }
 }
 
@@ -191,6 +192,20 @@ fn a_launcher_that_passes_the_probe_is_available_with_process_isolation_minimum(
         backend.program(),
         Some(fixture("fake-bwrap-probe.sh").as_path())
     );
+}
+
+#[test]
+fn a_bwrap_that_cannot_load_seccomp_filters_is_not_used() {
+    // It passes the isolation probe, but a jail would start unfiltered.
+    let backend = BubblewrapBackend::with_program(fixture("fake-bwrap-noseccomp.sh"));
+    assert!(!backend.is_available());
+    assert!(!backend.installs_seccomp());
+}
+
+#[test]
+fn a_launcher_that_passes_the_probe_installs_the_seccomp_filters() {
+    let backend = BubblewrapBackend::with_program(fixture("fake-bwrap-probe.sh"));
+    assert!(backend.installs_seccomp());
 }
 
 #[test]

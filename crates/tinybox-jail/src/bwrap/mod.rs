@@ -36,8 +36,8 @@
 //! [`JailBackend::isolation`] is the **minimum over every configuration the
 //! backend accepts**. It is reported as `Process`, the closest defined level
 //! below `Kernel`, but note what it means here: pid, mount, user and ipc
-//! namespaces and a private filesystem view, with the host *network* shared and
-//! no seccomp. That is more than the plain `Process` doc describes and less than
+//! namespaces, a private filesystem view and the seccomp deny list, with the
+//! host *network* shared. That is more than the plain `Process` doc describes and less than
 //! `Kernel`; do not read it as "same process table". `Process` with `--disable-userns` support (bubblewrap
 //! 0.8+), `None` without it. [`JailBackend::isolation_for`] reaches
 //! [`IsolationLevel::Kernel`] only for a jail that denies network (a new net
@@ -45,15 +45,23 @@
 //! loopback services and abstract sockets are reachable. Hosts must ask
 //! [`JailBackend::is_suitable_for_untrusted_jail`]; the per-backend
 //! `is_suitable_for_untrusted_code` is false by construction. `Kernel` here
-//! means separate pid, mount, user, ipc and uts (and net) namespaces: it does
-//! not imply seccomp or resource limits.
+//! means separate pid, mount, user, ipc and uts (and net) namespaces plus that
+//! deny list: it does not imply resource limits.
+//!
+//! # Seccomp
+//!
+//! Every jail starts under a seccomp deny list (`seccomp.rs`): kernel keyrings,
+//! other processes' memory, `bpf`/`perf`/`userfaultfd`/`io_uring`, every mount
+//! call, `setns` and namespace-creating `clone`/`unshare`, file handles,
+//! modules, `kexec`, reboot, host clock, swap and syslog, terminal injection
+//! ioctls, and the x86 legacy calls. Denied calls fail with `EPERM` (`clone3`
+//! with `ENOSYS`, so the C library falls back to `clone`). `ptrace` stays
+//! allowed on Linux 4.8 and later, confined to the jail's pid namespace. A
+//! `bwrap` without `--add-seccomp-fd`, or an architecture other than `x86_64`
+//! and `aarch64`, leaves the backend unavailable rather than unfiltered.
 //!
 //! # Known gaps (not closed in this backend)
 //!
-//! - No seccomp filter: `keyctl` (the user's kernel keyrings), `ptrace`,
-//!   `bpf`, `io_uring` and similar syscalls remain reachable. A filter needs a
-//!   file descriptor handed to `bwrap --seccomp`; the launcher could carry one,
-//!   but a vetted BPF program is not part of this change.
 //! - No CPU, memory or pid limits (`tinybox-linux` offers them through a
 //!   `systemd-run` scope; not wired here).
 //! - Check-then-use gap on nested grants, **only where `bwrap` lacks
@@ -98,6 +106,7 @@ use crate::jail::{Jail, JailBackend};
 
 mod args;
 mod launcher;
+mod seccomp;
 
 /// Backend name reported by [`BubblewrapBackend`].
 pub const BWRAP_BACKEND_NAME: &str = "bubblewrap";
@@ -116,6 +125,8 @@ struct Verified {
     /// `bwrap` lists `--bind-fd` and the kernel has `openat2`: grants are
     /// bound from descriptors rather than re-resolved by path.
     bind_fds: bool,
+    /// The compiled seccomp filters every jail starts under (see `seccomp`).
+    seccomp: Vec<Vec<u8>>,
 }
 
 /// Bubblewrap (`bwrap`) namespace jail backend.
@@ -180,6 +191,15 @@ impl BubblewrapBackend {
         self.verified.as_ref().is_some_and(|v| v.bind_fds)
     }
 
+    /// Whether jails start under the seccomp deny list. True whenever the
+    /// backend is available: a `bwrap` that cannot load it is not used.
+    #[must_use]
+    pub fn installs_seccomp(&self) -> bool {
+        self.verified
+            .as_ref()
+            .is_some_and(|v| !v.seccomp.is_empty())
+    }
+
     /// Test constructor that skips the probe, for fake launchers.
     #[cfg(test)]
     fn unverified(program: impl Into<PathBuf>, disable_userns: bool) -> Self {
@@ -188,6 +208,7 @@ impl BubblewrapBackend {
                 program: program.into(),
                 disable_userns,
                 bind_fds: false,
+                seccomp: Vec::new(),
             }),
         }
     }
@@ -203,23 +224,55 @@ fn is_trusted_binary(path: &Path) -> bool {
 
 /// Runs throwaway sandboxes to learn whether `program` really isolates, and
 /// whether it supports `--disable-userns`.
+///
+/// A `bwrap` that cannot install the seccomp filters (no `--add-seccomp-fd`,
+/// or no filter for this architecture) is not used: a jail is refused rather
+/// than started unfiltered.
 fn verify(program: &Path) -> Option<Verified> {
+    let seccomp = match seccomp_filters(program) {
+        Ok(filters) => filters,
+        Err(error) => {
+            log::debug!("[cwd_jail:bwrap] unavailable: {error}");
+            return None;
+        }
+    };
     for disable_userns in [true, false] {
         if probe(program, disable_userns) {
             return Some(Verified {
                 program: program.to_path_buf(),
                 disable_userns,
                 bind_fds: supports_fd_binds(program),
+                seccomp,
             });
         }
     }
     None
 }
 
-/// Whether `program --help` lists `--bind-fd` (bubblewrap 0.9 does) and
-/// `openat2` works on this kernel (Linux 5.6+).
-fn supports_fd_binds(program: &Path) -> bool {
-    let listed = Command::new(program)
+/// The filters for this kernel and architecture, if `program` can load them.
+fn seccomp_filters(program: &Path) -> io::Result<Vec<Vec<u8>>> {
+    if !help_lists(program, "--add-seccomp-fd") {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "{} cannot load seccomp filters (no --add-seccomp-fd); jails are refused",
+                program.display()
+            ),
+        ));
+    }
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")?;
+    let kernel = seccomp::kernel_version(&release).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unreadable kernel release {release:?}"),
+        )
+    })?;
+    seccomp::filters(kernel)
+}
+
+/// Whether `program --help` names `flag` as an option.
+fn help_lists(program: &Path, flag: &str) -> bool {
+    Command::new(program)
         .arg("--help")
         .env_clear()
         .stdin(Stdio::null())
@@ -228,8 +281,14 @@ fn supports_fd_binds(program: &Path) -> bool {
         .is_ok_and(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .split_whitespace()
-                .any(|word| word == "--bind-fd")
-        });
+                .any(|word| word == flag)
+        })
+}
+
+/// Whether `program --help` lists `--bind-fd` (bubblewrap 0.9 does) and
+/// `openat2` works on this kernel (Linux 5.6+).
+fn supports_fd_binds(program: &Path) -> bool {
+    let listed = help_lists(program, "--bind-fd");
     let openat2 = nix::fcntl::openat2(
         nix::fcntl::AT_FDCWD,
         "/",
@@ -337,7 +396,7 @@ struct Prepared {
 /// The launcher command carries no environment and its own argv holds only
 /// paths; the caller's variables and arguments live in the private args file.
 fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Result<Prepared> {
-    let args::JailArgs { mut argv, fds } = args::jail_args_with_fds(
+    let args::JailArgs { mut argv, mut fds } = args::jail_args_with_fds(
         jail,
         cmd.get_current_dir(),
         args::Options {
@@ -345,6 +404,17 @@ fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Resul
             bind_fds: verified.bind_fds,
         },
     )?;
+    // Each filter on its own pipe, numbered after the grants. A filter is a
+    // few kilobytes, well inside a pipe's buffer, so writing it before bwrap
+    // reads cannot block.
+    for filter in &verified.seccomp {
+        let (reader, mut writer) = std::io::pipe()?;
+        io::Write::write_all(&mut writer, filter)?;
+        drop(writer);
+        let number = args::FIRST_GRANT_FD + i32::try_from(fds.len()).map_err(io::Error::other)?;
+        argv.extend(["--add-seccomp-fd".into(), number.to_string().into()]);
+        fds.push((reader.into(), number));
+    }
     argv.push("--clearenv".into());
     for (key, value) in cmd.get_envs() {
         if let Some(value) = value {

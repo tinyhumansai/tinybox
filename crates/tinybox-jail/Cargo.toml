@@ -40,6 +40,12 @@ command-fds = "=0.3.3"
 # `openat2(RESOLVE_NO_SYMLINKS)` for those descriptors, safely. Already in the
 # lockfile, and the version command-fds builds on.
 nix = { version = "0.31", default-features = false, features = ["fs"] }
+# Compiles the seccomp deny list bwrap installs on every jail (`bwrap/seccomp.rs`);
+# its only dependency is libc. Default features off: no JSON frontend.
+seccompiler = { version = "0.5", default-features = false }
+# The per-architecture syscall numbers that deny list names. Already in the
+# lockfile through several dependencies.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # AppContainer profile APIs, ACL editing, STARTUPINFOEXW process spawn, and the
