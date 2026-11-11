@@ -29,7 +29,7 @@ exclude = ["vendor"]
 [workspace.package]
 version = "0.2.6"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinybox"
 readme = "README.md"
@@ -76,14 +76,15 @@ tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.6" }
 tinybox-openshell = { path = "crates/tinybox-openshell", version = "0.2.6" }
 tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.6" }
 tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.6" }
-# Pin the storage contract crates to the canonical TSD v2.1.2 release commit,
-# which carries the zstd advisory fix.
-tinystoragedrivers-types = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-api = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-busproxy = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb", default-features = false }
-tinystoragedrivers-testkit = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-document = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+# Pin the storage contract crates to the canonical TSD v2.1.3 release commit,
+# which bundles SQLite 3.54 (RUSTSEC-2026-0459) and carries the zstd advisory
+# fix.
+tinystoragedrivers-types = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-api = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-busproxy = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139", default-features = false }
+tinystoragedrivers-testkit = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-document = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
 tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.2.6" }
 
 # Lints apply to every crate in the workspace via `[lints] workspace = true`.
