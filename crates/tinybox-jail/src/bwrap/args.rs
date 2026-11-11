@@ -54,6 +54,9 @@ pub(super) struct Options {
     /// Bind the jail's grants from descriptors (`--bind-fd`/`--ro-bind-fd`)
     /// opened here, instead of by path (see [`jail_args_with_fds`]).
     pub bind_fds: bool,
+    /// Leave the host's `/etc/resolv.conf` out of the baseline: the jail runs
+    /// in a private network whose resolver is supplied separately.
+    pub private_resolv: bool,
 }
 
 /// The first descriptor a grant is handed to `bwrap` on; the launcher keeps
@@ -135,8 +138,8 @@ fn replaces_private_mount(path: &Path) -> bool {
 }
 
 /// The baseline mounts: system directories (or their symlinks) and the short
-/// `/etc` allow-list.
-fn baseline_mounts() -> Vec<Mount> {
+/// `/etc` allow-list, without `/etc/resolv.conf` when `private_resolv`.
+fn baseline_mounts(private_resolv: bool) -> Vec<Mount> {
     let mut mounts: Vec<Mount> = Vec::new();
     for dir in SYSTEM_DIRS {
         let path = PathBuf::from(dir);
@@ -154,6 +157,9 @@ fn baseline_mounts() -> Vec<Mount> {
         });
     }
     for entry in ETC_ENTRIES {
+        if private_resolv && *entry == "/etc/resolv.conf" {
+            continue;
+        }
         mounts.push(Mount {
             path: PathBuf::from(entry),
             kind: Kind::Bind { writable: false },
@@ -217,7 +223,7 @@ pub(super) fn jail_args_with_fds(
     options: Options,
 ) -> io::Result<JailArgs> {
     check_paths(jail, cwd)?;
-    let mut mounts = baseline_mounts();
+    let mut mounts = baseline_mounts(options.private_resolv);
     for (path, writable) in std::iter::once((&jail.root, true))
         .chain(jail.read_write.iter().map(|p| (p, true)))
         .chain(jail.read_only.iter().map(|p| (p, false)))

@@ -17,6 +17,7 @@ fn verified(program: &str) -> Verified {
         disable_userns: true,
         bind_fds: false,
         seccomp: Vec::new(),
+        pasta: None,
     }
 }
 
@@ -83,7 +84,7 @@ fn secrets_stay_out_of_argv_and_the_launcher_environment() -> io::Result<()> {
         .env("A", "1")
         .env_remove("B");
     let jail = Jail::new(root.path(), "t");
-    let prepared = prepare_command(&verified("/usr/bin/bwrap"), &jail, &cmd)?;
+    let prepared = prepare_command(&verified("/usr/bin/bwrap"), &jail, &cmd, None)?;
     // The host-side process: empty environment, argv of paths only.
     assert_eq!(prepared.launcher.get_envs().count(), 0);
     let argv = argv_of(&prepared.launcher);
@@ -227,4 +228,79 @@ fn the_default_constructor_probes_only_trusted_paths() {
         BubblewrapBackend::default().is_available(),
         backend.is_available()
     );
+}
+
+#[test]
+fn a_private_network_jail_enters_the_holder_and_brings_its_own_resolver() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let jail = Jail::new(root.path(), "t");
+    let mut backend_state = verified("/usr/bin/bwrap");
+    backend_state.pasta = pasta::Pasta::find(|_| true);
+    let (_reader, writer) = std::io::pipe()?;
+    let network = pasta::Network::fake(
+        std::fs::File::open("/proc/self/ns/user")?,
+        std::fs::File::open("/proc/self/ns/net")?,
+        writer.into(),
+    );
+    let prepared = prepare_command(&backend_state, &jail, &Command::new("true"), Some(&network))?;
+    assert_eq!(prepared.launcher.get_program(), "/usr/bin/nsenter");
+    let argv = argv_of(&prepared.launcher);
+    assert!(argv.iter().any(|a| a == "--preserve-credentials"));
+    let content = std::fs::read(prepared.args.path())?;
+    let fields: Vec<&[u8]> = content.split(|b| *b == 0).collect();
+    // The resolver arrives by descriptor and the holder's writer is kept by
+    // bwrap; the host's resolv.conf is not bound, and the net stays shared
+    // with the holder (no --unshare-net).
+    assert!(
+        fields
+            .windows(3)
+            .any(|w| w[0] == b"--ro-bind-data" && w[2] == b"/etc/resolv.conf")
+    );
+    assert!(fields.iter().any(|f| *f == b"--sync-fd"));
+    assert!(
+        !fields
+            .windows(2)
+            .any(|w| w[0] == b"--ro-bind-try" && w[1] == b"/etc/resolv.conf")
+    );
+    assert!(!fields.iter().any(|f| *f == b"--unshare-net"));
+    prepared.args.discard();
+    network.release();
+    Ok(())
+}
+
+#[test]
+fn only_a_working_pasta_makes_an_allow_net_jail_kernel_isolated() {
+    let root = std::env::temp_dir();
+    let open = Jail::new(&root, "t");
+    let without = BubblewrapBackend {
+        verified: Some(verified("/usr/bin/bwrap")),
+    };
+    assert!(!without.networks_privately());
+    assert_eq!(without.isolation_for(&open), IsolationLevel::Process);
+    let mut with_pasta = verified("/usr/bin/bwrap");
+    with_pasta.pasta = pasta::Pasta::find(|_| true);
+    let with = BubblewrapBackend {
+        verified: Some(with_pasta),
+    };
+    assert!(with.networks_privately());
+    assert_eq!(with.isolation_for(&open), IsolationLevel::Kernel);
+    // The backend-wide minimum is unchanged: it never promises Kernel.
+    assert_eq!(with.isolation(), IsolationLevel::Process);
+}
+
+#[test]
+fn a_pasta_that_fails_to_start_refuses_the_jail_instead_of_sharing_the_host_network() {
+    let root = std::env::temp_dir();
+    let mut state = verified(&fake_bwrap().to_string_lossy());
+    state.pasta = Some(pasta::Pasta::at("/nonexistent/pasta", "/usr/bin/nsenter"));
+    let backend = BubblewrapBackend {
+        verified: Some(state),
+    };
+    // The claim is made for a backend whose probe found a working pasta, so
+    // a launch where pasta then fails must not run the jail at all.
+    let error = backend
+        .spawn(&Jail::new(&root, "t"), Command::new("true"))
+        .err()
+        .map(|e| e.kind());
+    assert_eq!(error, Some(io::ErrorKind::NotFound));
 }

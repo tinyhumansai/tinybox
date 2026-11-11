@@ -1,8 +1,10 @@
 //! Linux bubblewrap backend: namespace isolation for untrusted code.
 //!
 //! [`BubblewrapBackend`] runs the command under `bwrap` with fresh user, pid,
-//! ipc and uts namespaces (and a net namespace unless the jail allows
-//! network). The child sees a private mount tree holding only the baseline
+//! ipc and uts namespaces, and a network namespace of its own: an empty one
+//! when the jail denies network, or one with user-mode networking from `pasta`
+//! when it allows network and `pasta` works here (see "Private network").
+//! The child sees a private mount tree holding only the baseline
 //! system paths plus the jail's grants, so it cannot read an ungranted path,
 //! cannot see host processes, cannot create nested user namespaces
 //! (`--disable-userns`), and dies with its parent.
@@ -37,16 +39,33 @@
 //! backend accepts**. It is reported as `Process`, the closest defined level
 //! below `Kernel`, but note what it means here: pid, mount, user and ipc
 //! namespaces, a private filesystem view and the seccomp deny list, with the
-//! host *network* shared. That is more than the plain `Process` doc describes and less than
+//! host *network* shared (an `allow_net` jail where `pasta` is unavailable). That is more than the plain `Process` doc describes and less than
 //! `Kernel`; do not read it as "same process table". `Process` with `--disable-userns` support (bubblewrap
 //! 0.8+), `None` without it. [`JailBackend::isolation_for`] reaches
-//! [`IsolationLevel::Kernel`] only for a jail that denies network (a new net
-//! namespace). With `allow_net` the host network namespace is shared, so host
-//! loopback services and abstract sockets are reachable. Hosts must ask
+//! [`IsolationLevel::Kernel`] for a jail that denies network (an empty net
+//! namespace), and for one that allows it when
+//! [`BubblewrapBackend::networks_privately`] (a `pasta` network). Otherwise an
+//! `allow_net` jail shares the host network namespace, so host loopback
+//! services and abstract sockets are reachable, and it stays `Process`. Hosts must ask
 //! [`JailBackend::is_suitable_for_untrusted_jail`]; the per-backend
 //! `is_suitable_for_untrusted_code` is false by construction. `Kernel` here
 //! means separate pid, mount, user, ipc and uts (and net) namespaces plus that
 //! deny list: it does not imply resource limits.
+//!
+//! # Private network
+//!
+//! When the jail allows network and a trusted `pasta` and `nsenter` are found
+//! (at fixed root-owned paths, never on `PATH`) and pass a probe, `pasta`
+//! starts a holder that owns a fresh user and network namespace, and the
+//! launcher enters it with `nsenter` before running `bwrap` (see `pasta.rs`).
+//! `pasta` is started only with no port forwarding, no gateway mapping and DNS
+//! through one forwarded address, and the jail gets its own
+//! `/etc/resolv.conf` naming it. So outbound connections work, while host
+//! loopback services, the host behind the gateway address and the host's
+//! abstract sockets are unreachable. The holder lives exactly as long as
+//! `bwrap` (`--sync-fd`), so no `pasta` outlives a jail, even one that is
+//! killed. `slirp4netns` is not used: it only attaches to an existing
+//! namespace, which Ubuntu's `AppArmor` user-namespace restriction refuses.
 //!
 //! # Seccomp
 //!
@@ -106,6 +125,7 @@ use crate::jail::{Jail, JailBackend};
 
 mod args;
 mod launcher;
+mod pasta;
 mod seccomp;
 
 /// Backend name reported by [`BubblewrapBackend`].
@@ -127,6 +147,9 @@ struct Verified {
     bind_fds: bool,
     /// The compiled seccomp filters every jail starts under (see `seccomp`).
     seccomp: Vec<Vec<u8>>,
+    /// A working `pasta` and `nsenter`: an `allow_net` jail then gets a
+    /// private network instead of the host's (see `pasta`).
+    pasta: Option<pasta::Pasta>,
 }
 
 /// Bubblewrap (`bwrap`) namespace jail backend.
@@ -191,6 +214,15 @@ impl BubblewrapBackend {
         self.verified.as_ref().is_some_and(|v| v.bind_fds)
     }
 
+    /// Whether a jail that allows network runs in a private network namespace
+    /// with user-mode networking from `pasta`, rather than sharing the host's.
+    /// Then host loopback services and abstract sockets are out of its reach
+    /// and [`JailBackend::isolation_for`] reports `Kernel` for it too.
+    #[must_use]
+    pub fn networks_privately(&self) -> bool {
+        self.verified.as_ref().is_some_and(|v| v.pasta.is_some())
+    }
+
     /// Whether jails start under the seccomp deny list. True whenever the
     /// backend is available: a `bwrap` that cannot load it is not used.
     #[must_use]
@@ -209,6 +241,7 @@ impl BubblewrapBackend {
                 disable_userns,
                 bind_fds: false,
                 seccomp: Vec::new(),
+                pasta: None,
             }),
         }
     }
@@ -243,10 +276,22 @@ fn verify(program: &Path) -> Option<Verified> {
                 disable_userns,
                 bind_fds: supports_fd_binds(program),
                 seccomp,
+                pasta: private_network(program),
             });
         }
     }
     None
+}
+
+/// A `pasta` that really brings up a private network, when there is one and
+/// `program` can hold it open (`--sync-fd`) and mount the jail's resolver
+/// (`--ro-bind-data`). Without one, an `allow_net` jail shares the host network.
+fn private_network(program: &Path) -> Option<pasta::Pasta> {
+    let found = pasta::Pasta::find(is_trusted_binary)?;
+    let flags = help_lists(program, "--sync-fd") && help_lists(program, "--ro-bind-data");
+    let works = flags && found.start().is_ok();
+    log::debug!("[cwd_jail:bwrap] pasta private network flags={flags} works={works}");
+    works.then_some(found)
 }
 
 /// The filters for this kernel and architecture, if `program` can load them.
@@ -369,7 +414,7 @@ fn run_probe(program: &Path, disable_userns: bool, root: &Path, host_only: &Path
     let shell = launcher::pick_shell(|path| Path::new(path).is_file());
     // Positive evidence is required: a launcher that exits 0 without running
     // the check (`true`) must not pass.
-    let out = launcher::command(shell, program, &file, 0, "/bin/sh".as_ref(), &check)
+    let out = launcher::command(None, shell, program, &file, 0, "/bin/sh".as_ref(), &check)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
@@ -395,13 +440,19 @@ struct Prepared {
 ///
 /// The launcher command carries no environment and its own argv holds only
 /// paths; the caller's variables and arguments live in the private args file.
-fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Result<Prepared> {
+fn prepare_command(
+    verified: &Verified,
+    jail: &Jail,
+    cmd: &Command,
+    network: Option<&pasta::Network>,
+) -> io::Result<Prepared> {
     let args::JailArgs { mut argv, mut fds } = args::jail_args_with_fds(
         jail,
         cmd.get_current_dir(),
         args::Options {
             disable_userns: verified.disable_userns,
             bind_fds: verified.bind_fds,
+            private_resolv: network.is_some(),
         },
     )?;
     // Each filter on its own pipe, numbered after the grants. A filter is a
@@ -415,6 +466,10 @@ fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Resul
         argv.extend(["--add-seccomp-fd".into(), number.to_string().into()]);
         fds.push((reader.into(), number));
     }
+    let namespaces = match network {
+        Some(network) => Some(join_network(network, &mut argv, &mut fds)?),
+        None => None,
+    };
     argv.push("--clearenv".into());
     for (key, value) in cmd.get_envs() {
         if let Some(value) = value {
@@ -431,11 +486,28 @@ fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Resul
     let file = launcher::ArgsFile::create(&argv, &base)?;
     let shell = launcher::pick_shell(|path| Path::new(path).is_file());
     let program_args: Vec<OsString> = cmd.get_args().map(OsString::from).collect();
+    // The namespace descriptors are numbered after the kept ones, so the
+    // launcher closes them once `nsenter` has entered.
+    let keep = fds.len();
+    let enter = match (namespaces, verified.pasta.as_ref()) {
+        (Some((user, net)), Some(pasta)) => {
+            let user_fd = args::FIRST_GRANT_FD + i32::try_from(keep).map_err(io::Error::other)?;
+            fds.push((user, user_fd));
+            fds.push((net, user_fd + 1));
+            Some(launcher::Enter {
+                nsenter: pasta.nsenter(),
+                user_fd,
+                net_fd: user_fd + 1,
+            })
+        }
+        _ => None,
+    };
     let mut launcher = launcher::command(
+        enter,
         shell,
         &verified.program,
         &file,
-        fds.len(),
+        keep,
         cmd.get_program(),
         &program_args,
     );
@@ -454,6 +526,30 @@ fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Resul
         launcher,
         args: file,
     })
+}
+
+/// Wires a pasta network into the `bwrap` arguments: the jail's resolver on a
+/// pipe (`--ro-bind-data`) and the holder's writer kept by `bwrap`
+/// (`--sync-fd`), both numbered after the descriptors already in `fds`.
+/// Returns the user and network namespace descriptors for `nsenter`.
+fn join_network(
+    network: &pasta::Network,
+    argv: &mut Vec<OsString>,
+    fds: &mut Vec<(std::os::fd::OwnedFd, i32)>,
+) -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    let (user, net, writer) = network.descriptors()?;
+    let (reader, mut resolv) = std::io::pipe()?;
+    io::Write::write_all(&mut resolv, pasta::resolv_conf().as_bytes())?;
+    drop(resolv);
+    for (fd, flag) in [(reader.into(), "--ro-bind-data"), (writer, "--sync-fd")] {
+        let number = args::FIRST_GRANT_FD + i32::try_from(fds.len()).map_err(io::Error::other)?;
+        argv.extend([flag.into(), number.to_string().into()]);
+        if flag == "--ro-bind-data" {
+            argv.push("/etc/resolv.conf".into());
+        }
+        fds.push((fd, number));
+    }
+    Ok((user, net))
 }
 
 impl JailBackend for BubblewrapBackend {
@@ -491,7 +587,9 @@ impl JailBackend for BubblewrapBackend {
 
     fn isolation_for(&self, jail: &Jail) -> IsolationLevel {
         match self.isolation() {
-            IsolationLevel::Process if !jail.allow_net => IsolationLevel::Kernel,
+            IsolationLevel::Process if !jail.allow_net || self.networks_privately() => {
+                IsolationLevel::Kernel
+            }
             level => level,
         }
     }
@@ -519,10 +617,16 @@ impl BubblewrapBackend {
             .require(self.name(), &jail.constraints())
             .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error))?;
         log::debug!("[cwd_jail:bwrap] spawning label={}", jail.label);
+        // An `allow_net` jail gets a private network when `pasta` works;
+        // dropping `network` on any error below kills `pasta` again.
+        let network = match &verified.pasta {
+            Some(pasta) if jail.allow_net => Some(pasta.start()?),
+            _ => None,
+        };
         let Prepared {
             launcher: mut wrapper,
             args,
-        } = prepare_command(verified, jail, cmd)?;
+        } = prepare_command(verified, jail, cmd, network.as_ref())?;
         if captured {
             wrapper
                 .stdin(Stdio::piped())
@@ -532,7 +636,14 @@ impl BubblewrapBackend {
                 // can signal the whole sandbox.
                 .process_group(0);
         }
-        wrapper.spawn().inspect_err(|_| args.discard())
+        let child = wrapper.spawn().inspect_err(|_| args.discard())?;
+        // `bwrap` now holds the holder's writer; drop ours so the network ends
+        // when the jail does.
+        drop(wrapper);
+        if let Some(network) = network {
+            network.release();
+        }
+        Ok(child)
     }
 }
 

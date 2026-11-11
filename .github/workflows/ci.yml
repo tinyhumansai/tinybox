@@ -44,6 +44,27 @@ jobs:
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
           TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS=1 cargo test -j1 -p tinybox-module native_
           TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS=1 cargo test -j1 -p tinybox-module resource_aware_bus_exec_cancellation_reports_events_and_reaps_descendants
+  bwrap-pasta-live:
+    name: Bubblewrap private network (pasta) reachability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
+      - name: Install bubblewrap, passt (pasta) and util-linux (nsenter)
+        run: sudo apt-get install -y --no-install-recommends bubblewrap passt util-linux
+      - name: Prove outbound works and host loopback, gateway and abstract sockets do not
+        env:
+          TINYBOX_REQUIRE_BWRAP: "1"
+          TINYBOX_REQUIRE_PASTA: "1"
+        run: |
+          set -euo pipefail
+          pasta --version | head -1
+          cargo test --locked -p tinybox-jail --test bwrap_pasta_live -- --nocapture
+          cargo test --locked -p tinybox-jail --test bwrap_isolation -- --nocapture
+          cargo test --locked -p tinybox-jail --test bwrap_fd_leak -- --nocapture
   docker-network-live:
     name: Docker Egress and denied network connectivity
     runs-on: ubuntu-22.04

@@ -27,8 +27,13 @@ fn only_a_jail_with_a_private_network_is_suitable_for_untrusted_code() -> io::Re
     };
     let start = Instant::now();
     let root = tempfile::tempdir()?;
-    // tinymcp's default configuration shares the host network: not suitable.
-    assert!(!backend.is_suitable_for_untrusted_jail(&jail(root.path())));
+    // tinymcp's default configuration allows network. It is suitable only
+    // when that network is private (pasta); a shared host network is not.
+    assert_eq!(
+        backend.is_suitable_for_untrusted_jail(&jail(root.path())),
+        backend.networks_privately()
+            && backend.isolation() >= tinybox_core::IsolationLevel::Process
+    );
     // The per-backend answer is the worst case, so it is never true.
     assert!(!backend.is_suitable_for_untrusted_code());
     // With a private network it is suitable, given `--disable-userns` support.
@@ -365,12 +370,17 @@ fn network_is_unreachable_when_denied_and_reachable_when_shared() -> io::Result<
     let (connected, _) = started(&run(&backend, &jail(root.path()).deny_net(), cmd)?)?;
     assert!(!connected, "connect must fail under deny_net");
 
-    // Control: with the host network shared the same connect succeeds, which
-    // is exactly the exposure `allow_net` carries.
+    // With network allowed: under a private (pasta) network the host's
+    // loopback listener stays unreachable; with the host network shared the
+    // same connect succeeds, which is exactly the exposure that carries.
     let mut cmd = Command::new("/usr/bin/env");
     cmd.args(["bash", "-c", &connect]);
     let (connected, _) = started(&run(&backend, &jail(root.path()), cmd)?)?;
-    assert!(connected, "control connect should reach the host listener");
+    assert_eq!(
+        connected,
+        !backend.networks_privately(),
+        "allow_net reaches host loopback only when the host network is shared"
+    );
     done("network", start);
     Ok(())
 }
