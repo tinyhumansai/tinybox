@@ -203,12 +203,33 @@ fn requested_native_resource_limits_are_refused_before_spawn()
         cpu_millis: 500,
         memory_bytes: 1024 * 1024,
         pids_max: 32,
-        disk_bytes: 1024 * 1024,
+        disk_bytes: Some(1024 * 1024),
     });
     // Declared enforcement accepts best-effort filesystem constraints, but a
     // resource budget remains a hard requirement and must refuse before spawn.
     assert!(prepare(root.path(), &config, &command, &backend).is_err());
     Ok(())
+}
+
+#[test]
+fn a_native_jail_budget_requires_disk_only_when_one_is_set() {
+    use tinybox_core::Constraint::{Cpu, Disk, Memory, Pids};
+    let mut limits = tinybox_bus::ResourceLimits {
+        cpu_millis: 500,
+        memory_bytes: 1024 * 1024,
+        pids_max: 32,
+        disk_bytes: None,
+    };
+    assert_eq!(
+        required_resource_constraints(Some(limits)),
+        vec![Cpu, Memory, Pids]
+    );
+    limits.disk_bytes = Some(1024 * 1024);
+    assert_eq!(
+        required_resource_constraints(Some(limits)),
+        vec![Cpu, Memory, Pids, Disk]
+    );
+    assert_eq!(required_resource_constraints(None), vec![]);
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -285,7 +306,7 @@ fn legacy_resource_limits_still_fail_closed_on_linux()
         cpu_millis: 100,
         memory_bytes: 64 * 1024 * 1024,
         pids_max: 16,
-        disk_bytes: 1024,
+        disk_bytes: Some(1024),
     });
 
     assert!(
