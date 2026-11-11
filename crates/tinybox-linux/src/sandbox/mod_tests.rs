@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -608,6 +608,53 @@ fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
     let mut unsupported = request();
     unsupported.allow_subprocess = false;
     assert!(crate::native_jail_argv(&unsupported).is_err());
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_missing_denial_inside_a_mount_is_refused_and_one_outside_is_skipped()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let cwd = root.path().join("work");
+    std::fs::create_dir(&cwd)?;
+    let elsewhere = tempfile::tempdir()?;
+    let inside = root.path().join("credentials.json");
+    let outside = elsewhere.path().join("not-mounted");
+    let request = |deny_read: Vec<PathBuf>| crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd: cwd.clone(),
+        read_only: Vec::new(),
+        read_write: Vec::new(),
+        deny_read,
+        allow_net: false,
+        allow_subprocess: true,
+        cpu_millis: Some(1000),
+        memory_bytes: None,
+        pids_max: None,
+        argv: vec!["/bin/true".into()],
+        env: BTreeMap::new(),
+    };
+    let systemd_run = crate::trusted_systemd_run_program()?;
+    let build = |deny_read| {
+        crate::native_jail_argv_with_programs(
+            &request(deny_read),
+            &systemd_run,
+            Path::new("/bin/true"),
+        )
+    };
+
+    // Masking it would make bwrap create an empty file in the caller's tree.
+    let kind = build(vec![inside.clone()]).err().map(|error| error.kind());
+    assert_eq!(kind, Some(std::io::ErrorKind::NotFound));
+    assert!(!inside.exists(), "nothing may be created on the host");
+
+    // Outside every mount the sandbox never shows it: nothing to mask.
+    let argv = build(vec![outside.clone()])?;
+    assert!(
+        !argv.iter().any(|part| Path::new(part) == outside),
+        "{argv:?}"
+    );
     Ok(())
 }
 

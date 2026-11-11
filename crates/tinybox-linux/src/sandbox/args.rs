@@ -543,6 +543,33 @@ fn validate_native_jail_command(request: &NativeJailCommand) -> std::io::Result<
         ));
     }
 
+    refuse_missing_denials_inside_mounts(request)
+}
+
+/// A `deny_read` path must exist when it lies inside one of the jail's mounts:
+/// masking a missing one (`--ro-bind /dev/null <path>`) makes bwrap create it
+/// on the host, an empty file in the caller's tree, and a path created after
+/// the jail starts would not be covered anyway. One outside every mount is
+/// never visible in the sandbox, so it is skipped when the argv is built.
+fn refuse_missing_denials_inside_mounts(request: &NativeJailCommand) -> std::io::Result<()> {
+    let mounts: Vec<&Path> = std::iter::once(&request.root)
+        .chain(&request.read_only)
+        .chain(&request.read_write)
+        .map(PathBuf::as_path)
+        .collect();
+    for denied in &request.deny_read {
+        if denied.symlink_metadata().is_err()
+            && mounts.iter().any(|mount| denied.starts_with(mount))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "deny_read path {} must exist before starting the jail",
+                    denied.display()
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -642,7 +669,13 @@ fn native_bwrap_argv(
             destination.display().to_string(),
         ]);
     }
-    for denied in &request.deny_read {
+    // A missing denial reaching here lies outside every mount (see
+    // `refuse_missing_denials_inside_mounts`): nothing to mask.
+    for denied in request
+        .deny_read
+        .iter()
+        .filter(|denied| denied.symlink_metadata().is_ok())
+    {
         if denied.is_dir() {
             argv.extend(["--tmpfs".into(), denied.display().to_string()]);
         } else {
