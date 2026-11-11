@@ -241,6 +241,29 @@ fn render_profile(jail: &Jail) -> String {
         out.push_str(")\n");
     }
 
+    // A writable grant inside a denied path is re-opened after the deny block:
+    // Seatbelt applies the last matching rule, so an allow here carves the
+    // grant out of the denial. Admission refuses a host's writable grant under
+    // a denial, so in practice this is the per-call scratch the native shell
+    // adds after admission (`TMPDIR`), which would otherwise be unusable
+    // whenever the host denies the folder holding its state directory (#89).
+    let carved: Vec<&std::path::PathBuf> = jail
+        .read_write
+        .iter()
+        .filter(|granted| {
+            jail.deny_read
+                .iter()
+                .any(|denied| granted.starts_with(denied) && *granted != denied)
+        })
+        .collect();
+    if !carved.is_empty() {
+        out.push_str("(allow file-read* file-write*\n");
+        for path in carved {
+            let _ = writeln!(out, "  (subpath \"{}\")", escape(&path.to_string_lossy()));
+        }
+        out.push_str(")\n");
+    }
+
     // `read_only` is informational on macOS — reads are already allowed
     // by `(allow default)`. We keep the field on `Jail` because Landlock
     // and AppContainer use it, and it lets callers express intent

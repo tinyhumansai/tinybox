@@ -45,6 +45,64 @@ fn profile_denies_reads_and_writes_of_denied_paths_last() {
 }
 
 #[test]
+fn a_writable_grant_inside_a_denied_path_is_carved_out_after_the_denial() {
+    let mut jail = Jail::new("/Users/a/project", "x");
+    jail.deny_read = vec!["/Users/a/.openhuman".into()];
+    jail.read_write = vec![
+        "/Users/a/.openhuman/workspace/artifacts/sandbox-scratch/shell-1".into(),
+        "/Users/a/cache".into(),
+    ];
+    let p = render_profile(&jail);
+    let denial = p.find("(deny file-read* file-write*").expect("denial");
+    let carve = p.rfind("(allow file-read* file-write*").expect("carve-out");
+    // After the denial, so the last matching rule re-opens the scratch.
+    assert!(carve > denial);
+    assert!(p[carve..].contains("sandbox-scratch/shell-1"));
+    // Only grants inside a denial are carved; the rest need no carve-out.
+    assert!(!p[carve..].contains("/Users/a/cache"));
+    // Without a grant inside a denial there is no carve-out at all.
+    jail.read_write = vec!["/Users/a/cache".into()];
+    assert!(!render_profile(&jail).contains("(allow file-read* file-write*"));
+}
+
+/// Live: the per-call scratch under a denied state folder stays readable and
+/// writable, while the rest of the folder stays denied (#89).
+#[test]
+fn a_scratch_inside_a_denied_folder_stays_usable_while_the_folder_is_denied() {
+    let backend = SeatbeltBackend::new();
+    if !backend.is_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let workspace = workspace.path().canonicalize().expect("canonical root");
+    let state_dir = tempfile::tempdir().expect("tempdir");
+    let state = state_dir.path().canonicalize().expect("canonical state");
+    let scratch = state.join("artifacts").join("scratch");
+    fs::create_dir_all(&scratch).expect("mkdir");
+    fs::write(state.join("secret.txt"), "state-secret").expect("write");
+    let mut jail = Jail::new(&workspace, "test.carve");
+    jail.read_write = vec![scratch.clone()];
+    jail.deny_read = vec![state.clone()];
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "echo carved > \"$1/f\" && cat \"$1/f\" && ! cat \"$2/secret.txt\"",
+        "sh",
+    ])
+    .arg(&scratch)
+    .arg(&state)
+    .current_dir(&workspace);
+
+    let child = backend.spawn_captured(&jail, cmd).expect("spawn");
+    let output = child.wait_with_output().expect("wait");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "carved");
+    assert!(!stdout.contains("state-secret"));
+}
+
+#[test]
 fn escape_handles_backslash_and_quote() {
     assert_eq!(escape("a\\b"), "a\\\\b");
     assert_eq!(escape("a\"b"), "a\\\"b");
