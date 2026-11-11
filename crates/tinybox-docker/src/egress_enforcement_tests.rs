@@ -578,11 +578,7 @@ async fn owner_marker_drop_does_not_satisfy_default_drop_verification() -> Resul
 
     assert!(matches!(
         controller.prepare(&host, namespace, &id, &allowlist).await,
-        Err(Error::ConstraintNotEnforced {
-            constraint: tinybox_core::Constraint::Network,
-            enforcement: tinybox_core::Enforcement::Unsupported,
-            ..
-        })
+        Err(Error::EgressAllowlistUnavailable { .. })
     ));
     assert!(host.commands().iter().any(|argv| {
         argv.iter().any(|arg| arg == "rm") && argv.iter().any(|arg| arg == &names.network)
@@ -830,11 +826,7 @@ async fn missing_local_bridge_link_refuses_enforcement() -> Result<()> {
 
     assert!(matches!(
         verify_created_bridge_link(&host, &names).await,
-        Err(Error::ConstraintNotEnforced {
-            constraint: tinybox_core::Constraint::Network,
-            enforcement: tinybox_core::Enforcement::Unsupported,
-            ..
-        })
+        Err(Error::EgressAllowlistUnavailable { .. })
     ));
     Ok(())
 }
@@ -1073,11 +1065,7 @@ async fn pinned_targets_inside_auto_selected_network_subnets_are_rejected_and_ro
 
         assert!(matches!(
             controller.prepare(&host, namespace, &id, &allowlist).await,
-            Err(Error::ConstraintNotEnforced {
-                constraint: tinybox_core::Constraint::Network,
-                enforcement: tinybox_core::Enforcement::Unsupported,
-                ..
-            })
+            Err(Error::EgressAllowlistUnavailable { .. })
         ));
         let commands = host.commands();
         assert!(commands.iter().any(|argv| {
@@ -1487,10 +1475,7 @@ async fn empty_successful_network_create_rolls_back_the_owned_network() -> Resul
 
     assert!(matches!(
         controller.prepare(&host, namespace, &id, &allowlist).await,
-        Err(Error::ConstraintNotEnforced {
-            enforcement: tinybox_core::Enforcement::Unsupported,
-            ..
-        })
+        Err(Error::EgressAllowlistUnavailable { .. })
     ));
     assert!(host.commands().iter().any(|argv| {
         argv.iter().any(|arg| arg == "rm") && argv.iter().any(|arg| arg == &names.network)
@@ -1535,11 +1520,7 @@ async fn native_controller_refuses_non_linux_before_host_commands() -> Result<()
 
     assert!(matches!(
         controller.validate_host(&host).await,
-        Err(Error::ConstraintNotEnforced {
-            constraint: tinybox_core::Constraint::Network,
-            enforcement: tinybox_core::Enforcement::Unsupported,
-            ..
-        })
+        Err(Error::EgressAllowlistUnavailable { .. })
     ));
     assert!(host.commands().is_empty());
     Ok(())
@@ -1553,11 +1534,7 @@ async fn missing_forward_hook_refuses_native_egress_before_resource_creation() {
 
         assert!(matches!(
             controller.validate_host(&host).await,
-            Err(Error::ConstraintNotEnforced {
-                constraint: tinybox_core::Constraint::Network,
-                enforcement: tinybox_core::Enforcement::Unsupported,
-                ..
-            })
+            Err(Error::EgressAllowlistUnavailable { .. })
         ));
         assert!(
             host.commands()
