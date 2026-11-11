@@ -57,6 +57,12 @@ jobs:
       - name: Make unprivileged bubblewrap usable
         run: |
           source scripts/ci/prepare-bwrap.sh
+      # The image ships passt (a podman Recommends). Without it this job keeps
+      # the default shared-network path covered; the pasta job covers the other.
+      - name: Remove pasta so the shared-network path is the one tested
+        run: |
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove --yes passt; fi
+          if command -v pasta >/dev/null 2>&1; then echo "pasta still present" >&2; exit 1; fi
       - name: Run the real-bubblewrap suites, refusing to skip
         shell: bash
         env:
