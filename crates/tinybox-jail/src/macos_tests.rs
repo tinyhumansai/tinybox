@@ -120,7 +120,10 @@ fn names_are_denied_by_a_regex_after_every_allow() {
 #[test]
 fn regex_escape_quotes_every_metacharacter() {
     assert_eq!(regex_escape(".npmrc"), "\\.npmrc");
-    assert_eq!(regex_escape("a(b)[c]{d}^$|?*+"), "a\\(b\\)\\[c\\]\\{d\\}\\^\\$\\|\\?\\*\\+");
+    assert_eq!(
+        regex_escape("a(b)[c]{d}^$|?*+"),
+        "a\\(b\\)\\[c\\]\\{d\\}\\^\\$\\|\\?\\*\\+"
+    );
     assert_eq!(regex_escape("plain"), "plain");
 }
 

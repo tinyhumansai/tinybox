@@ -27,19 +27,7 @@ pub(super) fn prepare(
     {
         return Err(invalid());
     }
-    if !config.deny_read_names.is_empty() && !backend.denies_by_name() {
-        return Err(super::resources::failure(
-            tinybox_bus::UNSUPPORTED_OPERATION,
-            &format!(
-                "requested native jail enforcement is unavailable: backend `{}` cannot deny \
-                 paths by name",
-                backend.name()
-            ),
-        ));
-    }
-    if !config.deny_read_names.iter().all(|name| is_plain_name(name)) {
-        return Err(invalid());
-    }
+    check_name_denials(config, backend)?;
     // Before anything is canonicalized: a link the jailed program planted
     // (`<root>/vendor -> <secret>`) is only visible in the raw spellings.
     {
@@ -129,6 +117,29 @@ pub(super) fn prepare(
         }
     }
     Ok(jail)
+}
+
+/// Name denials need a backend that denies by name, and each name must be one
+/// plain path component.
+fn check_name_denials(config: &NativeJailConfig, backend: &dyn JailBackend) -> Result<()> {
+    if !config.deny_read_names.is_empty() && !backend.denies_by_name() {
+        return Err(super::resources::failure(
+            tinybox_bus::UNSUPPORTED_OPERATION,
+            &format!(
+                "requested native jail enforcement is unavailable: backend `{}` cannot deny \
+                 paths by name",
+                backend.name()
+            ),
+        ));
+    }
+    if !config
+        .deny_read_names
+        .iter()
+        .all(|name| is_plain_name(name))
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()> {

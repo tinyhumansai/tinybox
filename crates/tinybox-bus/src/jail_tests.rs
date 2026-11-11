@@ -106,7 +106,11 @@ fn native_jail_21_resource_subset_is_additive_and_keeps_disk_explicit()
 fn read_denials_by_name_are_additive_on_the_wire() -> Result<(), serde_json::Error> {
     let mut jail = NativeJailConfig::default();
     // Absent when empty, so a 2.4 request decodes and encodes unchanged.
-    assert!(serde_json::to_value(&jail)?.get("deny_read_names").is_none());
+    assert!(
+        serde_json::to_value(&jail)?
+            .get("deny_read_names")
+            .is_none()
+    );
     jail.deny_read_names = vec![".npmrc".into()];
     let encoded = serde_json::to_value(&jail)?;
     assert_eq!(encoded["deny_read_names"], serde_json::json!([".npmrc"]));

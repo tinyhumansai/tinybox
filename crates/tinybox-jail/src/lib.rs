@@ -231,7 +231,10 @@ fn require_name_denials(backend: &dyn JailBackend, jail: &Jail) -> std::io::Resu
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        format!("jail backend `{}` cannot deny paths by name", backend.name()),
+        format!(
+            "jail backend `{}` cannot deny paths by name",
+            backend.name()
+        ),
     ))
 }
 

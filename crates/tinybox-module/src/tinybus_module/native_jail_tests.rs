@@ -1600,7 +1600,13 @@ fn a_name_denial_is_refused_by_a_backend_that_cannot_deny_by_name()
             assert_eq!(name, tinybox_bus::UNSUPPORTED_OPERATION);
             assert!(message.contains("cannot deny paths by name"), "{message}");
         }
-        other => panic!("expected a refusal, got {:?}", other.map(|jail| jail.deny_read_names)),
+        other => {
+            return Err(format!(
+                "expected a refusal, got {:?}",
+                other.map(|jail| jail.deny_read_names)
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -1639,7 +1645,7 @@ fn a_name_that_is_not_one_plain_component_is_an_invalid_path()
         let (config, command) = name_request(root.path(), &[bad]);
         match prepare(root.path(), &config, &command, &backend) {
             Err(error) => assert_eq!(error.wire_name(), tinybox_bus::INVALID_FILE_PATH, "{bad:?}"),
-            Ok(_) => panic!("{bad:?} was admitted"),
+            Ok(_) => return Err(format!("{bad:?} was admitted").into()),
         }
     }
     Ok(())
