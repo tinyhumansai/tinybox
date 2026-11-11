@@ -47,7 +47,10 @@ pub use oneshot::{
 
 pub use policy::{DANGEROUS_MOUNTS, HOST_NETWORK, run_policy_issues};
 
-pub use egress::{EgressResolver, PinnedEgressPlan, PinnedEgressTarget, plan_egress_allowlist};
+pub use egress::{
+    EgressResolver, PinnedEgressPlan, PinnedEgressTarget, SystemEgressResolver,
+    plan_egress_allowlist,
+};
 pub use egress_enforcement::{
     DockerEgressController, NativeLinuxDockerEgressController, PreparedEgressNetwork,
 };
