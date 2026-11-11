@@ -26,7 +26,7 @@ fn run(shell: &str, body: &str, items: &[&str]) -> io::Result<String> {
     let bwrap = stand_in(dir.path(), body)?;
     let argv: Vec<OsString> = items.iter().map(OsString::from).collect();
     let file = ArgsFile::create(&argv, &tmp())?;
-    let out = command(shell, &bwrap, &file, "prog".as_ref(), &["a".into()]).output()?;
+    let out = command(shell, &bwrap, &file, 0, "prog".as_ref(), &["a".into()]).output()?;
     file.discard();
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -81,7 +81,7 @@ fn the_args_file_is_gone_once_the_launcher_has_started_bwrap() -> io::Result<()>
     let file = ArgsFile::create(&["x".into()], &tmp())?;
     let path = file.path().to_path_buf();
     assert!(
-        command(shell(), &bwrap, &file, "prog".as_ref(), &[])
+        command(shell(), &bwrap, &file, 0, "prog".as_ref(), &[])
             .status()?
             .success()
     );
@@ -94,7 +94,7 @@ fn the_launcher_runs_with_an_empty_environment() -> io::Result<()> {
     let dir = tempfile::tempdir()?;
     let bwrap = stand_in(dir.path(), "env")?;
     let file = ArgsFile::create(&[], &tmp())?;
-    let out = command(shell(), &bwrap, &file, "prog".as_ref(), &[]).output()?;
+    let out = command(shell(), &bwrap, &file, 0, "prog".as_ref(), &[]).output()?;
     file.discard();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -137,7 +137,7 @@ fn a_launcher_that_cannot_open_the_args_file_fails_closed_without_running_bwrap(
         dir: dir.path().join("gone"),
         file: dir.path().join("gone").join("args"),
     };
-    let status = command(shell(), &bwrap, &missing, "prog".as_ref(), &[]).status()?;
+    let status = command(shell(), &bwrap, &missing, 0, "prog".as_ref(), &[]).status()?;
     assert_eq!(status.code(), Some(126));
     assert!(!marker.exists(), "bwrap must not run without its arguments");
     Ok(())
@@ -171,5 +171,51 @@ fn the_args_directory_prefers_xdg_runtime_dir_but_never_one_inside_a_grant() -> 
         .err()
         .map(|e| e.kind());
     assert_eq!(kind, Some(io::ErrorKind::PermissionDenied));
+    Ok(())
+}
+
+#[test]
+fn the_grant_descriptors_reach_bwrap_and_nothing_else_does() -> io::Result<()> {
+    let shell = shell();
+    if !shell.ends_with("bash") {
+        eprintln!("skipped: no bash");
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    let granted = tempfile::tempdir()?;
+    let leaked = tempfile::NamedTempFile::new()?;
+    // An inheritable descriptor the launcher must still close.
+    let stray = std::fs::File::open(leaked.path())?;
+    rustix::io::fcntl_setfd(&stray, rustix::io::FdFlags::empty())?;
+    let bwrap = stand_in(dir.path(), "ls -l /proc/self/fd")?;
+    let file = ArgsFile::create(&[], &tmp())?;
+    let mut launcher = command(shell, &bwrap, &file, 2, "prog".as_ref(), &[]);
+    let mappings = vec![
+        command_fds::FdMapping {
+            parent_fd: std::fs::File::open(granted.path())?.into(),
+            child_fd: 10,
+        },
+        command_fds::FdMapping {
+            parent_fd: std::fs::File::open(granted.path())?.into(),
+            child_fd: 11,
+        },
+    ];
+    command_fds::CommandFdExt::fd_mappings(&mut launcher, mappings).map_err(io::Error::other)?;
+
+    let out = launcher.output()?;
+    file.discard();
+    drop(stray);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let granted = granted.path().display().to_string();
+    for fd in ["10 ->", "11 ->"] {
+        assert!(
+            text.lines().any(|l| l.contains(fd) && l.contains(&granted)),
+            "{fd} {text}"
+        );
+    }
+    assert!(
+        !text.contains(&leaked.path().display().to_string()),
+        "{text}"
+    );
     Ok(())
 }

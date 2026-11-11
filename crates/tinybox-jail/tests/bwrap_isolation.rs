@@ -110,6 +110,27 @@ fn a_read_only_grant_nested_in_the_root_stays_read_only() -> io::Result<()> {
 }
 
 #[test]
+fn grants_are_bound_from_descriptors_whenever_bwrap_supports_it() -> io::Result<()> {
+    let Some(backend) = backend()? else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    let program = backend
+        .program()
+        .ok_or_else(|| io::Error::other("no program"))?;
+    let help = Command::new(program).arg("--help").output()?;
+    let listed = String::from_utf8_lossy(&help.stdout)
+        .split_whitespace()
+        .any(|word| word == "--bind-fd");
+    // openat2 is present on every kernel CI runs (5.6+), so the listing alone
+    // decides; the nested-grant tests above then ran through descriptors.
+    assert_eq!(backend.binds_by_descriptor(), listed);
+    eprintln!("[bwrap-real] binds_by_descriptor={listed}");
+    done("bind-fd", start);
+    Ok(())
+}
+
+#[test]
 fn a_read_only_grant_nested_in_a_read_write_grant_stays_read_only() -> io::Result<()> {
     let Some(backend) = backend()? else {
         return Ok(());

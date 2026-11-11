@@ -14,6 +14,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::{OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use crate::jail::Jail;
@@ -44,12 +45,27 @@ pub(super) const ETC_ENTRIES: &[&str] = &[
 ];
 
 /// Switches that depend on the `bwrap` build or the host, decided by the probe.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Options {
     /// Pass `--disable-userns` (bubblewrap 0.8+): the child cannot create
     /// nested user namespaces, which closes the usual escape route to a
     /// capability-bearing namespace.
     pub disable_userns: bool,
+    /// Bind the jail's grants from descriptors (`--bind-fd`/`--ro-bind-fd`)
+    /// opened here, instead of by path (see [`jail_args_with_fds`]).
+    pub bind_fds: bool,
+}
+
+/// The first descriptor a grant is handed to `bwrap` on; the launcher keeps
+/// this one and the ones after it open.
+pub(super) const FIRST_GRANT_FD: RawFd = 10;
+
+/// A `bwrap` argument list, plus the descriptors it binds grants from, each
+/// with the number the child must see it on.
+#[derive(Debug, Default)]
+pub(super) struct JailArgs {
+    pub argv: Vec<OsString>,
+    pub fds: Vec<(OwnedFd, RawFd)>,
 }
 
 #[derive(Debug)]
@@ -65,6 +81,8 @@ enum Kind {
 struct Mount {
     path: PathBuf,
     kind: Kind,
+    /// One of the jail's own grants, not a baseline system path.
+    grant: bool,
 }
 
 impl Mount {
@@ -126,10 +144,12 @@ fn baseline_mounts() -> Vec<Mount> {
             Ok(target) => Mount {
                 path,
                 kind: Kind::Symlink(target),
+                grant: false,
             },
             Err(_) => Mount {
                 path,
                 kind: Kind::Bind { writable: false },
+                grant: false,
             },
         });
     }
@@ -137,6 +157,7 @@ fn baseline_mounts() -> Vec<Mount> {
         mounts.push(Mount {
             path: PathBuf::from(entry),
             kind: Kind::Bind { writable: false },
+            grant: false,
         });
     }
 
@@ -166,28 +187,36 @@ pub(super) fn jail_args(
     cwd: Option<&Path>,
     options: Options,
 ) -> io::Result<Vec<OsString>> {
-    for path in std::iter::once(&jail.root)
-        .chain(&jail.read_write)
-        .chain(&jail.read_only)
-        .chain(&jail.deny_read)
-        .map(PathBuf::as_path)
-        .chain(cwd)
-    {
-        require_clean(path)?;
-    }
-    // A grant inside a writable one must not reach its target through a
-    // symlink the jailed program could have planted.
-    let writable: Vec<&Path> = std::iter::once(&jail.root)
-        .chain(&jail.read_write)
-        .map(PathBuf::as_path)
-        .collect();
-    let nested: Vec<&Path> = jail
-        .read_only
-        .iter()
-        .chain(&jail.read_write)
-        .map(PathBuf::as_path)
-        .collect();
-    crate::jail::reject_symlinked_grants(&writable, &nested)?;
+    let paths_only = Options {
+        bind_fds: false,
+        ..options
+    };
+    jail_args_with_fds(jail, cwd, paths_only).map(|args| args.argv)
+}
+
+/// [`jail_args`], with the grants bound from descriptors when
+/// `options.bind_fds` is set.
+///
+/// A path check followed by `bwrap --bind PATH` leaves a window in which a
+/// program with write access to a grant's parent can swap a directory for a
+/// symlink. Here each grant is opened once, as an `O_PATH` descriptor, and
+/// `bwrap` binds that descriptor, so what was checked is what is mounted. A
+/// grant inside an already-opened grant is opened relative to it with
+/// `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`, so no symlink on that stretch is
+/// followed (another sandbox may be able to write there even when this one
+/// cannot); any other grant is opened by its declared path, whose ancestors
+/// the host controls. A missing read-only grant is skipped, as `--ro-bind-try`
+/// skips it.
+///
+/// # Errors
+/// As [`jail_args`], plus the error from opening a grant (`ELOOP` when a
+/// symlink was planted inside a writable grant).
+pub(super) fn jail_args_with_fds(
+    jail: &Jail,
+    cwd: Option<&Path>,
+    options: Options,
+) -> io::Result<JailArgs> {
+    check_paths(jail, cwd)?;
     let mut mounts = baseline_mounts();
     for (path, writable) in std::iter::once((&jail.root, true))
         .chain(jail.read_write.iter().map(|p| (p, true)))
@@ -211,6 +240,7 @@ pub(super) fn jail_args(
         mounts.push(Mount {
             path: path.clone(),
             kind: Kind::Bind { writable },
+            grant: true,
         });
     }
 
@@ -240,6 +270,7 @@ pub(super) fn jail_args(
         argv.extend([os(flag), os(path)]);
     }
 
+    let mut fds = GrantFds::default();
     for mount in &mounts {
         match &mount.kind {
             Kind::Symlink(target) => argv.extend([
@@ -247,6 +278,20 @@ pub(super) fn jail_args(
                 target.clone().into_os_string(),
                 mount.path.clone().into_os_string(),
             ]),
+            Kind::Bind { writable } if options.bind_fds && mount.grant => {
+                let Some(fd) = fds.open(&mount.path, *writable)? else {
+                    continue;
+                };
+                argv.extend([
+                    os(if *writable {
+                        "--bind-fd"
+                    } else {
+                        "--ro-bind-fd"
+                    }),
+                    fd.to_string().into(),
+                    mount.path.clone().into_os_string(),
+                ]);
+            }
             Kind::Bind { writable } => argv.extend([
                 os(if *writable { "--bind" } else { "--ro-bind-try" }),
                 mount.path.clone().into_os_string(),
@@ -261,7 +306,89 @@ pub(super) fn jail_args(
         os("--chdir"),
         cwd.unwrap_or(&jail.root).as_os_str().to_os_string(),
     ]);
-    Ok(argv)
+    Ok(JailArgs {
+        argv,
+        fds: fds.into_mappings(),
+    })
+}
+
+/// Every path is absolute and clean, and no grant inside a writable one
+/// reaches its target through a symlink the jailed program could have planted.
+fn check_paths(jail: &Jail, cwd: Option<&Path>) -> io::Result<()> {
+    for path in std::iter::once(&jail.root)
+        .chain(&jail.read_write)
+        .chain(&jail.read_only)
+        .chain(&jail.deny_read)
+        .map(PathBuf::as_path)
+        .chain(cwd)
+    {
+        require_clean(path)?;
+    }
+    let writable: Vec<&Path> = std::iter::once(&jail.root)
+        .chain(&jail.read_write)
+        .map(PathBuf::as_path)
+        .collect();
+    let nested: Vec<&Path> = jail
+        .read_only
+        .iter()
+        .chain(&jail.read_write)
+        .map(PathBuf::as_path)
+        .collect();
+    crate::jail::reject_symlinked_grants(&writable, &nested)
+}
+
+/// The grant descriptors opened so far, shallowest first, numbered from
+/// [`FIRST_GRANT_FD`].
+#[derive(Default)]
+struct GrantFds {
+    opened: Vec<(PathBuf, OwnedFd)>,
+}
+
+impl GrantFds {
+    /// Opens `path` and returns the number the child will see it on, or
+    /// `None` for a missing read-only grant.
+    fn open(&mut self, path: &Path, writable: bool) -> io::Result<Option<RawFd>> {
+        use nix::fcntl::{OFlag, OpenHow, ResolveFlag};
+        let flags = OFlag::O_PATH | OFlag::O_CLOEXEC;
+        // The deepest grant already opened that contains this one.
+        let parent = self
+            .opened
+            .iter()
+            .filter(|(dir, _)| path.starts_with(dir) && path != dir)
+            .max_by_key(|(dir, _)| dir.components().count());
+        let opened = match parent {
+            Some((dir, fd)) => nix::fcntl::openat2(
+                fd,
+                path.strip_prefix(dir).map_err(io::Error::other)?,
+                OpenHow::new()
+                    .flags(flags)
+                    .resolve(ResolveFlag::RESOLVE_NO_SYMLINKS | ResolveFlag::RESOLVE_BENEATH),
+            ),
+            None => nix::fcntl::openat2(nix::fcntl::AT_FDCWD, path, OpenHow::new().flags(flags)),
+        };
+        let fd = match opened {
+            Ok(fd) => fd,
+            Err(nix::errno::Errno::ENOENT) if !writable => return Ok(None),
+            Err(errno) => {
+                return Err(io::Error::new(
+                    io::Error::from(errno).kind(),
+                    format!("cannot open jail grant {}: {errno}", path.display()),
+                ));
+            }
+        };
+        let number =
+            FIRST_GRANT_FD + RawFd::try_from(self.opened.len()).map_err(io::Error::other)?;
+        self.opened.push((path.to_path_buf(), fd));
+        Ok(Some(number))
+    }
+
+    fn into_mappings(self) -> Vec<(OwnedFd, RawFd)> {
+        self.opened
+            .into_iter()
+            .zip(FIRST_GRANT_FD..)
+            .map(|((_, fd), number)| (fd, number))
+            .collect()
+    }
 }
 
 /// `deny_read` plus, for each entry under a baseline symlink, the same path

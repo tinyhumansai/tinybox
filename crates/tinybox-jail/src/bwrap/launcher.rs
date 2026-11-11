@@ -27,13 +27,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The script: open and delete the args file, close every other inherited
-/// descriptor above 2, then `exec bwrap --args 9 -- COMMAND...`. `$0` is
-/// `bwrap`, `$1` the args file, the rest the command and its arguments (bwrap
+/// descriptor above 2 except the `$2` grant descriptors from 10 up (see
+/// [`super::args::FIRST_GRANT_FD`]), then `exec bwrap --args 9 -- COMMAND...`.
+/// `$0` is `bwrap`, `$1` the args file, the rest the command and its arguments (bwrap
 /// reads options from the file but the command itself must be on its argv; a
 /// command line is visible to every local user anyway, in the sandbox as on
 /// any host).
 const SCRIPT: &str = r#"f=$1
-shift
+k=$2
+shift 2
 exec 9<"$f" || exit 126
 command -p rm -f -- "$f"
 command -p rmdir -- "${f%/*}" 2>/dev/null
@@ -42,7 +44,9 @@ for fd in /proc/self/fd/*; do
   n=${fd##*/}
   case $n in
     0|1|2|9) ;;
-    *) eval "exec $n>&-" || exit 126 ;;
+    *) if [ "$n" -ge 10 ] && [ "$n" -lt $((10 + k)) ]; then :; else
+         eval "exec $n>&-" || exit 126
+       fi ;;
   esac
 done
 exec "$0" --args 9 -- "$@"
@@ -155,11 +159,13 @@ impl ArgsFile {
 }
 
 /// The launcher command: an empty environment, the script, `bwrap`, the file,
-/// then the command to run inside the sandbox and its arguments.
+/// how many grant descriptors to keep, then the command to run inside the
+/// sandbox and its arguments.
 pub(super) fn command(
     shell: &str,
     bwrap: &Path,
     args: &ArgsFile,
+    grant_fds: usize,
     program: &std::ffi::OsStr,
     program_args: &[OsString],
 ) -> Command {
@@ -170,6 +176,7 @@ pub(super) fn command(
         .arg(SCRIPT)
         .arg(bwrap)
         .arg(args.path())
+        .arg(grant_fds.to_string())
         .arg(program)
         .args(program_args);
     launcher

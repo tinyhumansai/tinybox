@@ -56,14 +56,16 @@
 //!   but a vetted BPF program is not part of this change.
 //! - No CPU, memory or pid limits (`tinybox-linux` offers them through a
 //!   `systemd-run` scope; not wired here).
-//! - Check-then-use gap on nested grants: the symlink check on a grant inside a
-//!   writable directory (`reject_symlinked_grants`) runs before `bwrap` binds
-//!   the path, so a program that is already running in another session could
-//!   swap a directory for a symlink in between. Closing it needs `O_PATH`
-//!   descriptors opened with `openat2(RESOLVE_NO_SYMLINKS)` and
-//!   `--bind-fd`/`--ro-bind-fd` (bubblewrap 0.10+); that is follow-up work.
-//!   The window is only open while another sandbox with write access to the
-//!   same tree is running.
+//! - Check-then-use gap on nested grants, **only where `bwrap` lacks
+//!   `--bind-fd` or the kernel lacks `openat2` (before Linux 5.6)**. Then the
+//!   symlink check on a grant inside a writable directory
+//!   (`reject_symlinked_grants`) runs before `bwrap` binds the path, so a
+//!   program already running in another session could swap a directory for a
+//!   symlink in between. Otherwise each grant is opened once as an `O_PATH`
+//!   descriptor, a nested one beneath its parent's with
+//!   `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`, and bound with
+//!   `--bind-fd`/`--ro-bind-fd`, so what was checked is what is mounted.
+//!   [`BubblewrapBackend::binds_by_descriptor`] reports which is in effect.
 //! - `deny_read` paths must exist when the jail starts: a path created later
 //!   under a mounted grant is **not** protected. One nested more than a level
 //!   inside a writable grant is refused.
@@ -111,6 +113,9 @@ static DEFAULT_PROBE: OnceLock<Option<Verified>> = OnceLock::new();
 struct Verified {
     program: PathBuf,
     disable_userns: bool,
+    /// `bwrap` lists `--bind-fd` and the kernel has `openat2`: grants are
+    /// bound from descriptors rather than re-resolved by path.
+    bind_fds: bool,
 }
 
 /// Bubblewrap (`bwrap`) namespace jail backend.
@@ -166,6 +171,15 @@ impl BubblewrapBackend {
         self.verified.as_ref().map(|v| v.program.as_path())
     }
 
+    /// Whether grants are bound from descriptors opened at spawn
+    /// (`--bind-fd`, bubblewrap 0.9+ on Linux 5.6+), which closes the
+    /// check-then-use gap on nested grants. When false they are bound by path
+    /// and the gap stays open (see the module docs).
+    #[must_use]
+    pub fn binds_by_descriptor(&self) -> bool {
+        self.verified.as_ref().is_some_and(|v| v.bind_fds)
+    }
+
     /// Test constructor that skips the probe, for fake launchers.
     #[cfg(test)]
     fn unverified(program: impl Into<PathBuf>, disable_userns: bool) -> Self {
@@ -173,6 +187,7 @@ impl BubblewrapBackend {
             verified: Some(Verified {
                 program: program.into(),
                 disable_userns,
+                bind_fds: false,
             }),
         }
     }
@@ -194,10 +209,38 @@ fn verify(program: &Path) -> Option<Verified> {
             return Some(Verified {
                 program: program.to_path_buf(),
                 disable_userns,
+                bind_fds: supports_fd_binds(program),
             });
         }
     }
     None
+}
+
+/// Whether `program --help` lists `--bind-fd` (bubblewrap 0.9 does) and
+/// `openat2` works on this kernel (Linux 5.6+).
+fn supports_fd_binds(program: &Path) -> bool {
+    let listed = Command::new(program)
+        .arg("--help")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .any(|word| word == "--bind-fd")
+        });
+    let openat2 = nix::fcntl::openat2(
+        nix::fcntl::AT_FDCWD,
+        "/",
+        nix::fcntl::OpenHow::new().flags(nix::fcntl::OFlag::O_PATH | nix::fcntl::OFlag::O_CLOEXEC),
+    )
+    .is_ok();
+    log::debug!(
+        "[cwd_jail:bwrap] {} --bind-fd listed={listed} openat2={openat2}",
+        program.display()
+    );
+    listed && openat2
 }
 
 fn probe(program: &Path, disable_userns: bool) -> bool {
@@ -241,7 +284,11 @@ fn run_probe(program: &Path, disable_userns: bool, root: &Path, host_only: &Path
         return false;
     };
     let jail = Jail::new(root, "bwrap-probe").deny_net();
-    let Ok(argv) = args::jail_args(&jail, None, args::Options { disable_userns }) else {
+    let options = args::Options {
+        disable_userns,
+        ..args::Options::default()
+    };
+    let Ok(argv) = args::jail_args(&jail, None, options) else {
         return false;
     };
     let check: Vec<OsString> = [
@@ -263,7 +310,7 @@ fn run_probe(program: &Path, disable_userns: bool, root: &Path, host_only: &Path
     let shell = launcher::pick_shell(|path| Path::new(path).is_file());
     // Positive evidence is required: a launcher that exits 0 without running
     // the check (`true`) must not pass.
-    let out = launcher::command(shell, program, &file, "/bin/sh".as_ref(), &check)
+    let out = launcher::command(shell, program, &file, 0, "/bin/sh".as_ref(), &check)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
@@ -290,11 +337,12 @@ struct Prepared {
 /// The launcher command carries no environment and its own argv holds only
 /// paths; the caller's variables and arguments live in the private args file.
 fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Result<Prepared> {
-    let mut argv = args::jail_args(
+    let args::JailArgs { mut argv, fds } = args::jail_args_with_fds(
         jail,
         cmd.get_current_dir(),
         args::Options {
             disable_userns: verified.disable_userns,
+            bind_fds: verified.bind_fds,
         },
     )?;
     argv.push("--clearenv".into());
@@ -313,13 +361,25 @@ fn prepare_command(verified: &Verified, jail: &Jail, cmd: &Command) -> io::Resul
     let file = launcher::ArgsFile::create(&argv, &base)?;
     let shell = launcher::pick_shell(|path| Path::new(path).is_file());
     let program_args: Vec<OsString> = cmd.get_args().map(OsString::from).collect();
-    let launcher = launcher::command(
+    let mut launcher = launcher::command(
         shell,
         &verified.program,
         &file,
+        fds.len(),
         cmd.get_program(),
         &program_args,
     );
+    // Mapped onto 10, 11, … in the child only, after fork: never inheritable
+    // in this process, where another thread could spawn concurrently.
+    let mappings = fds
+        .into_iter()
+        .map(|(parent_fd, child_fd)| command_fds::FdMapping {
+            parent_fd,
+            child_fd,
+        })
+        .collect();
+    command_fds::CommandFdExt::fd_mappings(&mut launcher, mappings)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(Prepared {
         launcher,
         args: file,

@@ -15,6 +15,7 @@ fn verified(program: &str) -> Verified {
     Verified {
         program: program.into(),
         disable_userns: true,
+        bind_fds: false,
     }
 }
 
