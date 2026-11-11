@@ -170,11 +170,14 @@ impl BoxService {
     /// network namespace) reports its weaker level here. Admission decisions
     /// use the per-jail form in `native_jail::prepare`.
     async fn jail_status(&self) -> TinyBusResult<tinybox_bus::JailStatus> {
-        let backend = tinybox_jail::default_backend();
+        // The owned-process backend is the one every jailed path uses. On
+        // Windows it is `AppContainer`, which can run work only through the
+        // owned API, so its plain `is_available` is always false.
+        let backend = tinybox_jail::default_owned_backend();
         let support = backend.constraint_support();
         std::future::ready(Ok(tinybox_bus::JailStatus {
             backend: backend.name().into(),
-            available: backend.is_available(),
+            available: backend.is_owned_available(),
             isolation: backend.isolation().to_string(),
             suitable_for_untrusted_code: backend.is_suitable_for_untrusted_code(),
             filesystem: support

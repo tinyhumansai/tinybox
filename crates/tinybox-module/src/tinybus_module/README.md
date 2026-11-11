@@ -283,8 +283,13 @@ grant remain default-denied on allow-list backends.
 
 The jail owns a separate native collector for each execution. Output replay,
 Cancel, ReleaseOutput, Close and Shutdown use the same retained cleanup barriers
-as StartExec. Windows rejects this operation until its native jail has a
-supervised child bridge; explicit ordinary local execution remains available.
+as StartExec. Every jailed path (native shell, `StartJailedExec`, stdio) uses the
+owned-process backend, which on Windows is `AppContainer`: it runs each child in
+its own Job Object. `AppContainer` enforces filesystem, network, CPU, memory and
+process-count limits, but not `Subprocess`, and reports no isolation level, so a
+jail with `allow_subprocess: false`, `require_process_isolation`, or a read
+denial overlapping its grants is refused there, with the reason in the error
+message.
 
 
 ## Observed SSH execution

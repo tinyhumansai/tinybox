@@ -1,18 +1,19 @@
 //! One interactive jailed child with piped stdio, owned by the module.
 //!
-//! The child is spawned through the jail backend (never unconfined), leads its
-//! own process group, and is reaped only by its waiter task. Output is pumped
+//! The child is spawned through the jail backend's owned-process API (never
+//! unconfined), so a backend that cannot hand back a `std::process::Child`
+//! (Windows `AppContainer`) works too. It leads its own process group where the
+//! backend owns one, and is reaped only by its waiter task. Output is pumped
 //! into bounded per-stream buffers; a full buffer stops reading the pipe, which
 //! backpressures the child instead of dropping bytes.
 use super::resources::failure;
 use std::collections::VecDeque;
-use std::process::Child;
 use std::sync::{Arc, Mutex as StdMutex};
 use tinybox_bus::{
     MAX_STDIO_BUFFER_BYTES, MAX_STDIO_READ_BYTES, MAX_STDIO_WAIT_MS, STDIO_CLOSED, StdioChunk,
     StdioExit, StdioStartRequest, StdioStatus,
 };
-use tinybox_jail::{Jail, JailBackend};
+use tinybox_jail::{ChildStatus, Jail, JailBackend, OwnedChild};
 use tinybus::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
@@ -65,7 +66,7 @@ pub(super) struct StdioSession {
     request: StdioStartRequest,
     shared: Arc<Shared>,
     stdin: tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
-    child: Arc<StdMutex<Option<Child>>>,
+    child: Arc<StdMutex<Option<OwnedChild>>>,
     group: i32,
     pumps: Vec<tokio::task::AbortHandle>,
 }
@@ -77,15 +78,12 @@ impl StdioSession {
         request: StdioStartRequest,
         backend: Arc<dyn JailBackend>,
         jail: Jail,
-        mut command: std::process::Command,
+        command: std::process::Command,
     ) -> Result<Arc<Self>> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
+        // The owned adapter puts the child in a new process group on Unix and
+        // reports it; a backend with its own ownership (a Job Object) does not.
         let mut child = tokio::task::spawn_blocking(move || {
-            tinybox_jail::spawn_captured_with(backend.as_ref(), &jail, command)
+            tinybox_jail::spawn_owned_captured_with(backend.as_ref(), &jail, command)
         })
         .await
         .map_err(|_| backend_failure("stdio start worker failed"))?
@@ -96,12 +94,15 @@ impl StdioSession {
             );
             backend_failure("jailed stdio start failed")
         })?;
-        let group = i32::try_from(child.id()).unwrap_or(0);
+        let group = child
+            .local_process_group_id()
+            .and_then(|group| i32::try_from(group).ok())
+            .unwrap_or(0);
         let pipes = (|| {
             Some((
-                tokio::process::ChildStdin::from_std(child.stdin.take()?).ok()?,
-                tokio::process::ChildStdout::from_std(child.stdout.take()?).ok()?,
-                tokio::process::ChildStderr::from_std(child.stderr.take()?).ok()?,
+                tokio::process::ChildStdin::from_std(child_pipe(child.take_stdin()?)).ok()?,
+                tokio::process::ChildStdout::from_std(child_pipe(child.take_stdout()?)).ok()?,
+                tokio::process::ChildStderr::from_std(child_pipe(child.take_stderr()?)).ok()?,
             ))
         })();
         let Some((stdin, stdout, stderr)) = pipes else {
@@ -241,7 +242,21 @@ fn drain(buffers: &mut Buffers, max: usize) -> StdioChunk {
     }
 }
 
-fn terminate(group: i32, child: &mut Child) {
+/// An owned pipe back as a standard child pipe, so the async plumbing is the
+/// same whichever backend spawned the child.
+#[cfg(unix)]
+fn child_pipe<T: From<std::os::fd::OwnedFd>>(file: std::fs::File) -> T {
+    T::from(std::os::fd::OwnedFd::from(file))
+}
+
+/// An owned pipe back as a standard child pipe, so the async plumbing is the
+/// same whichever backend spawned the child.
+#[cfg(windows)]
+fn child_pipe<T: From<std::os::windows::io::OwnedHandle>>(file: std::fs::File) -> T {
+    T::from(std::os::windows::io::OwnedHandle::from(file))
+}
+
+fn terminate(group: i32, child: &mut OwnedChild) {
     #[cfg(unix)]
     if group > 0 {
         use nix::{
@@ -252,13 +267,15 @@ fn terminate(group: i32, child: &mut Child) {
     }
     #[cfg(not(unix))]
     let _ = group;
-    let _ = child.kill();
+    let _ = child.terminate();
 }
 
 /// A killed child still needs a wait to leave no zombie behind.
-fn reap_detached(mut child: Child) {
+fn reap_detached(mut child: OwnedChild) {
     std::thread::spawn(move || {
-        let _ = child.wait();
+        while matches!(child.try_wait(), Ok(None)) {
+            std::thread::sleep(REAP_POLL);
+        }
     });
 }
 
@@ -300,7 +317,7 @@ async fn pump(mut pipe: impl AsyncRead + Unpin, shared: Arc<Shared>, which: Pipe
 
 /// Sole reaper: record the exit, then kill what the child left behind so the
 /// pipes reach end of file.
-async fn reap(child: Arc<StdMutex<Option<Child>>>, shared: Arc<Shared>, group: i32) {
+async fn reap(child: Arc<StdMutex<Option<OwnedChild>>>, shared: Arc<Shared>, group: i32) {
     loop {
         let waited = {
             let mut guard = child
@@ -341,13 +358,9 @@ async fn reap(child: Arc<StdMutex<Option<Child>>>, shared: Arc<Shared>, group: i
     }
 }
 
-fn exit_of(status: std::process::ExitStatus) -> StdioExit {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return StdioExit::Signal(signal);
-        }
+fn exit_of(status: ChildStatus) -> StdioExit {
+    if let Some(signal) = status.signal() {
+        return StdioExit::Signal(signal);
     }
     status.code().map_or(StdioExit::Unknown, StdioExit::Code)
 }

@@ -16,28 +16,18 @@ pub(super) fn prepare(
     command: &tinybox_core::ExecRequest,
     backend: &dyn JailBackend,
 ) -> Result<Jail> {
-    if !cfg!(unix) || !backend.is_available() || backend.name() == tinybox_jail::NOOP_BACKEND_NAME {
-        return Err(unavailable());
+    // Owned availability, not `is_available`: Windows `AppContainer` runs work
+    // only through the owned-process API every jailed path uses. Off Windows
+    // the two are the same.
+    if !backend.is_owned_available() || backend.name() == tinybox_jail::NOOP_BACKEND_NAME {
+        return Err(refused("no native jail backend is available on this host"));
     }
     if config.read_only.len() + config.read_write.len() + config.deny_read.len()
         > tinybox_bus::MAX_NATIVE_JAIL_GRANTS
     {
         return Err(invalid());
     }
-    // Before anything is canonicalized: a link the jailed program planted
-    // (`<root>/vendor -> <secret>`) is only visible in the raw spellings.
-    {
-        let writable: Vec<&Path> = std::iter::once(root)
-            .chain(config.read_write.iter().map(Path::new))
-            .collect();
-        let nested: Vec<&Path> = config
-            .read_only
-            .iter()
-            .chain(&config.read_write)
-            .map(Path::new)
-            .collect();
-        tinybox_jail::reject_symlinked_grants(&writable, &nested).map_err(|_| invalid())?;
-    }
+    reject_planted_links(root, config)?;
     let root = root.canonicalize().map_err(|_| invalid())?;
     if !root.is_dir() {
         return Err(invalid());
@@ -67,7 +57,11 @@ pub(super) fn prepare(
                     || (!backend.carves_denials() && denied.starts_with(granted))
             })
     }) {
-        return Err(invalid());
+        return Err(invalid_because(&format!(
+            "a read denial covers the jail root or a writable grant, or sits inside a writable \
+             grant that backend `{}` cannot carve a denial out of",
+            backend.name()
+        )));
     }
     // A carving backend may still be unable to hold a deeply nested denial.
     backend
@@ -87,19 +81,29 @@ pub(super) fn prepare(
                 .chain(&implicit_grants)
                 .any(|granted| overlaps(denied, granted))
         }) {
-            return Err(unavailable());
+            return Err(refused(&format!(
+                "a read denial overlaps the jail root, a read-only grant or a default grant, and \
+                 backend `{}` cannot carve denials",
+                backend.name()
+            )));
         }
     }
     // Per-jail, never per-backend: a backend's isolation can depend on the
     // configuration (a shared network namespace under `allow_net`).
     if config.require_process_isolation && !backend.is_suitable_for_untrusted_jail(&jail) {
-        return Err(unavailable());
+        return Err(refused(&format!(
+            "the jail requires process isolation, and backend `{}` reports {} isolation for it",
+            backend.name(),
+            backend.isolation_for(&jail)
+        )));
     }
     backend
         .require_resources(&jail)
         .map_err(|_| unavailable())?;
     match config.enforcement {
-        JailEnforcement::Enforced => backend.require(&jail).map_err(|_| unavailable())?,
+        JailEnforcement::Enforced => backend
+            .require(&jail)
+            .map_err(|_| refused(&cannot_enforce(backend, &jail, true)))?,
         JailEnforcement::Declared => {
             if backend
                 .plan_check(&jail)
@@ -107,7 +111,7 @@ pub(super) fn prepare(
                 .iter()
                 .any(|(_, support)| *support == tinybox_core::Enforcement::Unsupported)
             {
-                return Err(unavailable());
+                return Err(refused(&cannot_enforce(backend, &jail, false)));
             }
         }
     }
@@ -148,6 +152,21 @@ fn required_resource_constraints(
     } else {
         Vec::new()
     }
+}
+
+/// Before anything is canonicalized: a link the jailed program planted
+/// (`<root>/vendor -> <secret>`) is only visible in the raw spellings.
+fn reject_planted_links(root: &Path, config: &NativeJailConfig) -> Result<()> {
+    let writable: Vec<&Path> = std::iter::once(root)
+        .chain(config.read_write.iter().map(Path::new))
+        .collect();
+    let nested: Vec<&Path> = config
+        .read_only
+        .iter()
+        .chain(&config.read_write)
+        .map(Path::new)
+        .collect();
+    tinybox_jail::reject_symlinked_grants(&writable, &nested).map_err(|_| invalid())
 }
 
 /// Validate and canonicalize each existing absolute grant path.
@@ -254,6 +273,47 @@ fn unavailable() -> Error {
     super::resources::failure(
         tinybox_bus::UNSUPPORTED_OPERATION,
         "requested native jail enforcement is unavailable",
+    )
+}
+/// [`invalid`], saying which rule the request broke.
+fn invalid_because(reason: &str) -> Error {
+    super::resources::failure(
+        tinybox_bus::INVALID_FILE_PATH,
+        &format!("invalid native jail grant or working directory: {reason}"),
+    )
+}
+/// [`unavailable`], saying what the backend cannot provide. The code is the
+/// same, so a host that branches on it is unaffected.
+fn refused(reason: &str) -> Error {
+    super::resources::failure(
+        tinybox_bus::UNSUPPORTED_OPERATION,
+        &format!("requested native jail enforcement is unavailable: {reason}"),
+    )
+}
+/// The constraints `backend` cannot enforce for `jail`: anything short of
+/// `Enforced` when `strict`, otherwise only what it does not support at all.
+fn cannot_enforce(backend: &dyn JailBackend, jail: &Jail, strict: bool) -> String {
+    let missing: Vec<String> = backend
+        .plan_check(jail)
+        .constraints
+        .iter()
+        .filter(|(_, support)| {
+            if strict {
+                *support != tinybox_core::Enforcement::Enforced
+            } else {
+                *support == tinybox_core::Enforcement::Unsupported
+            }
+        })
+        .map(|(constraint, _)| format!("{constraint:?}").to_lowercase())
+        .collect();
+    format!(
+        "backend `{}` cannot enforce {}",
+        backend.name(),
+        if missing.is_empty() {
+            "a hard requirement of this jail".to_string()
+        } else {
+            missing.join(", ")
+        }
     )
 }
 

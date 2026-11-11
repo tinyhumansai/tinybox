@@ -33,7 +33,12 @@ impl ShellContext {
         root: &Path,
         resolved: &tinybox_core::ExecRequest,
     ) -> Result<Arc<Self>> {
-        Self::prepare_with_backend(request, root, resolved, tinybox_jail::default_backend())
+        Self::prepare_with_backend(
+            request,
+            root,
+            resolved,
+            tinybox_jail::default_owned_backend(),
+        )
     }
     fn prepare_with_backend(
         request: ShellExecRequest,

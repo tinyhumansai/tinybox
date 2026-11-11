@@ -1520,6 +1520,62 @@ async fn run_native_shell_returns_finished_output_after_module_cleanup()
     Ok(())
 }
 
+/// On Windows a jailed native shell runs under `AppContainer`, through the
+/// owned-process backend (#22). Before, every Windows jail was refused.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_native_shell_runs_a_jailed_command_under_appcontainer_on_windows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = tempfile::tempdir()?;
+    let workspace = tempfile::tempdir()?;
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let _storage_host = serve_test_storage(&bus).await?;
+    let service = Connection::connect(bus.connect().await?).await?;
+    setup(service.clone()).await?;
+    let client = Connection::connect(bus.connect().await?).await?;
+    let proxy = client.proxy(INTERFACE, OBJECT_PATH, INTERFACE)?;
+    let mut request = run_native_shell_request("echo jailed", state.path(), None);
+    request.create.workspace =
+        tinybox_bus::Workspace::Directory(workspace.path().to_string_lossy().into_owned());
+    request.shell.jail = Some(tinybox_bus::NativeJailConfig {
+        read_only: Vec::new(),
+        read_write: Vec::new(),
+        allow_net: true,
+        allow_subprocess: true,
+        enforcement: tinybox_bus::JailEnforcement::Enforced,
+        require_process_isolation: false,
+        deny_read: Vec::new(),
+        resources: None,
+    });
+
+    let result: tinybox_bus::RunNativeShellResult =
+        proxy.call("RunNativeShell", (request,)).await?;
+    let tinybox_bus::RunNativeShellResult::Finished {
+        exit_code,
+        stdout,
+        stderr,
+        timed_out,
+        ..
+    } = result
+    else {
+        return Err(format!("a jailed shell should finish: {result:?}").into());
+    };
+    assert_eq!(
+        exit_code,
+        0,
+        "stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(!timed_out);
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).replace("\r\n", "\n"),
+        "jailed\n"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_native_shell_cancels_a_shell_that_outlives_its_timeout()
 -> Result<(), Box<dyn std::error::Error>> {
