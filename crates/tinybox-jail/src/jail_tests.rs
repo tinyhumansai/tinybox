@@ -309,6 +309,55 @@ fn the_check_sees_a_planted_link_however_the_root_is_spelled() -> std::io::Resul
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn a_host_alias_into_a_writable_root_cannot_reach_a_planted_link() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let secret = tempfile::tempdir()?;
+    // The jailed program replaced `vendor` with a link to a secret.
+    std::os::unix::fs::symlink(secret.path(), root.path().join("vendor"))?;
+    // The host aliases a directory inside the root, not the root itself, so
+    // no prefix of the alias names the root.
+    let holder = tempfile::tempdir()?;
+    let alias = holder.path().join("v");
+    std::os::unix::fs::symlink(root.path().join("vendor"), &alias)?;
+
+    for grant in [alias.clone(), alias.join("file")] {
+        let err = crate::reject_symlinked_grants(&[root.path()], &[grant.as_path()])
+            .err()
+            .map(|e| e.kind());
+        assert_eq!(err, Some(std::io::ErrorKind::InvalidInput), "{grant:?}");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_host_alias_into_a_real_directory_of_a_writable_root_is_allowed() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("vendor"))?;
+    let holder = tempfile::tempdir()?;
+    let alias = holder.path().join("v");
+    std::os::unix::fs::symlink(root.path().join("vendor"), &alias)?;
+
+    crate::reject_symlinked_grants(&[root.path()], &[alias.as_path()])
+}
+
+#[cfg(unix)]
+#[test]
+fn a_grant_through_a_link_cycle_is_refused_rather_than_followed_forever() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let holder = tempfile::tempdir()?;
+    std::os::unix::fs::symlink(holder.path().join("b"), holder.path().join("a"))?;
+    std::os::unix::fs::symlink(holder.path().join("a"), holder.path().join("b"))?;
+
+    let err = crate::reject_symlinked_grants(&[root.path()], &[holder.path().join("a").as_path()])
+        .err()
+        .map(|e| e.kind());
+    assert_eq!(err, Some(std::io::ErrorKind::InvalidInput));
+    Ok(())
+}
+
 #[test]
 fn nested_denial_refuses_only_paths_deeper_than_a_direct_child() {
     let writable = Path::new("/work");
@@ -319,4 +368,62 @@ fn nested_denial_refuses_only_paths_deeper_than_a_direct_child() {
         let error = nested_denial(Path::new(nested), writable).expect(nested);
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{nested}");
     }
+}
+
+#[test]
+fn a_status_from_an_exit_code_carries_no_signal() {
+    let status = ChildStatus::from_code(Some(3));
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(status.signal(), None);
+    assert_eq!(
+        ChildStatus::from_code(None).with_signal(Some(9)).signal(),
+        Some(9)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_owned_child_ended_by_a_signal_reports_the_signal() -> std::io::Result<()> {
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir()?;
+    let jail = Jail::new(root.path(), "owned-signal");
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", "kill -9 $$"]);
+
+    let mut child = crate::spawn_owned_captured_with(&crate::NoopBackend, &jail, command)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "child did not exit",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(status.signal(), Some(9));
+    assert_eq!(status.code(), None);
+    Ok(())
+}
+
+#[test]
+fn a_backend_that_cannot_deny_by_name_refuses_a_name_denial() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut jail = Jail::new(root.path(), "names");
+    jail.deny_read_names = vec![".npmrc".into()];
+    let command = std::process::Command::new("/bin/true");
+
+    let error =
+        crate::spawn_owned_captured_with(&crate::NoopBackend, &jail, command).expect_err("refused");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(
+        error.to_string().contains("cannot deny paths by name"),
+        "{error}"
+    );
 }

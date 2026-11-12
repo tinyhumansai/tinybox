@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -25,6 +25,7 @@ use super::{NAME, NamespaceSandbox, args};
 #[derive(Debug, Default)]
 struct RecordingHost {
     seen: Mutex<Vec<Vec<String>>>,
+    stdin: Mutex<Vec<Option<Vec<u8>>>>,
 }
 
 impl RecordingHost {
@@ -34,6 +35,16 @@ impl RecordingHost {
 
     fn last(&self) -> Vec<String> {
         self.seen().last().cloned().unwrap_or_default()
+    }
+
+    /// The stdin the last command was given.
+    fn last_stdin(&self) -> Option<Vec<u8>> {
+        self.stdin
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last()
+            .cloned()
+            .flatten()
     }
 
     fn ran_anything(&self) -> bool {
@@ -49,6 +60,10 @@ impl Host for RecordingHost {
 
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
         self.seen().push(request.argv.clone());
+        self.stdin
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.stdin.clone());
         if request.argv == ["systemd-run", "--help"] {
             return Ok(ExecOutput::new(
                 0,
@@ -283,13 +298,84 @@ async fn the_environment_is_cleared_and_then_rebuilt() -> Result<()> {
     let argv = host.last();
     // The caller's own environment must not leak in: it routinely holds tokens.
     assert!(has(&argv, "--clearenv"));
-    let set = argv
-        .iter()
-        .enumerate()
-        .filter(|(_, part)| part.as_str() == "--setenv")
-        .filter_map(|(index, _)| argv.get(index + 1).cloned())
-        .collect::<Vec<_>>();
-    assert_eq!(set, ["FROM_BOX", "FROM_COMMAND"]);
+    // No variable is on the command line, where every local process (and,
+    // for an SSH host, the remote shell) can read it; bwrap reads them on
+    // stdin, the box's first and the command's on top.
+    assert!(!has(&argv, "--setenv"), "{argv:?}");
+    assert!(!argv.iter().any(|part| part.contains("FROM_")), "{argv:?}");
+    assert!(
+        argv.windows(2).any(|w| w[0] == "--args" && w[1] == "0"),
+        "{argv:?}"
+    );
+    assert_eq!(
+        host.last_stdin(),
+        Some(b"--setenv\0FROM_BOX\x001\0--setenv\0FROM_COMMAND\x002\0".to_vec())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_an_environment_bwrap_reads_no_arguments_from_stdin() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+
+    sandbox.exec(&info.id, &ExecRequest::new(["true"])).await?;
+
+    assert!(!has(&host.last(), "--args"));
+    assert_eq!(host.last_stdin(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_an_environment_the_callers_stdin_reaches_the_command() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+
+    sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"payload".to_vec()),
+        )
+        .await?;
+
+    assert!(!has(&host.last(), "--args"));
+    assert_eq!(host.last_stdin(), Some(b"payload".to_vec()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdin_and_an_environment_together_are_refused_not_dropped() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?.with_env("TOKEN", "1")).await?;
+    let before = host.seen().len();
+
+    let result = sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"payload".to_vec()),
+        )
+        .await;
+
+    assert!(matches!(result, Err(Error::Backend { .. })), "{result:?}");
+    assert_eq!(host.seen().len(), before, "a command ran");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_nul_in_an_environment_value_is_refused_before_anything_runs() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    let before = host.seen().len();
+
+    let result = sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["env"]).with_env("TOKEN", "a\0--bind"),
+        )
+        .await;
+
+    assert!(matches!(result, Err(Error::Backend { .. })), "{result:?}");
+    assert_eq!(host.seen().len(), before, "a command ran");
     Ok(())
 }
 
@@ -380,6 +466,58 @@ fn systemd_scope_environment_flag_is_added_only_when_supported() {
 }
 
 #[test]
+fn a_resource_scope_sets_only_the_limits_asked_for_and_ends_at_its_separator() {
+    let systemd_run = Path::new("/usr/bin/systemd-run");
+    let only_pids = args::scope_prefix(
+        systemd_run,
+        "bwrap",
+        false,
+        args::ScopeLimits {
+            pids_max: Some(16),
+            ..args::ScopeLimits::default()
+        },
+    );
+    assert_eq!(
+        only_pids.first().map(String::as_str),
+        Some("/usr/bin/systemd-run")
+    );
+    // The unit is `tinybox-bwrap-<pid>-<n>.scope`, a systemd name, not a path.
+    let unit_name = |arg: &String| {
+        arg.strip_prefix("--unit=tinybox-bwrap-")
+            .and_then(|rest| rest.strip_suffix(".scope"))
+            .is_some()
+    };
+    assert!(only_pids.iter().any(unit_name));
+    assert!(has(&only_pids, "--property=TasksMax=16"));
+    assert!(!only_pids.iter().any(|arg| arg.contains("MemoryMax")));
+    assert!(!only_pids.iter().any(|arg| arg.contains("CPUQuota")));
+    assert_eq!(only_pids.last().map(String::as_str), Some("--"));
+
+    let all = args::scope_prefix(
+        systemd_run,
+        "bwrap",
+        true,
+        args::ScopeLimits {
+            cpu_millis: Some(1),
+            memory_bytes: Some(64),
+            pids_max: Some(8),
+        },
+    );
+    for property in [
+        "--property=MemoryMax=64",
+        "--property=MemorySwapMax=0",
+        "--property=CPUQuota=0.1%",
+        "--property=TasksMax=8",
+        "--expand-environment=no",
+    ] {
+        assert!(has(&all, property), "{property} in {all:?}");
+    }
+    // Two scopes started by one process never share a unit name.
+    let unit = |argv: &[String]| argv.iter().find(|arg| arg.starts_with("--unit=")).cloned();
+    assert_ne!(unit(&only_pids), unit(&all));
+}
+
+#[test]
 fn systemd_environment_flag_probe_distinguishes_legacy_and_fails_closed() {
     assert_eq!(
         args::parse_expand_environment_help(true, b"--help", b""),
@@ -452,24 +590,24 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     let grant = root.path().join("read-only");
     std::fs::create_dir(&grant)?;
     let systemd_run = crate::trusted_systemd_run_program()?;
-    let argv = crate::native_jail_argv_with_programs(
-        &crate::NativeJailCommand {
-            root: root.path().to_path_buf(),
-            cwd,
-            read_only: vec![grant.clone()],
-            read_write: Vec::new(),
-            deny_read: Vec::new(),
-            allow_net: false,
-            allow_subprocess: true,
-            cpu_millis: Some(1),
-            memory_bytes: Some(64 * 1024 * 1024),
-            pids_max: Some(16),
-            argv: vec!["/usr/bin/env".into()],
-            env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
-        },
-        &systemd_run,
-        Path::new("/bin/true"),
-    )?;
+    let mut request = crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd,
+        read_only: vec![grant.clone()],
+        read_write: Vec::new(),
+        deny_read: Vec::new(),
+        allow_net: false,
+        allow_subprocess: true,
+        disable_userns: true,
+        cpu_millis: Some(1),
+        memory_bytes: Some(64 * 1024 * 1024),
+        pids_max: Some(16),
+        argv: vec!["/usr/bin/env".into()],
+        env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
+    };
+    let launch =
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
+    let argv = launch.argv.clone();
     assert_eq!(argv.first().map(String::as_str), Some("/bin/bash"));
     assert!(argv.contains(&systemd_run.display().to_string()));
     assert!(systemd_run.is_absolute());
@@ -479,6 +617,7 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     assert!(has(&argv, "--property=TasksMax=16"));
     assert!(has(&argv, "--unshare-cgroup"));
     assert!(has(&argv, "--unshare-net"));
+    assert!(has(&argv, "--disable-userns"));
     assert!(has(&argv, "--tmpfs"));
     assert!(has(&argv, "/run"));
     assert!(has(&argv, "/sys"));
@@ -493,16 +632,28 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     );
     assert!(has(&argv, "--ro-bind"));
     assert!(has(&argv, grant.to_str().ok_or("grant path is not UTF-8")?));
-    assert!(has(&argv, "BASH_ENV"));
-    let systemd_end = argv
+    // The target environment is on no command line, the launcher's included:
+    // `/proc/<pid>/cmdline` is readable by every process of the user.
+    assert!(!argv.iter().any(|part| part.contains("BASH_ENV")));
+    assert!(!argv.iter().any(|part| part.contains("/tmp/target-init")));
+    assert!(!has(&argv, "--setenv"));
+    let args_at = argv
         .iter()
-        .position(|part| part == "--")
-        .ok_or("missing systemd delimiter")?;
-    assert!(
-        !argv[..systemd_end]
-            .iter()
-            .any(|part| part.contains("BASH_ENV"))
+        .position(|part| part == "--args")
+        .ok_or("bwrap reads the environment from a descriptor")?;
+    assert_eq!(argv.get(args_at + 1).map(String::as_str), Some("9"));
+    let file = launch.env_file().ok_or("an environment file")?;
+    assert!(has(&argv, file.to_str().ok_or("file path is not UTF-8")?));
+    assert_eq!(
+        std::fs::read(file)?,
+        b"--setenv\0BASH_ENV\0/tmp/target-init\0".to_vec()
     );
+
+    // An older bwrap rejects the flag, so it is passed only when asked for.
+    request.disable_userns = false;
+    let argv =
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?.argv;
+    assert!(!has(&argv, "--disable-userns"));
     Ok(())
 }
 
@@ -524,6 +675,7 @@ fn native_jail_does_not_resolve_trusted_launchers_from_target_path()
             deny_read: Vec::new(),
             allow_net: false,
             allow_subprocess: true,
+            disable_userns: false,
             cpu_millis: Some(1),
             memory_bytes: None,
             pids_max: None,
@@ -582,6 +734,7 @@ fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
         deny_read: Vec::new(),
         allow_net: false,
         allow_subprocess: true,
+        disable_userns: false,
         cpu_millis: Some(1000),
         memory_bytes: None,
         pids_max: None,
@@ -608,6 +761,54 @@ fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
     let mut unsupported = request();
     unsupported.allow_subprocess = false;
     assert!(crate::native_jail_argv(&unsupported).is_err());
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_missing_denial_inside_a_mount_is_refused_and_one_outside_is_skipped()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let cwd = root.path().join("work");
+    std::fs::create_dir(&cwd)?;
+    let elsewhere = tempfile::tempdir()?;
+    let inside = root.path().join("credentials.json");
+    let outside = elsewhere.path().join("not-mounted");
+    let request = |deny_read: Vec<PathBuf>| crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd: cwd.clone(),
+        read_only: Vec::new(),
+        read_write: Vec::new(),
+        deny_read,
+        allow_net: false,
+        allow_subprocess: true,
+        disable_userns: false,
+        cpu_millis: Some(1000),
+        memory_bytes: None,
+        pids_max: None,
+        argv: vec!["/bin/true".into()],
+        env: BTreeMap::new(),
+    };
+    let systemd_run = crate::trusted_systemd_run_program()?;
+    let build = |deny_read| {
+        crate::native_jail_argv_with_programs(
+            &request(deny_read),
+            &systemd_run,
+            Path::new("/bin/true"),
+        )
+    };
+
+    // Masking it would make bwrap create an empty file in the caller's tree.
+    let kind = build(vec![inside.clone()]).err().map(|error| error.kind());
+    assert_eq!(kind, Some(std::io::ErrorKind::NotFound));
+    assert!(!inside.exists(), "nothing may be created on the host");
+
+    // Outside every mount the sandbox never shows it: nothing to mask.
+    let argv = build(vec![outside.clone()])?.argv;
+    assert!(
+        !argv.iter().any(|part| Path::new(part) == outside),
+        "{argv:?}"
+    );
     Ok(())
 }
 
@@ -1051,5 +1252,26 @@ fn trusted_resource_launcher_resolution_accepts_only_fixed_trusted_paths() -> st
     );
     #[cfg(target_os = "linux")]
     assert!(args::trusted_prlimit_program()?.is_absolute());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Result<()> {
+    let store = Arc::new(MemoryStore::new());
+    let sandbox = NamespaceSandbox::new(Arc::new(RecordingHost::default()), store.clone());
+    let retained = spec()?.with_retention(tinybox_core::Retention {
+        key: "user-42".to_owned(),
+        idle_sleep_secs: 900,
+        delete_after_secs: 86_400,
+    });
+    let result = sandbox.create(&retained).await;
+    assert!(matches!(
+        result,
+        Err(Error::Unsupported {
+            capability: tinybox_core::Capability::Retention,
+            ..
+        })
+    ));
+    assert_eq!(store.list()?.len(), 0);
     Ok(())
 }

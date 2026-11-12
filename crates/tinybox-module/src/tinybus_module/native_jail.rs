@@ -16,28 +16,24 @@ pub(super) fn prepare(
     command: &tinybox_core::ExecRequest,
     backend: &dyn JailBackend,
 ) -> Result<Jail> {
-    if !cfg!(unix) || !backend.is_available() || backend.name() == tinybox_jail::NOOP_BACKEND_NAME {
-        return Err(unavailable());
+    // Owned availability, not `is_available`: Windows `AppContainer` runs work
+    // only through the owned-process API every jailed path uses. Off Windows
+    // the two are the same.
+    if !backend.is_owned_available() || backend.name() == tinybox_jail::NOOP_BACKEND_NAME {
+        return Err(refused("no native jail backend is available on this host"));
     }
-    if config.read_only.len() + config.read_write.len() + config.deny_read.len()
+    if config.read_only.len()
+        + config.read_write.len()
+        + config.deny_read.len()
+        + config.deny_read_names.len()
         > tinybox_bus::MAX_NATIVE_JAIL_GRANTS
     {
         return Err(invalid());
     }
+    check_name_denials(config, backend)?;
     // Before anything is canonicalized: a link the jailed program planted
     // (`<root>/vendor -> <secret>`) is only visible in the raw spellings.
-    {
-        let writable: Vec<&Path> = std::iter::once(root)
-            .chain(config.read_write.iter().map(Path::new))
-            .collect();
-        let nested: Vec<&Path> = config
-            .read_only
-            .iter()
-            .chain(&config.read_write)
-            .map(Path::new)
-            .collect();
-        tinybox_jail::reject_symlinked_grants(&writable, &nested).map_err(|_| invalid())?;
-    }
+    reject_planted_links(root, config)?;
     let root = root.canonicalize().map_err(|_| invalid())?;
     if !root.is_dir() {
         return Err(invalid());
@@ -56,6 +52,7 @@ pub(super) fn prepare(
     jail.read_only = grants(&config.read_only)?;
     jail.read_write = grants(&config.read_write)?;
     jail.deny_read = denials(&config.deny_read)?;
+    jail.deny_read_names.clone_from(&config.deny_read_names);
     configure_resources(&mut jail, config)?;
     // A denial over the root or a writable grant would leave the command no
     // workspace; a denial nested inside a writable grant is safe only for a
@@ -67,7 +64,11 @@ pub(super) fn prepare(
                     || (!backend.carves_denials() && denied.starts_with(granted))
             })
     }) {
-        return Err(invalid());
+        return Err(invalid_because(&format!(
+            "a read denial covers the jail root or a writable grant, or sits inside a writable \
+             grant that backend `{}` cannot carve a denial out of",
+            backend.name()
+        )));
     }
     // A carving backend may still be unable to hold a deeply nested denial.
     backend
@@ -87,19 +88,29 @@ pub(super) fn prepare(
                 .chain(&implicit_grants)
                 .any(|granted| overlaps(denied, granted))
         }) {
-            return Err(unavailable());
+            return Err(refused(&format!(
+                "a read denial overlaps the jail root, a read-only grant or a default grant, and \
+                 backend `{}` cannot carve denials",
+                backend.name()
+            )));
         }
     }
     // Per-jail, never per-backend: a backend's isolation can depend on the
     // configuration (a shared network namespace under `allow_net`).
     if config.require_process_isolation && !backend.is_suitable_for_untrusted_jail(&jail) {
-        return Err(unavailable());
+        return Err(refused(&format!(
+            "the jail requires process isolation, and backend `{}` reports {} isolation for it",
+            backend.name(),
+            backend.isolation_for(&jail)
+        )));
     }
     backend
         .require_resources(&jail)
         .map_err(|_| unavailable())?;
     match config.enforcement {
-        JailEnforcement::Enforced => backend.require(&jail).map_err(|_| unavailable())?,
+        JailEnforcement::Enforced => backend
+            .require(&jail)
+            .map_err(|_| refused(&cannot_enforce(backend, &jail, true)))?,
         JailEnforcement::Declared => {
             if backend
                 .plan_check(&jail)
@@ -107,11 +118,34 @@ pub(super) fn prepare(
                 .iter()
                 .any(|(_, support)| *support == tinybox_core::Enforcement::Unsupported)
             {
-                return Err(unavailable());
+                return Err(refused(&cannot_enforce(backend, &jail, false)));
             }
         }
     }
     Ok(jail)
+}
+
+/// Name denials need a backend that denies by name, and each name must be one
+/// plain path component.
+fn check_name_denials(config: &NativeJailConfig, backend: &dyn JailBackend) -> Result<()> {
+    if !config.deny_read_names.is_empty() && !backend.denies_by_name() {
+        return Err(super::resources::failure(
+            tinybox_bus::UNSUPPORTED_OPERATION,
+            &format!(
+                "requested native jail enforcement is unavailable: backend `{}` cannot deny \
+                 paths by name",
+                backend.name()
+            ),
+        ));
+    }
+    if !config
+        .deny_read_names
+        .iter()
+        .all(|name| is_plain_name(name))
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()> {
@@ -119,7 +153,11 @@ fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()>
         cpu_millis: limits.cpu_millis,
         memory_bytes: limits.memory_bytes,
         pids_max: limits.pids_max,
-        disk_bytes: limits.disk_bytes,
+        // Required only when the caller set one; see
+        // `required_resource_constraints`.
+        disk_bytes: limits
+            .disk_bytes
+            .unwrap_or(tinybox_core::Resources::DEFAULT.disk_bytes),
     });
     jail.hard_requirements
         .extend(required_resource_constraints(config.resources));
@@ -135,19 +173,35 @@ fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()>
 fn required_resource_constraints(
     resources: Option<tinybox_bus::ResourceLimits>,
 ) -> Vec<tinybox_core::Constraint> {
-    if resources.is_some() {
-        // An explicitly supplied native jail budget is a hard request. The
-        // default values in a BoxSpec remain soft unless its own
-        // `hard_requirements` lists a constraint.
-        vec![
+    // An explicitly supplied native jail budget is a hard request, disk
+    // included only when the caller set one. The default values in a BoxSpec
+    // remain soft unless its own `hard_requirements` lists a constraint.
+    resources.map_or_else(Vec::new, |limits| {
+        let mut constraints = vec![
             tinybox_core::Constraint::Cpu,
             tinybox_core::Constraint::Memory,
             tinybox_core::Constraint::Pids,
-            tinybox_core::Constraint::Disk,
-        ]
-    } else {
-        Vec::new()
-    }
+        ];
+        if limits.disk_bytes.is_some() {
+            constraints.push(tinybox_core::Constraint::Disk);
+        }
+        constraints
+    })
+}
+
+/// Before anything is canonicalized: a link the jailed program planted
+/// (`<root>/vendor -> <secret>`) is only visible in the raw spellings.
+fn reject_planted_links(root: &Path, config: &NativeJailConfig) -> Result<()> {
+    let writable: Vec<&Path> = std::iter::once(root)
+        .chain(config.read_write.iter().map(Path::new))
+        .collect();
+    let nested: Vec<&Path> = config
+        .read_only
+        .iter()
+        .chain(&config.read_write)
+        .map(Path::new)
+        .collect();
+    tinybox_jail::reject_symlinked_grants(&writable, &nested).map_err(|_| invalid())
 }
 
 /// Validate and canonicalize each existing absolute grant path.
@@ -244,6 +298,16 @@ fn canonicalize_prospective(path: &Path) -> std::io::Result<std::path::PathBuf> 
 fn overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
+/// Whether `name` is one path component a profile rule can match exactly: not
+/// empty, not `.` or `..`, bounded, and without a separator, quote or NUL.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= tinybox_bus::MAX_FILE_PATH_BYTES
+        && !name.contains(['/', '\\', '"', '\0'])
+}
+
 fn invalid() -> Error {
     super::resources::failure(
         tinybox_bus::INVALID_FILE_PATH,
@@ -256,6 +320,47 @@ fn unavailable() -> Error {
         "requested native jail enforcement is unavailable",
     )
 }
+/// [`invalid`], saying which rule the request broke.
+fn invalid_because(reason: &str) -> Error {
+    super::resources::failure(
+        tinybox_bus::INVALID_FILE_PATH,
+        &format!("invalid native jail grant or working directory: {reason}"),
+    )
+}
+/// [`unavailable`], saying what the backend cannot provide. The code is the
+/// same, so a host that branches on it is unaffected.
+fn refused(reason: &str) -> Error {
+    super::resources::failure(
+        tinybox_bus::UNSUPPORTED_OPERATION,
+        &format!("requested native jail enforcement is unavailable: {reason}"),
+    )
+}
+/// The constraints `backend` cannot enforce for `jail`: anything short of
+/// `Enforced` when `strict`, otherwise only what it does not support at all.
+fn cannot_enforce(backend: &dyn JailBackend, jail: &Jail, strict: bool) -> String {
+    let missing: Vec<String> = backend
+        .plan_check(jail)
+        .constraints
+        .iter()
+        .filter(|(_, support)| {
+            if strict {
+                *support != tinybox_core::Enforcement::Enforced
+            } else {
+                *support == tinybox_core::Enforcement::Unsupported
+            }
+        })
+        .map(|(constraint, _)| format!("{constraint:?}").to_lowercase())
+        .collect();
+    format!(
+        "backend `{}` cannot enforce {}",
+        backend.name(),
+        if missing.is_empty() {
+            "a hard requirement of this jail".to_string()
+        } else {
+            missing.join(", ")
+        }
+    )
+}
 
 /// A private backend whose sole accepted command is the validated launcher
 /// constructed by `prepare_with_resources`. It is created per execution and
@@ -263,14 +368,33 @@ fn unavailable() -> Error {
 struct NativeResourceBackend {
     expected: Mutex<Option<Vec<OsString>>>,
     requested: Mutex<Option<tinybox_bus::NativeJailResourceRequest>>,
+    scope: tinybox_linux::ScopeProbe,
+    launch: Mutex<Option<tinybox_linux::NativeJailLaunch>>,
 }
 
 impl NativeResourceBackend {
     fn new() -> Self {
+        Self::with_scope(tinybox_linux::ScopeProbe::detect())
+    }
+
+    fn with_scope(scope: tinybox_linux::ScopeProbe) -> Self {
         Self {
             expected: Mutex::new(None),
             requested: Mutex::new(None),
+            scope,
+            launch: Mutex::new(None),
         }
+    }
+
+    /// Holds the launch, and with it the private environment file, until this
+    /// execution's backend is dropped.
+    fn keep(&self, launch: tinybox_linux::NativeJailLaunch) -> Result<()> {
+        let mut held = self.launch.lock().map_err(|_| unavailable())?;
+        if held.is_some() {
+            return Err(unavailable());
+        }
+        *held = Some(launch);
+        Ok(())
     }
 
     fn bind(&self, argv: &[String]) -> Result<()> {
@@ -302,11 +426,14 @@ impl JailBackend for NativeResourceBackend {
     }
 
     fn isolation(&self) -> tinybox_core::IsolationLevel {
-        tinybox_core::IsolationLevel::Kernel
-    }
-
-    fn is_suitable_for_untrusted_code(&self) -> bool {
-        true
+        // A 2.1 request never shares the host network, so this is the bwrap
+        // backend's no-network level: Kernel only when the child is barred
+        // from new user namespaces, else none at all.
+        if bwrap_disables_userns() {
+            tinybox_core::IsolationLevel::Kernel
+        } else {
+            tinybox_core::IsolationLevel::None
+        }
     }
 
     fn carves_denials(&self) -> bool {
@@ -315,13 +442,16 @@ impl JailBackend for NativeResourceBackend {
 
     fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
         use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+        let scope = self.scope.constraint_support();
         ConstraintSupport::NONE
             .with(Constraint::Filesystem, Enforcement::Enforced)
             .with(Constraint::Network, Enforcement::Enforced)
-            .with(Constraint::Subprocess, Enforcement::Enforced)
-            .with(Constraint::Cpu, Enforcement::Enforced)
-            .with(Constraint::Memory, Enforcement::Enforced)
-            .with(Constraint::Pids, Enforcement::Enforced)
+            // `prepare_with_resources` refuses a request that denies them.
+            .with(Constraint::Subprocess, Enforcement::Unsupported)
+            // Only what the user manager was delegated a controller for.
+            .with(Constraint::Cpu, scope.enforcement(Constraint::Cpu))
+            .with(Constraint::Memory, scope.enforcement(Constraint::Memory))
+            .with(Constraint::Pids, scope.enforcement(Constraint::Pids))
             .with(Constraint::Disk, Enforcement::Unsupported)
     }
 
@@ -384,6 +514,19 @@ fn prepare_with_resources(
     {
         return Err(invalid());
     }
+    // A limit the scope cannot apply is refused, never dropped.
+    let support = backend.constraint_support();
+    if [
+        (resources.cpu_millis, tinybox_core::Constraint::Cpu),
+        (resources.memory_bytes, tinybox_core::Constraint::Memory),
+        (resources.pids_max, tinybox_core::Constraint::Pids),
+    ]
+    .into_iter()
+    .any(|(limit, constraint)| {
+        limit.is_some() && support.enforcement(constraint) != tinybox_core::Enforcement::Enforced
+    }) {
+        return Err(unavailable());
+    }
     backend.bind_resources(resources)?;
     let jail = prepare(root, &request.jail, command, backend)?;
     if request.jail.allow_net || !request.jail.allow_subprocess {
@@ -398,6 +541,7 @@ fn prepare_with_resources(
         deny_read: jail.deny_read.clone(),
         allow_net: jail.allow_net,
         allow_subprocess: jail.allow_subprocess,
+        disable_userns: bwrap_disables_userns(),
         cpu_millis: resources.cpu_millis,
         memory_bytes: resources.memory_bytes,
         pids_max: resources.pids_max,
@@ -423,10 +567,14 @@ fn configure_resource_launcher(
         .map(Path::to_path_buf)
         .ok_or_else(unavailable)?;
     let systemd_run = tinybox_linux::trusted_systemd_run_program().map_err(|_| unavailable())?;
-    let argv = tinybox_linux::native_jail_argv_with_programs(native, &systemd_run, &bwrap)
+    let launch = tinybox_linux::native_jail_argv_with_programs(native, &systemd_run, &bwrap)
         .map_err(|_| unavailable())?;
-    backend.bind(&argv)?;
-    command.argv = argv;
+    backend.bind(&launch.argv)?;
+    command.argv.clone_from(&launch.argv);
+    // Held for the execution: the launcher opens and deletes the private file
+    // carrying the target's environment, and dropping this removes it if the
+    // launcher never ran.
+    backend.keep(launch)?;
     command.env = launcher_environment();
     command.cwd = None;
     Ok(())
@@ -449,6 +597,16 @@ fn native_launchers_available() -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn native_launchers_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_disables_userns() -> bool {
+    tinybox_jail::BubblewrapBackend::new().disables_userns()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bwrap_disables_userns() -> bool {
     false
 }
 

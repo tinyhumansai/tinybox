@@ -32,8 +32,15 @@ pub struct Jail {
     /// [`carves_denials`](JailBackend::carves_denials) subtracts them from
     /// grants; allow-list backends deny paths outside grants by default. The
     /// native module rejects overlaps that an allow-list backend cannot enforce.
-    /// Missing paths are retained so backend rules can cover later creation.
+    /// Missing paths are retained here; backends decide: Landlock and Seatbelt
+    /// rules cover later creation, while bubblewrap refuses a missing path
+    /// inside a mount.
     pub deny_read: Vec<PathBuf>,
+    /// File or directory names the child may neither read nor write wherever
+    /// they appear. Only a backend that
+    /// [`denies_by_name`](JailBackend::denies_by_name) can enforce them; the
+    /// spawn helpers refuse a jail carrying any on every other backend.
+    pub deny_read_names: Vec<String>,
     /// Optional resource values to apply where the backend supports them.
     ///
     /// These values are defaults, not hard requirements. Use
@@ -61,6 +68,7 @@ impl Jail {
             read_only: Vec::new(),
             read_write: Vec::new(),
             deny_read: Vec::new(),
+            deny_read_names: Vec::new(),
             resources: None,
             hard_requirements: Vec::new(),
             allow_net: true,
@@ -249,58 +257,93 @@ impl Jail {
 /// spells it (the path itself, its canonical form, or any alias that resolves
 /// to it).
 ///
+/// The grant is resolved one component at a time, following every link, and
+/// refused when any link on the way lives inside a writable ancestor. That also
+/// catches a host alias that points *into* a writable root
+/// (`/aliases/v -> <root>/vendor`, with `vendor` replaced by a planted link),
+/// which no prefix of the grant's own spelling would reveal.
+///
 /// # Errors
 /// `InvalidInput` naming the symlink.
 pub fn reject_symlinked_grants(writable: &[&Path], grants: &[&Path]) -> std::io::Result<()> {
-    for ancestor in writable {
-        let canonical = ancestor.canonicalize().ok();
-        for grant in grants {
-            if grant == ancestor {
-                continue;
-            }
-            // The shortest prefix of the grant that names the ancestor.
-            let mut prefixes: Vec<&Path> = grant.ancestors().collect();
-            prefixes.reverse();
-            let anchor = prefixes.into_iter().find(|prefix| {
-                *prefix == *ancestor
-                    || canonical
-                        .as_ref()
-                        .is_some_and(|c| prefix.canonicalize().is_ok_and(|p| p == *c))
-            });
-            if let Some(anchor) = anchor {
-                reject_symlink_below(anchor, grant)?;
-            }
-        }
+    let writable: Vec<PathBuf> = writable
+        .iter()
+        .filter_map(|ancestor| ancestor.canonicalize().ok())
+        .collect();
+    for grant in grants {
+        reject_link_inside(grant, &writable)?;
     }
     Ok(())
 }
 
-/// Errors when `path` lies inside `ancestor` (lexically) and any component
-/// below `ancestor` is a symlink. A path equal to `ancestor` passes.
-///
-/// # Errors
-/// `InvalidInput` naming the symlink.
-pub(crate) fn reject_symlink_below(ancestor: &Path, path: &Path) -> std::io::Result<()> {
-    let Ok(rest) = path.strip_prefix(ancestor) else {
+/// The most links one grant may pass through, as the kernel's `ELOOP` limit.
+const MAX_LINK_HOPS: usize = 40;
+
+/// Resolves `grant` component by component and refuses it when a link it
+/// passes through sits strictly inside one of the canonical `writable` paths.
+/// A missing component ends the walk, as the lexical check did.
+fn reject_link_inside(grant: &Path, writable: &[PathBuf]) -> std::io::Result<()> {
+    use std::path::Component;
+
+    if !grant.is_absolute() {
         return Ok(());
-    };
-    let mut current = ancestor.to_path_buf();
-    for component in rest.components() {
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "grant {} reaches {} through a symlink inside writable {}",
-                        path.display(),
-                        current.display(),
-                        ancestor.display()
-                    ),
-                ));
+    }
+    let mut resolved = PathBuf::new();
+    let mut pending: Vec<std::ffi::OsString> = Vec::new();
+    // Components are consumed from the back, so the queue is built reversed.
+    for component in grant.components().rev() {
+        pending.push(component.as_os_str().to_os_string());
+    }
+    let mut hops = 0;
+    while let Some(next) = pending.pop() {
+        let step = Path::new(&next);
+        match step.components().next() {
+            Some(Component::Prefix(_) | Component::RootDir) => {
+                resolved.push(step);
+                continue;
             }
-            Ok(_) => {}
-            Err(_) => break,
+            Some(Component::CurDir) | None => continue,
+            Some(Component::ParentDir) => {
+                resolved.pop();
+                continue;
+            }
+            Some(Component::Normal(_)) => {}
+        }
+        let candidate = resolved.join(step);
+        let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+            break;
+        };
+        if !meta.file_type().is_symlink() {
+            resolved = candidate;
+            continue;
+        }
+        if let Some(ancestor) = writable
+            .iter()
+            .find(|ancestor| candidate.starts_with(ancestor) && candidate != **ancestor)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "grant {} reaches {} through a symlink inside writable {}",
+                    grant.display(),
+                    candidate.display(),
+                    ancestor.display()
+                ),
+            ));
+        }
+        hops += 1;
+        if hops > MAX_LINK_HOPS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("grant {} passes through too many symlinks", grant.display()),
+            ));
+        }
+        let target = std::fs::read_link(&candidate)?;
+        if target.is_absolute() {
+            resolved = PathBuf::new();
+        }
+        for component in target.components().rev() {
+            pending.push(component.as_os_str().to_os_string());
         }
     }
     Ok(())
@@ -347,6 +390,13 @@ pub trait JailBackend: Send + Sync {
     /// Allow-list backends (Landlock, `AppContainer`) cannot subtract from a
     /// grant, so they keep the default `false`.
     fn carves_denials(&self) -> bool {
+        false
+    }
+
+    /// Whether [`Jail::deny_read_names`] is enforced: names denied wherever
+    /// they appear, not only at exact paths. Only Seatbelt can (a regex rule);
+    /// path-based allow-list backends keep the default `false`.
+    fn denies_by_name(&self) -> bool {
         false
     }
 
@@ -543,6 +593,7 @@ pub trait JailBackend: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildStatus {
     code: Option<i32>,
+    signal: Option<i32>,
 }
 
 impl ChildStatus {
@@ -550,13 +601,27 @@ impl ChildStatus {
     /// is represented by `None` on platforms that expose it that way.
     #[must_use]
     pub const fn from_code(code: Option<i32>) -> Self {
-        Self { code }
+        Self { code, signal: None }
+    }
+
+    /// The same status, recording the signal that ended the process on
+    /// platforms that report one.
+    #[must_use]
+    pub const fn with_signal(mut self, signal: Option<i32>) -> Self {
+        self.signal = signal;
+        self
     }
 
     /// Exit code when the process has one (signal termination has none).
     #[must_use]
     pub const fn code(self) -> Option<i32> {
         self.code
+    }
+
+    /// The signal that ended the process, when it was signalled (Unix).
+    #[must_use]
+    pub const fn signal(self) -> Option<i32> {
+        self.signal
     }
 
     /// Whether the process returned exit code zero.
@@ -717,8 +782,15 @@ impl OwnedProcess for StdOwnedProcess {
 
     fn try_wait(&mut self) -> std::io::Result<Option<ChildStatus>> {
         self.0.try_wait().map(|status| {
-            status.map(|status| ChildStatus {
-                code: status.code(),
+            status.map(|status| {
+                #[cfg(unix)]
+                let signal = {
+                    use std::os::unix::process::ExitStatusExt;
+                    status.signal()
+                };
+                #[cfg(not(unix))]
+                let signal = None;
+                ChildStatus::from_code(status.code()).with_signal(signal)
             })
         })
     }

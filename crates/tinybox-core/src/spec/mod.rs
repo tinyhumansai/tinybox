@@ -45,7 +45,8 @@ use serde::{Deserialize, Serialize};
 mod types;
 
 pub use types::{
-    EgressAllowlist, Lifecycle, NetworkPolicy, Placement, PortMapping, Resources, WorkspaceSource,
+    EgressAllowlist, Lifecycle, NetworkPolicy, Placement, PortMapping, Resources, Retention,
+    WorkspaceSource,
 };
 
 /// The complete description of a box, before any sandbox acts on it.
@@ -89,6 +90,12 @@ pub struct BoxSpec {
     /// Ordered so that two specs differing only in insertion order compare
     /// equal, which keeps template and snapshot identity stable.
     pub env: BTreeMap<String, String>,
+    /// Keep the box for its owner between uses, or `None` for an ordinary box.
+    ///
+    /// Defaulted on read: a store written before retention existed must still
+    /// load, and its boxes were never retained.
+    #[serde(default)]
+    pub retention: Option<Retention>,
 }
 
 impl BoxSpec {
@@ -109,6 +116,7 @@ impl BoxSpec {
             network: NetworkPolicy::default(),
             ports: BTreeSet::new(),
             env: BTreeMap::new(),
+            retention: None,
         }
     }
 
@@ -177,6 +185,16 @@ impl BoxSpec {
         self
     }
 
+    /// Keep the box for its owner between uses.
+    ///
+    /// Only a sandbox that declares [`Capability::Retention`](crate::Capability::Retention)
+    /// accepts the spec; every other sandbox refuses it.
+    #[must_use]
+    pub fn with_retention(mut self, retention: Retention) -> Self {
+        self.retention = Some(retention);
+        self
+    }
+
     /// Whether the agent and the workload share a placement.
     #[must_use]
     pub fn is_colocated(&self) -> bool {
@@ -190,10 +208,33 @@ impl BoxSpec {
     /// Returns [`Error::ZeroResourceLimit`](crate::error::Error::ZeroResourceLimit)
     /// naming the first limit that is zero, or
     /// [`Error::InvalidNetworkPolicy`](crate::error::Error::InvalidNetworkPolicy)
-    /// for a malformed network allowlist.
+    /// for a malformed network allowlist, or whatever [`Retention::validate`]
+    /// refuses.
     pub fn validate(&self) -> crate::Result<()> {
         self.resources.validate()?;
-        self.network.validate()
+        self.network.validate()?;
+        self.retention.as_ref().map_or(Ok(()), Retention::validate)
+    }
+
+    /// Refuse a retention request on a sandbox that cannot honour it.
+    ///
+    /// Every sandbox except one declaring
+    /// [`Capability::Retention`](crate::Capability::Retention) calls this from
+    /// `create`, so a retained box is never quietly run as a disposable one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`](crate::error::Error::Unsupported) naming
+    /// [`Capability::Retention`](crate::Capability::Retention) when the spec
+    /// carries a [`Retention`].
+    pub fn refuse_retention(&self, sandbox: &str) -> crate::Result<()> {
+        if self.retention.is_some() {
+            return Err(crate::Error::Unsupported {
+                sandbox: sandbox.to_owned(),
+                capability: crate::Capability::Retention,
+            });
+        }
+        Ok(())
     }
 }
 

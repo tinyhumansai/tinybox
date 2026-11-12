@@ -169,8 +169,17 @@ impl Sandbox for MicroVmSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        spec.refuse_retention(self.name())?;
         self.require_spec(spec)?;
-        spec.network.refuse_allowlist(self.name())?;
+        // The VM has no network interface, so any egress is refused rather
+        // than quietly handed a machine with no route out.
+        if spec.network.allows_egress() {
+            return Err(Error::ConstraintNotEnforced {
+                sandbox: self.name().to_owned(),
+                constraint: tinybox_core::Constraint::Network,
+                enforcement: tinybox_core::Enforcement::Unsupported,
+            });
+        }
         // Nothing boots here: a box is a record and a directory, and the VM
         // exists only for the length of a command. Checking the source now
         // means an unusable spec fails at `create` rather than at the first

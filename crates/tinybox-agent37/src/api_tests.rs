@@ -4,7 +4,7 @@
 
 use super::*;
 
-use tinybox_core::{HostRef, Placement, Resources, SandboxRef};
+use tinybox_core::{HostRef, Placement, Resources, Retention, SandboxRef};
 
 fn oci_spec() -> Result<BoxSpec> {
     Ok(BoxSpec::new(
@@ -190,4 +190,107 @@ fn statuses_map_to_states_and_unknown_is_failed() {
     assert_eq!(box_state_from_status("stopped"), BoxState::Stopped);
     assert_eq!(box_state_from_status("deleted"), BoxState::Archived);
     assert_eq!(box_state_from_status("who-knows"), BoxState::Failed);
+}
+
+fn retained_spec(idle_sleep_secs: u32) -> Result<BoxSpec> {
+    Ok(oci_spec()?.with_retention(Retention {
+        key: "user-42".to_owned(),
+        idle_sleep_secs,
+        delete_after_secs: 86_400,
+    }))
+}
+
+#[test]
+fn a_create_body_without_retention_serializes_exactly_as_before() -> Result<()> {
+    let json = serde_json::to_value(create_body("acme", &oci_spec()?)?).map_err(|error| {
+        Error::Backend {
+            sandbox: NAME.to_owned(),
+            operation: "serialize",
+            message: error.to_string(),
+        }
+    })?;
+    let object = json.as_object().ok_or(Error::UnsupportedGitIncludePath)?;
+    assert!(!object.contains_key("auto_sleep"));
+    assert!(!object.contains_key("idle_timeout_seconds"));
+    assert_eq!(
+        json["metadata"],
+        serde_json::json!({ "tinybox.namespace": "acme" })
+    );
+    Ok(())
+}
+
+#[test]
+fn a_retained_create_body_turns_on_auto_sleep_and_stamps_the_key() -> Result<()> {
+    let body = create_body("acme", &retained_spec(900)?)?;
+    assert_eq!(body.auto_sleep, Some(true));
+    assert_eq!(body.idle_timeout_seconds, Some(900));
+    assert_eq!(
+        body.metadata.get(KEY_METADATA_KEY).map(String::as_str),
+        Some("user-42")
+    );
+    // The namespace is still stamped beside the key.
+    assert_eq!(
+        body.metadata
+            .get(NAMESPACE_METADATA_KEY)
+            .map(String::as_str),
+        Some("acme")
+    );
+    Ok(())
+}
+
+#[test]
+fn the_idle_timeout_is_clamped_to_what_agent37_accepts() -> Result<()> {
+    for (asked, sent) in [
+        (0, 300),
+        (299, 300),
+        (300, 300),
+        (86_400, 86_400),
+        (86_401, 86_400),
+        (u32::MAX, 86_400),
+    ] {
+        let body = create_body("acme", &retained_spec(asked)?)?;
+        assert_eq!(body.idle_timeout_seconds, Some(sent), "asked {asked}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_instance_view_reads_the_lifecycle_fields_and_tolerates_foreign_metadata()
+-> std::result::Result<(), serde_json::Error> {
+    let view: InstanceView = serde_json::from_str(
+        r#"{"id":"ab12","status":"sleeping","created":1700000000,"slept_at":1700000500,
+            "url":"https://x","metadata":{"tinybox.key":"user-42","build":7,"nested":{"a":1}}}"#,
+    )?;
+    assert_eq!(view.created, Some(1_700_000_000));
+    assert_eq!(view.slept_at, Some(1_700_000_500));
+    assert_eq!(view.retention_key(), Some("user-42"));
+    assert!(view.has_retention_key());
+
+    // A null metadata object, a missing one and a non-string key all read as
+    // "not a retained box" rather than failing the whole list.
+    for json in [
+        r#"{"id":"a","status":"running","metadata":null}"#,
+        r#"{"id":"a","status":"running"}"#,
+    ] {
+        let view: InstanceView = serde_json::from_str(json)?;
+        assert_eq!(view.retention_key(), None);
+        assert!(!view.has_retention_key());
+        assert_eq!(view.created, None);
+        assert_eq!(view.slept_at, None);
+    }
+    let numeric: InstanceView =
+        serde_json::from_str(r#"{"id":"a","status":"running","metadata":{"tinybox.key":5}}"#)?;
+    assert_eq!(numeric.retention_key(), None);
+    assert!(numeric.has_retention_key());
+    Ok(())
+}
+
+#[test]
+fn a_list_response_is_the_data_array() -> std::result::Result<(), serde_json::Error> {
+    let list: ListResponse = serde_json::from_str(
+        r#"{"data":[{"id":"a","status":"running"},{"id":"b","status":"sleeping"}]}"#,
+    )?;
+    assert_eq!(list.data.len(), 2);
+    assert_eq!(list.data[1].id, "b");
+    Ok(())
 }

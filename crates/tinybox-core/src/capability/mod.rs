@@ -115,6 +115,15 @@ impl SandboxCapabilities {
         self.with(Capability::Detach)
     }
 
+    /// Declare that a box can be kept for its owner between uses.
+    ///
+    /// See [`Capability::Retention`] for what a backend is promising. A sandbox
+    /// that cannot sleep, find and expire a box must not call this.
+    #[must_use]
+    pub const fn with_retention(self) -> Self {
+        self.with(Capability::Retention)
+    }
+
     /// Add one capability to the set.
     ///
     /// Snapshot capabilities are not settable this way: what a sandbox can

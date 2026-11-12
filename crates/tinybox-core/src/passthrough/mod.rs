@@ -161,6 +161,7 @@ impl Sandbox for PassthroughSandbox {
 
     async fn create(&self, spec: &BoxSpec) -> Result<BoxInfo> {
         spec.validate()?;
+        spec.refuse_retention(self.name())?;
         self.require_spec(spec)?;
         spec.network.refuse_allowlist(self.name())?;
         // Fail before recording anything, so a rejected source leaves no box

@@ -34,6 +34,7 @@ enum MockBehavior {
     InvalidCursorReleaseFail,
     RunningStderr,
     SkippedChunk,
+    SlowRead,
 }
 
 impl NativeShellClient for MockClient {
@@ -101,6 +102,10 @@ impl NativeShellClient for MockClient {
         }
         if matches!(self.behavior, MockBehavior::FailRead) {
             return Err("read failed");
+        }
+        if matches!(self.behavior, MockBehavior::SlowRead) {
+            // Slower than the old 20 ms poll tick, well inside the deadline.
+            futures_timer::Delay::new(Duration::from_millis(50)).await;
         }
         let mut reads = self.reads.lock().map_err(|_| "poisoned")?;
         *reads = reads.wrapping_add(1);
@@ -516,6 +521,32 @@ fn timeout_cancels_and_returns_collected_output() -> Result<(), &'static str> {
 }
 
 #[test]
+fn a_slow_read_inside_the_deadline_is_not_a_timeout() -> Result<(), &'static str> {
+    futures_executor::block_on(async {
+        let client = mock(MockBehavior::SlowRead);
+        let mut req = request();
+        req.shell.timeout_ms = 5_000;
+        let outcome = run_native_shell(&client, req, never_cancel(), ignore_chunk)
+            .await
+            .map_err(|_| "run failed")?;
+        let NativeShellRunOutcome::Finished(output) = outcome else {
+            return Err("expected completion");
+        };
+        assert!(!output.timed_out);
+        assert_eq!(output.exit_code, 7);
+        assert_eq!(output.stdout, b"done");
+        assert!(
+            !client
+                .calls
+                .lock()
+                .map_err(|_| "poisoned")?
+                .contains(&"cancel")
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn running_poll_without_yield_accumulates_stderr_until_timeout() -> Result<(), &'static str> {
     futures_executor::block_on(async {
         let client = mock(MockBehavior::RunningStderr);
@@ -564,6 +595,7 @@ fn request() -> NativeShellRunRequest {
             resources: ResourceLimits::default(),
             ports: Vec::new(),
             env: BTreeMap::new(),
+            retention: None,
         },
         shell: ShellExecRequest {
             process: ResourceId("placeholder-process".into()),

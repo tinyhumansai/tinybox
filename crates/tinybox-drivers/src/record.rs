@@ -56,6 +56,10 @@ pub(crate) struct SpecRecord {
     hard_requirements: Vec<tinybox_core::Constraint>,
     ports: BTreeSet<PortMapping>,
     env: BTreeMap<String, String>,
+    /// Omitted when unset, so a box that was never retained keeps the exact
+    /// body it always had and older readers still decode it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retention: Option<tinybox_core::Retention>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +180,7 @@ impl TryFrom<&BoxSpec> for SpecRecord {
             hard_requirements: spec.hard_requirements.clone(),
             ports: spec.ports.clone(),
             env: spec.env.clone(),
+            retention: spec.retention.clone(),
         })
     }
 }
@@ -190,6 +195,7 @@ impl SpecRecord {
         spec.hard_requirements = self.hard_requirements;
         spec.ports = self.ports;
         spec.env = self.env;
+        spec.retention = self.retention;
         spec
     }
 }

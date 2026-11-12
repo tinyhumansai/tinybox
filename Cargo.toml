@@ -27,9 +27,9 @@ members = [
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinybox"
 readme = "README.md"
@@ -53,38 +53,39 @@ thiserror = "2"
 # provider registry, which native `async fn` in traits cannot express yet.
 async-trait = "0.1"
 # The workspace's single async runtime, matching the one the module SDK owns.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 # Module integration tests and the release verifier pass explicit JSON config,
 # and the CLI persists its box store as JSON.
 serde_json = "1"
 # The model types are serializable; see `tinybox-core`'s dependency comment.
 serde = { version = "1", features = ["derive"] }
 # Base64 for the agent37 backend's command stdin on the JSON wire.
-base64 = "0.22"
+base64 = "0.23"
 # The agent37 backend is HTTP-native (no CLI), so it owns an HTTP client. rustls
 # avoids a system OpenSSL dependency. See tinybox-agent37's ADR-0008 note.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Internal path dependencies between workspace members.
-tinybox-agent37 = { path = "crates/tinybox-agent37", version = "0.2.5" }
-tinybox-bus = { path = "crates/tinybox-bus", version = "0.2.5" }
-tinybox-core = { path = "crates/tinybox-core", version = "0.2.5" }
-tinybox-host = { path = "crates/tinybox-host", version = "0.2.5" }
-tinybox-jail = { path = "crates/tinybox-jail", version = "0.2.5" }
-tinybox-linux = { path = "crates/tinybox-linux", version = "0.2.5" }
-tinybox-microvm = { path = "crates/tinybox-microvm", version = "0.2.5" }
-tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.5" }
-tinybox-openshell = { path = "crates/tinybox-openshell", version = "0.2.5" }
-tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.5" }
-tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.5" }
-# Pin the storage contract crates to the canonical TSD v2.1.2 release commit,
-# which carries the zstd advisory fix.
-tinystoragedrivers-types = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-api = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-busproxy = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb", default-features = false }
-tinystoragedrivers-testkit = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-document = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.2.5" }
+tinybox-agent37 = { path = "crates/tinybox-agent37", version = "0.2.6" }
+tinybox-bus = { path = "crates/tinybox-bus", version = "0.2.6" }
+tinybox-core = { path = "crates/tinybox-core", version = "0.2.6" }
+tinybox-host = { path = "crates/tinybox-host", version = "0.2.6" }
+tinybox-jail = { path = "crates/tinybox-jail", version = "0.2.6" }
+tinybox-linux = { path = "crates/tinybox-linux", version = "0.2.6" }
+tinybox-microvm = { path = "crates/tinybox-microvm", version = "0.2.6" }
+tinybox-docker = { path = "crates/tinybox-docker", version = "0.2.6" }
+tinybox-openshell = { path = "crates/tinybox-openshell", version = "0.2.6" }
+tinybox-ssh = { path = "crates/tinybox-ssh", version = "0.2.6" }
+tinybox-sync = { path = "crates/tinybox-sync", version = "0.2.6" }
+# Pin the storage contract crates to the canonical TSD v2.1.3 release commit,
+# which bundles SQLite 3.54 (RUSTSEC-2026-0459) and carries the zstd advisory
+# fix.
+tinystoragedrivers-types = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-api = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-busproxy = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139", default-features = false }
+tinystoragedrivers-testkit = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-document = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinybox-drivers = { path = "crates/tinybox-drivers", version = "0.2.6" }
 
 # Lints apply to every crate in the workspace via `[lints] workspace = true`.
 # CI runs clippy with `-D warnings`, so anything set to "warn" here fails CI.

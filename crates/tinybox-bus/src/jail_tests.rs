@@ -60,7 +60,7 @@ fn native_resource_limits_are_optional_typed_and_round_trip() -> Result<(), serd
             cpu_millis: 500,
             memory_bytes: 1_048_576,
             pids_max: 32,
-            disk_bytes: 10_485_760,
+            disk_bytes: Some(10_485_760),
         })
     );
     assert_eq!(serde_json::to_value(config)?, request);
@@ -78,6 +78,7 @@ fn native_jail_21_resource_subset_is_additive_and_keeps_disk_explicit()
         enforcement: JailEnforcement::Enforced,
         require_process_isolation: true,
         deny_read: vec![],
+        deny_read_names: Vec::new(),
         resources: None,
     };
     let request = NativeJailRequest {
@@ -99,4 +100,31 @@ fn native_jail_21_resource_subset_is_additive_and_keeps_disk_explicit()
     );
     assert_eq!(crate::NATIVE_JAIL_RESOURCES_VERSION, (2, 1));
     Ok(())
+}
+
+#[test]
+fn read_denials_by_name_are_additive_on_the_wire() -> Result<(), serde_json::Error> {
+    let mut jail = NativeJailConfig::default();
+    // Absent when empty, so a 2.4 request decodes and encodes unchanged.
+    assert!(
+        serde_json::to_value(&jail)?
+            .get("deny_read_names")
+            .is_none()
+    );
+    jail.deny_read_names = vec![".npmrc".into()];
+    let encoded = serde_json::to_value(&jail)?;
+    assert_eq!(encoded["deny_read_names"], serde_json::json!([".npmrc"]));
+    assert_eq!(serde_json::from_value::<NativeJailConfig>(encoded)?, jail);
+    Ok(())
+}
+
+#[test]
+fn the_default_jail_request_is_the_most_restrictive() {
+    let jail = NativeJailConfig::default();
+    assert!(jail.read_only.is_empty() && jail.read_write.is_empty());
+    assert!(!jail.allow_net && !jail.allow_subprocess);
+    assert_eq!(jail.enforcement, JailEnforcement::Enforced);
+    assert!(jail.require_process_isolation);
+    assert!(jail.deny_read.is_empty() && jail.deny_read_names.is_empty());
+    assert_eq!(jail.resources, None);
 }

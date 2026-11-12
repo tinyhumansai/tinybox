@@ -86,8 +86,15 @@ pub use files::{
 /// changing the 2.0 Rust request shapes. 2.2 adds process-scoped lifecycle
 /// events for module-owned executions and timeout observations. 2.3 adds
 /// module-owned native-shell orchestration through completion or yield, and
-/// the `openshell` sandbox backend for `Create`.
-pub const CONTRACT_VERSION: (u32, u32) = (2, 3);
+/// the `openshell` sandbox backend for `Create`. 2.4 adds the optional
+/// [`CreateRequest::retention`] field, which asks a backend to keep a box for
+/// its owner across uses; the `agent37` backend honours it and every other
+/// backend refuses it. 2.5 adds [`NativeJailConfig::deny_read_names`], read
+/// denials by file name that only a backend able to deny by name admits, and a
+/// most-restrictive `Default` for [`NativeJailConfig`]. 2.6 makes
+/// [`ResourceLimits::disk_bytes`] optional and absent by default; a host must
+/// bind a 2.6 module before it omits the field.
+pub const CONTRACT_VERSION: (u32, u32) = (2, 6);
 
 /// Minimum contract version required for resource-aware native jail members.
 pub const NATIVE_JAIL_RESOURCES_VERSION: (u32, u32) = (2, 1);
@@ -433,8 +440,12 @@ pub struct ResourceLimits {
     pub memory_bytes: u64,
     /// Maximum number of processes and threads.
     pub pids_max: u32,
-    /// Maximum writable filesystem size in bytes.
-    pub disk_bytes: u64,
+    /// Maximum writable filesystem size in bytes. Optional from contract 2.6,
+    /// and absent by default: no backend enforces a disk budget, so a value
+    /// is a request a native jail must refuse rather than a default it
+    /// pretends to apply. Absent on the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -443,7 +454,7 @@ impl Default for ResourceLimits {
             cpu_millis: 2_000,
             memory_bytes: 2 * 1024 * 1024 * 1024,
             pids_max: 512,
-            disk_bytes: 8 * 1024 * 1024 * 1024,
+            disk_bytes: None,
         }
     }
 }
@@ -465,6 +476,25 @@ pub struct PublishedPort {
     pub guest: u16,
     /// Effective port on the selected host.
     pub host: u16,
+}
+
+/// Ask a backend to keep a box for its owner between uses.
+///
+/// A retained box falls asleep when idle, wakes on the next command, is found
+/// again by [`Retention::key`] when a later `Create` names the same key, and is
+/// deleted once it has slept for [`Retention::delete_after_secs`]. A backend
+/// that cannot do this refuses the `Create`; it never runs the box as a
+/// disposable one. Added in contract 2.4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retention {
+    /// Opaque, stable identifier the host chooses for the box's owner: 1 to
+    /// 128 characters of `[A-Za-z0-9_-]`.
+    pub key: String,
+    /// Seconds without a command before the box falls asleep; the backend
+    /// clamps it to the range its service allows.
+    pub idle_sleep_secs: u32,
+    /// Seconds a box may sleep before it is deleted; must be greater than zero.
+    pub delete_after_secs: u64,
 }
 
 /// Allocate a local-host sandbox; the backend is always explicit.
@@ -491,6 +521,10 @@ pub struct CreateRequest {
     /// Variables inherited by commands.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Keep the box for its owner between uses. Added in contract 2.4; a
+    /// backend that cannot honour it refuses the request.
+    #[serde(default)]
+    pub retention: Option<Retention>,
 }
 
 /// Run one Docker-isolated shell command and collect bounded output.
@@ -605,6 +639,7 @@ impl Default for CreateRequest {
             resources: ResourceLimits::default(),
             ports: Vec::new(),
             env: BTreeMap::new(),
+            retention: None,
         }
     }
 }

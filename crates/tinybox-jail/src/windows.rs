@@ -775,12 +775,28 @@ unsafe fn grant_sid_access(path: &Path, sid: PSID, access: u32) -> io::Result<()
 fn build_command_line(cmd: &Command) -> String {
     // Minimal CommandLineToArgvW-compatible quoting. std's internal
     // `make_command_line` is private; this mirrors the same rules.
+    //
+    // cmd.exe does not parse its command line that way: after `/C` (or `/K`)
+    // it takes the rest verbatim, and the native shell hands it an already
+    // quoted `raw_arg` for exactly that. Re-quoting it would escape those
+    // quotes and cmd would run `\"script\"` as a program name, so for cmd
+    // everything after `/C` is passed through as given.
     let mut out = String::new();
     let prog = cmd.get_program().to_string_lossy().into_owned();
     push_arg(&mut out, &prog);
+    let is_cmd = std::path::Path::new(&prog).file_name().is_some_and(|name| {
+        name.eq_ignore_ascii_case("cmd.exe") || name.eq_ignore_ascii_case("cmd")
+    });
+    let mut verbatim = false;
     for a in cmd.get_args() {
         out.push(' ');
-        push_arg(&mut out, &a.to_string_lossy());
+        let a = a.to_string_lossy();
+        if verbatim {
+            out.push_str(&a);
+        } else {
+            push_arg(&mut out, &a);
+            verbatim = is_cmd && (a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k"));
+        }
     }
     out
 }

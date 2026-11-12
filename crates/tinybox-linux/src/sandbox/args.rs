@@ -322,6 +322,10 @@ pub struct NativeJailCommand {
     pub allow_net: bool,
     /// Whether the process may create child processes.
     pub allow_subprocess: bool,
+    /// Pass `--disable-userns` (bubblewrap 0.8+), so the process cannot
+    /// create a user namespace of its own. Set it only for a `bwrap` known to
+    /// support the flag; without it the jail is not kernel isolation.
+    pub disable_userns: bool,
     /// Hard CPU limit in thousandths of one CPU.
     pub cpu_millis: Option<u64>,
     /// Hard resident memory limit in bytes.
@@ -342,7 +346,7 @@ pub struct NativeJailCommand {
 /// # Errors
 /// Returns an error when a request is invalid, unsupported, or systemd's
 /// command-argument expansion behavior cannot be verified.
-pub fn native_jail_argv(request: &NativeJailCommand) -> std::io::Result<Vec<String>> {
+pub fn native_jail_argv(request: &NativeJailCommand) -> std::io::Result<NativeJailLaunch> {
     native_jail_argv_with_programs(
         request,
         &trusted_systemd_run_program()?,
@@ -360,13 +364,50 @@ pub fn native_jail_argv_with_programs(
     request: &NativeJailCommand,
     systemd_run: &Path,
     bwrap: &Path,
-) -> std::io::Result<Vec<String>> {
+) -> std::io::Result<NativeJailLaunch> {
     validate_native_jail_command(request)?;
     let systemd_run = validate_trusted_program(systemd_run)?;
     let bwrap = validate_trusted_program(bwrap)?;
     let supports_expand_environment = systemd_run_supports_safe_arguments(&systemd_run)?;
+    let env_file = if request.env.is_empty() {
+        None
+    } else {
+        let avoid: Vec<&Path> = std::iter::once(request.root.as_path())
+            .chain(request.read_only.iter().map(PathBuf::as_path))
+            .chain(request.read_write.iter().map(PathBuf::as_path))
+            .collect();
+        Some(super::env_file::EnvArgsFile::create(&request.env, &avoid)?)
+    };
     let argv = native_bwrap_argv(request, supports_expand_environment, &systemd_run, &bwrap);
-    Ok(native_launcher_argv(wrap_scope_command(argv)))
+    Ok(NativeJailLaunch {
+        argv: native_launcher_argv(
+            env_file.as_ref().map(super::env_file::EnvArgsFile::path),
+            wrap_scope_command(argv),
+        ),
+        env_file,
+    })
+}
+
+/// A native jail's launcher command, and the private file carrying its
+/// environment (see `env_file`).
+///
+/// Keep it alive until the launcher has started: the launcher deletes the file
+/// once it has it open, and dropping this removes it if the launcher never ran.
+#[derive(Debug)]
+pub struct NativeJailLaunch {
+    /// The launcher's program and arguments. Holds no environment value.
+    pub argv: Vec<String>,
+    env_file: Option<super::env_file::EnvArgsFile>,
+}
+
+impl NativeJailLaunch {
+    /// Where the target's environment waits for the launcher, if it has one.
+    #[must_use]
+    pub fn env_file(&self) -> Option<&Path> {
+        self.env_file
+            .as_ref()
+            .map(super::env_file::EnvArgsFile::path)
+    }
 }
 
 /// Sample cgroup counters from inside the transient scope before it is stopped.
@@ -394,6 +435,11 @@ fn wrap_scope_command(mut argv: Vec<String>) -> Vec<String> {
     argv
 }
 
+/// After the workload exits, copy the scope's counters into the report file the
+/// host prepared: `cpu.stat` as it is, then `memory.events` and `pids.events`
+/// with each key prefixed by its controller (`memory.oom_kill 1`,
+/// `pids.max 3`), so a key cannot collide across files. A file that cannot be
+/// read is left out, and the host then claims nothing for it.
 const CPU_EVENT_SCOPE_WRAPPER: &str = r#"
 unit=$1
 shift
@@ -402,10 +448,20 @@ status=$?
 report=${TINYBOX_INTERNAL_CPU_EVENT_FILE:-}
 if [ -n "$report" ]; then
     control_group=$(/usr/bin/systemctl --user show --property=ControlGroup --value "$unit" 2>/dev/null)
-    stats=
-    case $control_group in /*) stats=/sys/fs/cgroup${control_group}/cpu.stat;; esac
-    if [ -r "$stats" ]; then
-        { stat=$(<"$stats") && printf '%s\n' "$stat" > "$report"; } 2>/dev/null || :
+    dir=
+    case $control_group in /*) dir=/sys/fs/cgroup${control_group};; esac
+    if [ -n "$dir" ]; then
+        {
+            out=
+            if [ -r "$dir/cpu.stat" ]; then out=$(<"$dir/cpu.stat"); fi
+            for controller in memory pids; do
+                [ -r "$dir/$controller.events" ] || continue
+                while read -r key value; do
+                    out="$out"$'\n'"$controller.$key $value"
+                done < "$dir/$controller.events"
+            done
+            printf '%s\n' "$out" > "$report"
+        } 2>/dev/null || :
     fi
 fi
 exit "$status"
@@ -543,6 +599,33 @@ fn validate_native_jail_command(request: &NativeJailCommand) -> std::io::Result<
         ));
     }
 
+    refuse_missing_denials_inside_mounts(request)
+}
+
+/// A `deny_read` path must exist when it lies inside one of the jail's mounts:
+/// masking a missing one (`--ro-bind /dev/null <path>`) makes bwrap create it
+/// on the host, an empty file in the caller's tree, and a path created after
+/// the jail starts would not be covered anyway. One outside every mount is
+/// never visible in the sandbox, so it is skipped when the argv is built.
+fn refuse_missing_denials_inside_mounts(request: &NativeJailCommand) -> std::io::Result<()> {
+    let mounts: Vec<&Path> = std::iter::once(&request.root)
+        .chain(&request.read_only)
+        .chain(&request.read_write)
+        .map(PathBuf::as_path)
+        .collect();
+    for denied in &request.deny_read {
+        if denied.symlink_metadata().is_err()
+            && mounts.iter().any(|mount| denied.starts_with(mount))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "deny_read path {} must exist before starting the jail",
+                    denied.display()
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -567,11 +650,48 @@ fn systemd_run_supports_safe_arguments(systemd_run: &Path) -> std::io::Result<bo
     Ok(supports_expand_environment)
 }
 
-fn native_bwrap_argv(
-    request: &NativeJailCommand,
-    supports_expand_environment: bool,
+/// Limits for a transient scope; each one that is `None` is left unset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopeLimits {
+    /// CPU limit in thousandths of one CPU.
+    pub cpu_millis: Option<u64>,
+    /// Resident memory limit in bytes; swap is capped at zero alongside it.
+    pub memory_bytes: Option<u64>,
+    /// Task (process and thread) count limit.
+    pub pids_max: Option<u64>,
+}
+
+/// The `systemd-run --user --scope` command, through its `--`, that runs the
+/// program appended after it in a fresh transient scope holding `limits`.
+///
+/// The scope is named `tinybox-<kind>-<pid>-<n>.scope`. `systemd-run` reaches
+/// the user manager through `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`,
+/// so the caller must pass those through. Whether the manager can apply each
+/// limit is [`crate::ScopeProbe`]'s question, not this one's.
+///
+/// # Errors
+/// Returns an error unless `systemd_run` is an absolute trusted executable
+/// whose command-argument expansion behavior can be verified.
+pub fn resource_scope_argv(
     systemd_run: &Path,
-    bwrap: &Path,
+    kind: &str,
+    limits: ScopeLimits,
+) -> std::io::Result<Vec<String>> {
+    let systemd_run = validate_trusted_program(systemd_run)?;
+    let supports_expand_environment = systemd_run_supports_safe_arguments(&systemd_run)?;
+    Ok(scope_prefix(
+        &systemd_run,
+        kind,
+        supports_expand_environment,
+        limits,
+    ))
+}
+
+pub(super) fn scope_prefix(
+    systemd_run: &Path,
+    kind: &str,
+    supports_expand_environment: bool,
+    limits: ScopeLimits,
 ) -> Vec<String> {
     let mut argv = vec![
         systemd_run.display().to_string(),
@@ -579,7 +699,7 @@ fn native_bwrap_argv(
         "--scope".to_owned(),
         "--quiet".to_owned(),
         format!(
-            "--unit=tinybox-native-{}-{}.scope",
+            "--unit=tinybox-{kind}-{}-{}.scope",
             std::process::id(),
             NATIVE_SCOPE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ),
@@ -587,20 +707,39 @@ fn native_bwrap_argv(
     if supports_expand_environment {
         argv.push("--expand-environment=no".into());
     }
-    if let Some(value) = request.memory_bytes {
+    if let Some(value) = limits.memory_bytes {
         argv.push(format!("--property=MemoryMax={value}"));
         argv.push("--property=MemorySwapMax=0".to_owned());
         // Keep the scope present long enough for its supervisor and observers
         // to report the kernel OOM event and complete bounded cleanup.
         argv.push("--property=OOMPolicy=continue".to_owned());
     }
-    if let Some(value) = request.cpu_millis {
+    if let Some(value) = limits.cpu_millis {
         argv.push(format!("--property=CPUQuota={}%", cpu_quota_u64(value)));
     }
-    if let Some(value) = request.pids_max {
+    if let Some(value) = limits.pids_max {
         argv.push(format!("--property=TasksMax={value}"));
     }
     argv.push("--".to_owned());
+    argv
+}
+
+fn native_bwrap_argv(
+    request: &NativeJailCommand,
+    supports_expand_environment: bool,
+    systemd_run: &Path,
+    bwrap: &Path,
+) -> Vec<String> {
+    let mut argv = scope_prefix(
+        systemd_run,
+        "native",
+        supports_expand_environment,
+        ScopeLimits {
+            cpu_millis: request.cpu_millis,
+            memory_bytes: request.memory_bytes,
+            pids_max: request.pids_max,
+        },
+    );
     argv.push(bwrap.display().to_string());
     for flag in [
         "--unshare-user",
@@ -610,6 +749,9 @@ fn native_bwrap_argv(
         "--unshare-cgroup",
     ] {
         argv.push(flag.to_owned());
+    }
+    if request.disable_userns {
+        argv.push("--disable-userns".to_owned());
     }
     // The private network namespace also isolates AF_UNIX abstract sockets,
     // closing the same-UID user-manager escape path.
@@ -642,7 +784,13 @@ fn native_bwrap_argv(
             destination.display().to_string(),
         ]);
     }
-    for denied in &request.deny_read {
+    // A missing denial reaching here lies outside every mount (see
+    // `refuse_missing_denials_inside_mounts`): nothing to mask.
+    for denied in request
+        .deny_read
+        .iter()
+        .filter(|denied| denied.symlink_metadata().is_ok())
+    {
         if denied.is_dir() {
             argv.extend(["--tmpfs".into(), denied.display().to_string()]);
         } else {
@@ -658,27 +806,33 @@ fn native_bwrap_argv(
         request.cwd.display().to_string(),
         "--clearenv".into(),
     ]);
-    for (key, value) in &request.env {
-        argv.extend(["--setenv".into(), key.clone(), value.clone()]);
+    // The target environment is read from the private file the launcher opened
+    // as descriptor 9, never from this command line (see `env_file`).
+    if !request.env.is_empty() {
+        argv.extend(["--args".into(), super::env_file::ENV_ARGS_FD.into()]);
     }
     argv.push("--".into());
     argv.extend(request.argv.iter().cloned());
     // A scope launcher inherits the host process's descriptors. The trusted
     // shim closes every non-stdio descriptor before opening systemd's bus or
     // starting bubblewrap, preventing a pre-opened manager/cgroup FD from
-    // bypassing the mount and network namespaces. Target values remain argv
-    // data and the shim receives only a fixed, sanitized launcher environment.
+    // bypassing the mount and network namespaces. The target environment is
+    // not argv data: it travels in the private file on descriptor 9, and the
+    // shim receives only a fixed, sanitized launcher environment.
     argv
 }
 
-fn native_launcher_argv(argv: Vec<String>) -> Vec<String> {
+/// The launcher shim, given the private environment file (or `-` when the
+/// target has no environment) and then the scope command.
+fn native_launcher_argv(env_file: Option<&Path>, argv: Vec<String>) -> Vec<String> {
     let mut launcher = vec![
         "/bin/bash".to_owned(),
         "--noprofile".to_owned(),
         "--norc".to_owned(),
         "-c".to_owned(),
-        "[ -d /proc/self/fd ] || exit 125; shopt -s nullglob; fdpaths=(/proc/self/fd/*); ((${#fdpaths[@]} > 0)) || exit 125; for fdpath in \"${fdpaths[@]}\"; do fd=${fdpath##*/}; case $fd in 0|1|2|*[!0-9]*) continue;; esac; eval \"exec ${fd}>&-\" || exit 125; done; unit=; for arg in \"$@\"; do case $arg in --unit=*) unit=${arg#--unit=};; esac; done; [ -n \"$unit\" ] || exit 125; \"$@\"; status=$?; if ! /usr/bin/systemctl --user stop \"$unit\"; then /usr/bin/systemctl --user is-active --quiet \"$unit\" && exit 125; fi; exit \"$status\"".to_owned(),
+        "[ -d /proc/self/fd ] || exit 125; shopt -s nullglob; envfile=$1; shift; keep=; if [ \"$envfile\" != - ]; then exec 9<\"$envfile\" || exit 125; command -p rm -f -- \"$envfile\" || exit 125; command -p rmdir -- \"${envfile%/*}\" 2>/dev/null; keep=9; fi; fdpaths=(/proc/self/fd/*); ((${#fdpaths[@]} > 0)) || exit 125; for fdpath in \"${fdpaths[@]}\"; do fd=${fdpath##*/}; case $fd in 0|1|2|*[!0-9]*) continue;; esac; [ \"$fd\" = \"$keep\" ] && continue; eval \"exec ${fd}>&-\" || exit 125; done; unit=; for arg in \"$@\"; do case $arg in --unit=*) unit=${arg#--unit=};; esac; done; [ -n \"$unit\" ] || exit 125; \"$@\"; status=$?; if ! /usr/bin/systemctl --user stop \"$unit\"; then /usr/bin/systemctl --user is-active --quiet \"$unit\" && exit 125; fi; exit \"$status\"".to_owned(),
         "tinybox-native-launcher".to_owned(),
+        env_file.map_or_else(|| "-".to_owned(), |path| path.display().to_string()),
     ];
     launcher.extend(argv);
     launcher
@@ -753,18 +907,48 @@ pub(super) fn bwrap(spec: &BoxSpec, request: &ExecRequest) -> Result<Vec<String>
         |cwd| cwd.display().to_string(),
     ));
 
-    // The box's own environment first, then the request's on top, matching
-    // every other backend.
+    // The variables reach bwrap on its stdin (`--args 0`, see `environment`),
+    // never on this command line: `/proc/<pid>/cmdline` is readable by every
+    // process of the user, and on an SSH host the line also travels inside
+    // the remote shell command.
     argv.push("--clearenv".to_owned());
-    for (key, value) in spec.env.iter().chain(&request.env) {
-        argv.push("--setenv".to_owned());
-        argv.push(key.clone());
-        argv.push(value.clone());
+    if !(spec.env.is_empty() && request.env.is_empty()) {
+        argv.push("--args".to_owned());
+        argv.push("0".to_owned());
     }
 
     argv.push("--".to_owned());
     argv.extend(request.argv.iter().cloned());
     Ok(argv)
+}
+
+/// What `bwrap --args 0` reads on stdin: `--setenv KEY VALUE` for the box's
+/// own environment, then the request's on top (matching every other
+/// backend), each part NUL-terminated. `None` when there is nothing to set,
+/// in which case [`bwrap`] adds no `--args`.
+///
+/// This takes the command's stdin: namespace exec forwards the caller's stdin
+/// only to a command with no environment, and refuses a command that has both.
+///
+/// # Errors
+/// [`Error::Backend`] for a key or value holding a NUL, which would end the
+/// entry early and let the rest be read as further `bwrap` options.
+pub(super) fn environment(spec: &BoxSpec, request: &ExecRequest) -> Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    for (key, value) in spec.env.iter().chain(&request.env) {
+        if key.contains('\0') || value.contains('\0') {
+            return Err(Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "pass the command environment",
+                message: format!("the entry for {key:?} holds a NUL byte"),
+            });
+        }
+        for part in ["--setenv", key.as_str(), value.as_str()] {
+            bytes.extend_from_slice(part.as_bytes());
+            bytes.push(0);
+        }
+    }
+    Ok((!bytes.is_empty()).then_some(bytes))
 }
 
 /// The read-only root the sandbox sees.

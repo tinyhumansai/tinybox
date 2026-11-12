@@ -45,6 +45,120 @@ fn profile_denies_reads_and_writes_of_denied_paths_last() {
 }
 
 #[test]
+fn a_writable_grant_inside_a_denied_path_is_carved_out_after_the_denial() {
+    let mut jail = Jail::new("/Users/a/project", "x");
+    jail.deny_read = vec!["/Users/a/.openhuman".into()];
+    jail.read_write = vec![
+        "/Users/a/.openhuman/workspace/artifacts/sandbox-scratch/shell-1".into(),
+        "/Users/a/cache".into(),
+    ];
+    let p = render_profile(&jail);
+    let denial = p.find("(deny file-read* file-write*").expect("denial");
+    let carve = p.rfind("(allow file-read* file-write*").expect("carve-out");
+    // After the denial, so the last matching rule re-opens the scratch.
+    assert!(carve > denial);
+    assert!(p[carve..].contains("sandbox-scratch/shell-1"));
+    // Only grants inside a denial are carved; the rest need no carve-out.
+    assert!(!p[carve..].contains("/Users/a/cache"));
+    // Without a grant inside a denial there is no carve-out at all.
+    jail.read_write = vec!["/Users/a/cache".into()];
+    assert!(!render_profile(&jail).contains("(allow file-read* file-write*"));
+}
+
+/// Live: the per-call scratch under a denied state folder stays readable and
+/// writable, while the rest of the folder stays denied (#89).
+#[test]
+fn a_scratch_inside_a_denied_folder_stays_usable_while_the_folder_is_denied() {
+    let backend = SeatbeltBackend::new();
+    if !backend.is_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let workspace = workspace.path().canonicalize().expect("canonical root");
+    let state_dir = tempfile::tempdir().expect("tempdir");
+    let state = state_dir.path().canonicalize().expect("canonical state");
+    let scratch = state.join("artifacts").join("scratch");
+    fs::create_dir_all(&scratch).expect("mkdir");
+    fs::write(state.join("secret.txt"), "state-secret").expect("write");
+    let mut jail = Jail::new(&workspace, "test.carve");
+    jail.read_write = vec![scratch.clone()];
+    jail.deny_read = vec![state.clone()];
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "echo carved > \"$1/f\" && cat \"$1/f\" && ! cat \"$2/secret.txt\"",
+        "sh",
+    ])
+    .arg(&scratch)
+    .arg(&state)
+    .current_dir(&workspace);
+
+    let child = backend.spawn_captured(&jail, cmd).expect("spawn");
+    let output = child.wait_with_output().expect("wait");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "carved");
+    assert!(!stdout.contains("state-secret"));
+}
+
+#[test]
+fn names_are_denied_by_a_regex_after_every_allow() {
+    let mut jail = Jail::new("/Users/a/project", "x");
+    assert!(!render_profile(&jail).contains("regex"));
+    jail.deny_read = vec!["/Users/a/.openhuman".into()];
+    jail.read_write = vec!["/Users/a/.openhuman/scratch".into()];
+    jail.deny_read_names = vec![".npmrc".into(), "a+b".into()];
+    let p = render_profile(&jail);
+    let names = p.find("(regex #\"/\\.npmrc(/|$)\")").expect("name rule");
+    assert!(p.contains("(regex #\"/a\\+b(/|$)\")"), "{p}");
+    // Last of all, so a carved-out scratch cannot hold a readable `.npmrc`.
+    assert!(names > p.rfind("(allow file-read* file-write*").expect("carve-out"));
+    assert!(SeatbeltBackend::new().denies_by_name());
+}
+
+#[test]
+fn regex_escape_quotes_every_metacharacter() {
+    assert_eq!(regex_escape(".npmrc"), "\\.npmrc");
+    assert_eq!(
+        regex_escape("a(b)[c]{d}^$|?*+"),
+        "a\\(b\\)\\[c\\]\\{d\\}\\^\\$\\|\\?\\*\\+"
+    );
+    assert_eq!(regex_escape("plain"), "plain");
+}
+
+/// Live: a name is denied at any depth and as a directory, a sibling is not.
+#[test]
+fn a_denied_name_is_unreadable_wherever_it_appears() {
+    let backend = SeatbeltBackend::new();
+    if !backend.is_available() {
+        return;
+    }
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path().canonicalize().expect("canonical root");
+    fs::create_dir_all(root.join("a").join("b")).expect("mkdir");
+    fs::write(root.join(".npmrc"), "top-token").expect("write");
+    fs::write(root.join("a").join("b").join(".npmrc"), "deep-token").expect("write");
+    fs::write(root.join("a").join("other.txt"), "visible").expect("write");
+    let mut jail = Jail::new(&root, "test.names");
+    jail.deny_read_names = vec![".npmrc".into()];
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "cat a/other.txt; ! cat .npmrc 2>/dev/null && ! cat a/b/.npmrc 2>/dev/null",
+    ])
+    .current_dir(&root);
+
+    let child = backend.spawn_captured(&jail, cmd).expect("spawn");
+    let output = child.wait_with_output().expect("wait");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "visible");
+    assert!(!stdout.contains("token"));
+}
+
+#[test]
 fn escape_handles_backslash_and_quote() {
     assert_eq!(escape("a\\b"), "a\\\\b");
     assert_eq!(escape("a\"b"), "a\\\"b");
@@ -378,12 +492,20 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
         .stderr(Stdio::null());
     let mut child = backend.spawn(&jail, cmd).expect("spawn");
 
+    // Bounded, so a shell that never writes the file fails the test instead
+    // of hanging it.
     let pidfile = root.join("gc.pid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let grandchild = loop {
         if let Ok(text) = fs::read_to_string(&pidfile)
             && let Ok(pid) = text.trim().parse::<u32>()
         {
             break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for {}", pidfile.display());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
