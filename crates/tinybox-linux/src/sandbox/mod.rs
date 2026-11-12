@@ -13,8 +13,8 @@ mod args;
 mod env_file;
 
 pub use args::{
-    NativeJailCommand, NativeJailLaunch, WORKSPACE_MOUNT, native_jail_argv,
-    native_jail_argv_with_programs, trusted_systemd_run_program,
+    NativeJailCommand, NativeJailLaunch, ScopeLimits, WORKSPACE_MOUNT, native_jail_argv,
+    native_jail_argv_with_programs, resource_scope_argv, trusted_systemd_run_program,
 };
 
 /// The name this sandbox registers under.

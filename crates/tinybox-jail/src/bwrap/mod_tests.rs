@@ -18,6 +18,7 @@ fn verified(program: &str) -> Verified {
         bind_fds: false,
         seccomp: Vec::new(),
         pasta: None,
+        scope: None,
     }
 }
 
@@ -84,7 +85,7 @@ fn secrets_stay_out_of_argv_and_the_launcher_environment() -> io::Result<()> {
         .env("A", "1")
         .env_remove("B");
     let jail = Jail::new(root.path(), "t");
-    let prepared = prepare_command(&verified("/usr/bin/bwrap"), &jail, &cmd, None)?;
+    let prepared = prepare_command(&verified("/usr/bin/bwrap"), &jail, &cmd, None, None)?;
     // The host-side process: empty environment, argv of paths only.
     assert_eq!(prepared.launcher.get_envs().count(), 0);
     let argv = argv_of(&prepared.launcher);
@@ -242,7 +243,7 @@ fn a_private_network_jail_enters_the_holder_and_brings_its_own_resolver() -> io:
         std::fs::File::open("/proc/self/ns/net")?,
         writer.into(),
     );
-    let prepared = prepare_command(&backend_state, &jail, &Command::new("true"), Some(&network))?;
+    let prepared = prepare_command(&backend_state, &jail, &Command::new("true"), Some(&network), None)?;
     assert_eq!(prepared.launcher.get_program(), "/usr/bin/nsenter");
     let argv = argv_of(&prepared.launcher);
     assert!(argv.iter().any(|a| a == "--preserve-credentials"));
@@ -303,4 +304,78 @@ fn a_pasta_that_fails_to_start_refuses_the_jail_instead_of_sharing_the_host_netw
         .err()
         .map(|e| e.kind());
     assert_eq!(error, Some(io::ErrorKind::NotFound));
+}
+
+#[test]
+fn limits_are_claimed_only_for_controllers_the_scope_was_delegated() {
+    let mut state = verified("/usr/bin/bwrap");
+    state.scope = Some(scope::ResourceScope::with_probe(
+        "/usr/bin/systemd-run",
+        tinybox_linux::ScopeProbe::from_parts(true, Some("memory pids")),
+    ));
+    let backend = BubblewrapBackend {
+        verified: Some(state),
+    };
+    let support = backend.constraint_support();
+    assert_eq!(support.enforcement(Constraint::Filesystem), Enforcement::Enforced);
+    assert_eq!(support.enforcement(Constraint::Memory), Enforcement::Enforced);
+    assert_eq!(support.enforcement(Constraint::Pids), Enforcement::Enforced);
+    assert_eq!(support.enforcement(Constraint::Cpu), Enforcement::Unsupported);
+    assert_eq!(support.enforcement(Constraint::Disk), Enforcement::Unsupported);
+    // Without a scope, as before: no limit is claimed.
+    assert_eq!(
+        available().constraint_support().enforcement(Constraint::Memory),
+        Enforcement::Unsupported
+    );
+}
+
+#[test]
+fn a_scoped_launch_starts_systemd_run_and_keeps_the_jail_inside_it() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let jail = Jail::new(root.path(), "t").deny_net();
+    let prefix: Vec<String> = ["/usr/bin/systemd-run", "--user", "--scope", "--"]
+        .map(String::from)
+        .into();
+    let prepared = prepare_command(
+        &verified("/usr/bin/bwrap"),
+        &jail,
+        &Command::new("true"),
+        None,
+        Some(&prefix),
+    )?;
+    assert_eq!(prepared.launcher.get_program(), "/usr/bin/systemd-run");
+    let argv = argv_of(&prepared.launcher);
+    // The launcher shell and then bwrap follow the scope's separator.
+    let separator = argv.iter().position(|a| a == "--");
+    assert_eq!(separator, Some(2));
+    assert!(argv.iter().skip(3).any(|a| a == "/usr/bin/bwrap"));
+    prepared.args.discard();
+    Ok(())
+}
+
+#[test]
+fn a_hard_limit_the_scope_cannot_hold_refuses_the_spawn() {
+    let root = std::env::temp_dir();
+    let mut jail = Jail::new(&root, "t")
+        .deny_net()
+        .with_hard_requirements([Constraint::Cpu]);
+    jail.resources = Some(tinybox_core::Resources::DEFAULT);
+    // No scope at all, and a scope without the cpu controller.
+    for probe in [None, Some("memory pids")] {
+        let mut state = verified(&fake_bwrap().to_string_lossy());
+        state.scope = probe.map(|controllers| {
+            scope::ResourceScope::with_probe(
+                "/usr/bin/systemd-run",
+                tinybox_linux::ScopeProbe::from_parts(true, Some(controllers)),
+            )
+        });
+        let backend = BubblewrapBackend {
+            verified: Some(state),
+        };
+        let kind = backend
+            .spawn(&jail, Command::new("true"))
+            .err()
+            .map(|e| e.kind());
+        assert_eq!(kind, Some(io::ErrorKind::Unsupported), "{probe:?}");
+    }
 }

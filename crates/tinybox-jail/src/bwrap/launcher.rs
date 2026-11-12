@@ -208,6 +208,31 @@ pub(super) fn command(
     launcher
 }
 
+/// What `systemd-run --user` needs to reach the user manager, and nothing
+/// else: the launcher otherwise runs with an empty environment.
+const SCOPE_ENVIRONMENT: [&str; 2] = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
+
+/// `launcher`, run inside a transient resource scope. `scope` is the
+/// `systemd-run … --` prefix (`tinybox_linux::resource_scope_argv`). In scope
+/// mode `systemd-run` registers the scope and then execs the launcher in place,
+/// so the descriptors mapped onto it reach the launcher unchanged. `None` for
+/// an empty prefix.
+pub(super) fn in_scope(scope: &[String], launcher: &Command) -> Option<Command> {
+    let (program, prefix) = scope.split_first()?;
+    let mut scoped = Command::new(program);
+    scoped
+        .env_clear()
+        .args(prefix)
+        .arg(launcher.get_program())
+        .args(launcher.get_args());
+    for key in SCOPE_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(key) {
+            scoped.env(key, value);
+        }
+    }
+    Some(scoped)
+}
+
 #[cfg(test)]
 #[path = "launcher_tests.rs"]
 mod tests;

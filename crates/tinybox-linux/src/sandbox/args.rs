@@ -650,11 +650,48 @@ fn systemd_run_supports_safe_arguments(systemd_run: &Path) -> std::io::Result<bo
     Ok(supports_expand_environment)
 }
 
-fn native_bwrap_argv(
-    request: &NativeJailCommand,
-    supports_expand_environment: bool,
+/// Limits for a transient scope; each one that is `None` is left unset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopeLimits {
+    /// CPU limit in thousandths of one CPU.
+    pub cpu_millis: Option<u64>,
+    /// Resident memory limit in bytes; swap is capped at zero alongside it.
+    pub memory_bytes: Option<u64>,
+    /// Task (process and thread) count limit.
+    pub pids_max: Option<u64>,
+}
+
+/// The `systemd-run --user --scope` command, through its `--`, that runs the
+/// program appended after it in a fresh transient scope holding `limits`.
+///
+/// The scope is named `tinybox-<kind>-<pid>-<n>.scope`. `systemd-run` reaches
+/// the user manager through `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`,
+/// so the caller must pass those through. Whether the manager can apply each
+/// limit is [`crate::ScopeProbe`]'s question, not this one's.
+///
+/// # Errors
+/// Returns an error unless `systemd_run` is an absolute trusted executable
+/// whose command-argument expansion behavior can be verified.
+pub fn resource_scope_argv(
     systemd_run: &Path,
-    bwrap: &Path,
+    kind: &str,
+    limits: ScopeLimits,
+) -> std::io::Result<Vec<String>> {
+    let systemd_run = validate_trusted_program(systemd_run)?;
+    let supports_expand_environment = systemd_run_supports_safe_arguments(&systemd_run)?;
+    Ok(scope_prefix(
+        &systemd_run,
+        kind,
+        supports_expand_environment,
+        limits,
+    ))
+}
+
+pub(super) fn scope_prefix(
+    systemd_run: &Path,
+    kind: &str,
+    supports_expand_environment: bool,
+    limits: ScopeLimits,
 ) -> Vec<String> {
     let mut argv = vec![
         systemd_run.display().to_string(),
@@ -662,7 +699,7 @@ fn native_bwrap_argv(
         "--scope".to_owned(),
         "--quiet".to_owned(),
         format!(
-            "--unit=tinybox-native-{}-{}.scope",
+            "--unit=tinybox-{kind}-{}-{}.scope",
             std::process::id(),
             NATIVE_SCOPE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ),
@@ -670,20 +707,39 @@ fn native_bwrap_argv(
     if supports_expand_environment {
         argv.push("--expand-environment=no".into());
     }
-    if let Some(value) = request.memory_bytes {
+    if let Some(value) = limits.memory_bytes {
         argv.push(format!("--property=MemoryMax={value}"));
         argv.push("--property=MemorySwapMax=0".to_owned());
         // Keep the scope present long enough for its supervisor and observers
         // to report the kernel OOM event and complete bounded cleanup.
         argv.push("--property=OOMPolicy=continue".to_owned());
     }
-    if let Some(value) = request.cpu_millis {
+    if let Some(value) = limits.cpu_millis {
         argv.push(format!("--property=CPUQuota={}%", cpu_quota_u64(value)));
     }
-    if let Some(value) = request.pids_max {
+    if let Some(value) = limits.pids_max {
         argv.push(format!("--property=TasksMax={value}"));
     }
     argv.push("--".to_owned());
+    argv
+}
+
+fn native_bwrap_argv(
+    request: &NativeJailCommand,
+    supports_expand_environment: bool,
+    systemd_run: &Path,
+    bwrap: &Path,
+) -> Vec<String> {
+    let mut argv = scope_prefix(
+        systemd_run,
+        "native",
+        supports_expand_environment,
+        ScopeLimits {
+            cpu_millis: request.cpu_millis,
+            memory_bytes: request.memory_bytes,
+            pids_max: request.pids_max,
+        },
+    );
     argv.push(bwrap.display().to_string());
     for flag in [
         "--unshare-user",
