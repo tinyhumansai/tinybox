@@ -4,6 +4,8 @@ use super::*;
 
 const OPTS: Options = Options {
     disable_userns: true,
+    bind_fds: false,
+    private_resolv: false,
 };
 
 fn build(jail: &Jail) -> io::Result<Vec<String>> {
@@ -55,6 +57,8 @@ fn disable_userns_is_omitted_when_the_probe_found_no_support() -> io::Result<()>
         None,
         Options {
             disable_userns: false,
+            bind_fds: false,
+            private_resolv: false,
         },
     )?;
     assert!(!argv.iter().any(|a| a == "--disable-userns"));
@@ -346,5 +350,112 @@ fn a_denial_through_a_baseline_symlink_also_covers_the_link_target() -> io::Resu
             .any(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/usr/bin/sh"),
         "{argv:?}"
     );
+    Ok(())
+}
+
+const FD_OPTS: Options = Options {
+    disable_userns: true,
+    bind_fds: true,
+    private_resolv: false,
+};
+
+fn strings(argv: &[OsString]) -> Vec<String> {
+    argv.iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn grants_are_bound_from_descriptors_and_baseline_paths_by_path() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let nested = root.path().join("vendor");
+    std::fs::create_dir(&nested)?;
+    let j = jail(root.path()).add_read_only(&nested);
+
+    let built = jail_args_with_fds(&j, None, FD_OPTS)?;
+    let argv = strings(&built.argv);
+
+    let numbers: Vec<RawFd> = built.fds.iter().map(|(_, number)| *number).collect();
+    assert_eq!(numbers, vec![FIRST_GRANT_FD, FIRST_GRANT_FD + 1]);
+    let root_at = argv
+        .windows(3)
+        .position(|w| w[0] == "--bind-fd" && w[1] == "10" && Path::new(&w[2]) == root.path());
+    let nested_at = argv
+        .windows(3)
+        .position(|w| w[0] == "--ro-bind-fd" && w[1] == "11" && Path::new(&w[2]) == nested);
+    assert!(root_at.is_some() && nested_at.is_some(), "{argv:?}");
+    assert!(
+        root_at < nested_at,
+        "the nested grant must land on top: {argv:?}"
+    );
+    // Neither grant is also bound by path, which bwrap would re-resolve.
+    assert_eq!(triple(&argv, "--bind", root.path()), None);
+    assert_eq!(triple(&argv, "--ro-bind-try", &nested), None);
+    // Baseline system paths are still bound by path.
+    assert!(argv.iter().any(|a| a == "--ro-bind-try"), "{argv:?}");
+    Ok(())
+}
+
+#[test]
+fn a_symlink_swapped_in_after_the_check_is_not_followed() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let nested = root.path().join("vendor");
+    let mut fds = GrantFds::default();
+    assert_eq!(fds.open(root.path(), true)?, Some(FIRST_GRANT_FD));
+
+    // What `reject_symlinked_grants` checked was a directory; by the time the
+    // grant is opened another program has replaced it with a link out.
+    std::os::unix::fs::symlink(outside.path(), &nested)?;
+    let error = fds
+        .open(&nested, false)
+        .err()
+        .ok_or_else(|| io::Error::other("a symlinked nested grant was opened"))?;
+
+    assert!(error.to_string().contains("vendor"), "{error}");
+    assert!(
+        error.to_string().contains("ELOOP") || error.to_string().contains("symbolic links"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_symlink_above_a_grant_is_left_to_the_host() -> io::Result<()> {
+    // A top-level grant spelled through a host symlink (`/var/run` style)
+    // still opens: only the stretch inside another grant is held to no links.
+    let real = tempfile::tempdir()?;
+    let links = tempfile::tempdir()?;
+    let link = links.path().join("work");
+    std::os::unix::fs::symlink(real.path(), &link)?;
+
+    let mut fds = GrantFds::default();
+    assert_eq!(fds.open(&link, true)?, Some(FIRST_GRANT_FD));
+    Ok(())
+}
+
+#[test]
+fn a_missing_read_only_grant_is_skipped_as_ro_bind_try_skips_it() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let missing = root.path().join("not-there");
+    let j = jail(root.path()).add_read_only(&missing);
+
+    let args = jail_args_with_fds(&j, None, FD_OPTS)?;
+
+    assert_eq!(args.fds.len(), 1, "only the root is opened");
+    assert!(
+        !strings(&args.argv).iter().any(|a| Path::new(a) == missing),
+        "a missing grant reaches bwrap"
+    );
+    Ok(())
+}
+
+#[test]
+fn without_descriptor_support_grants_are_bound_by_path() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let args = jail_args_with_fds(&jail(root.path()), None, OPTS)?;
+
+    assert!(args.fds.is_empty());
+    assert!(triple(&strings(&args.argv), "--bind", root.path()).is_some());
     Ok(())
 }
