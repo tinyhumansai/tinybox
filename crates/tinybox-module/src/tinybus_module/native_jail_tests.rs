@@ -26,6 +26,9 @@ impl JailBackend for Backend {
     fn carves_denials(&self) -> bool {
         self.name == "seatbelt"
     }
+    fn denies_by_name(&self) -> bool {
+        self.name == "seatbelt"
+    }
     fn validate_carved_denials(&self, jail: &Jail) -> std::io::Result<()> {
         if self.carves_denials() {
             tinybox_jail::SeatbeltBackend::new().validate_carved_denials(jail)
@@ -85,6 +88,7 @@ fn config() -> NativeJailConfig {
         enforcement: JailEnforcement::Enforced,
         require_process_isolation: false,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     }
 }
@@ -1690,5 +1694,88 @@ async fn a_refused_fork_in_a_live_scope_is_reported_as_a_pids_limit_hit()
 
     assert!(journal.pids_max_hit(), "the refused fork was not reported");
     assert!(!journal.memory_oom_hit(), "nothing was killed for memory");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn name_request(
+    root: &std::path::Path,
+    names: &[&str],
+) -> (NativeJailConfig, tinybox_core::ExecRequest) {
+    let mut config = config();
+    config.allow_net = true;
+    config.allow_subprocess = true;
+    config.deny_read_names = names.iter().map(ToString::to_string).collect();
+    let mut command = tinybox_core::ExecRequest::new(["irrelevant"]);
+    command.cwd = Some(root.into());
+    (config, command)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_name_denial_is_refused_by_a_backend_that_cannot_deny_by_name()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let (config, command) = name_request(root.path(), &[".npmrc"]);
+    let backend = Backend {
+        available: true,
+        suitable: true,
+        name: "fixture",
+        full: true,
+    };
+
+    match prepare(root.path(), &config, &command, &backend) {
+        Err(Error::MethodFailed { name, message }) => {
+            assert_eq!(name, tinybox_bus::UNSUPPORTED_OPERATION);
+            assert!(message.contains("cannot deny paths by name"), "{message}");
+        }
+        other => {
+            return Err(format!(
+                "expected a refusal, got {:?}",
+                other.map(|jail| jail.deny_read_names)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_name_denial_reaches_the_jail_on_a_backend_that_denies_by_name()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let (config, command) = name_request(root.path(), &[".npmrc", "credentials.json"]);
+    let backend = Backend {
+        available: true,
+        suitable: true,
+        name: "seatbelt",
+        full: true,
+    };
+
+    let jail = prepare(root.path(), &config, &command, &backend)?;
+
+    assert_eq!(jail.deny_read_names, [".npmrc", "credentials.json"]);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_one_plain_component_is_an_invalid_path()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let backend = Backend {
+        available: true,
+        suitable: true,
+        name: "seatbelt",
+        full: true,
+    };
+    for bad in ["", ".", "..", "a/b", "a\\b", "a\"b", "a\0b"] {
+        let (config, command) = name_request(root.path(), &[bad]);
+        match prepare(root.path(), &config, &command, &backend) {
+            Err(error) => assert_eq!(error.wire_name(), tinybox_bus::INVALID_FILE_PATH, "{bad:?}"),
+            Ok(_) => return Err(format!("{bad:?} was admitted").into()),
+        }
+    }
     Ok(())
 }

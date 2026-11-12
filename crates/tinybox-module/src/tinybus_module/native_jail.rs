@@ -19,11 +19,15 @@ pub(super) fn prepare(
     if !cfg!(unix) || !backend.is_available() || backend.name() == tinybox_jail::NOOP_BACKEND_NAME {
         return Err(unavailable());
     }
-    if config.read_only.len() + config.read_write.len() + config.deny_read.len()
+    if config.read_only.len()
+        + config.read_write.len()
+        + config.deny_read.len()
+        + config.deny_read_names.len()
         > tinybox_bus::MAX_NATIVE_JAIL_GRANTS
     {
         return Err(invalid());
     }
+    check_name_denials(config, backend)?;
     // Before anything is canonicalized: a link the jailed program planted
     // (`<root>/vendor -> <secret>`) is only visible in the raw spellings.
     {
@@ -56,6 +60,7 @@ pub(super) fn prepare(
     jail.read_only = grants(&config.read_only)?;
     jail.read_write = grants(&config.read_write)?;
     jail.deny_read = denials(&config.deny_read)?;
+    jail.deny_read_names.clone_from(&config.deny_read_names);
     configure_resources(&mut jail, config)?;
     // A denial over the root or a writable grant would leave the command no
     // workspace; a denial nested inside a writable grant is safe only for a
@@ -112,6 +117,29 @@ pub(super) fn prepare(
         }
     }
     Ok(jail)
+}
+
+/// Name denials need a backend that denies by name, and each name must be one
+/// plain path component.
+fn check_name_denials(config: &NativeJailConfig, backend: &dyn JailBackend) -> Result<()> {
+    if !config.deny_read_names.is_empty() && !backend.denies_by_name() {
+        return Err(super::resources::failure(
+            tinybox_bus::UNSUPPORTED_OPERATION,
+            &format!(
+                "requested native jail enforcement is unavailable: backend `{}` cannot deny \
+                 paths by name",
+                backend.name()
+            ),
+        ));
+    }
+    if !config
+        .deny_read_names
+        .iter()
+        .all(|name| is_plain_name(name))
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()> {
@@ -244,6 +272,16 @@ fn canonicalize_prospective(path: &Path) -> std::io::Result<std::path::PathBuf> 
 fn overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
+/// Whether `name` is one path component a profile rule can match exactly: not
+/// empty, not `.` or `..`, bounded, and without a separator, quote or NUL.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= tinybox_bus::MAX_FILE_PATH_BYTES
+        && !name.contains(['/', '\\', '"', '\0'])
+}
+
 fn invalid() -> Error {
     super::resources::failure(
         tinybox_bus::INVALID_FILE_PATH,

@@ -34,6 +34,11 @@ pub struct Jail {
     /// native module rejects overlaps that an allow-list backend cannot enforce.
     /// Missing paths are retained so backend rules can cover later creation.
     pub deny_read: Vec<PathBuf>,
+    /// File or directory names the child may neither read nor write wherever
+    /// they appear. Only a backend that
+    /// [`denies_by_name`](JailBackend::denies_by_name) can enforce them; the
+    /// spawn helpers refuse a jail carrying any on every other backend.
+    pub deny_read_names: Vec<String>,
     /// Optional resource values to apply where the backend supports them.
     ///
     /// These values are defaults, not hard requirements. Use
@@ -61,6 +66,7 @@ impl Jail {
             read_only: Vec::new(),
             read_write: Vec::new(),
             deny_read: Vec::new(),
+            deny_read_names: Vec::new(),
             resources: None,
             hard_requirements: Vec::new(),
             allow_net: true,
@@ -382,6 +388,13 @@ pub trait JailBackend: Send + Sync {
     /// Allow-list backends (Landlock, `AppContainer`) cannot subtract from a
     /// grant, so they keep the default `false`.
     fn carves_denials(&self) -> bool {
+        false
+    }
+
+    /// Whether [`Jail::deny_read_names`] is enforced: names denied wherever
+    /// they appear, not only at exact paths. Only Seatbelt can (a regex rule);
+    /// path-based allow-list backends keep the default `false`.
+    fn denies_by_name(&self) -> bool {
         false
     }
 

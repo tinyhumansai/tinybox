@@ -89,8 +89,10 @@ pub use files::{
 /// the `openshell` sandbox backend for `Create`. 2.4 adds the optional
 /// [`CreateRequest::retention`] field, which asks a backend to keep a box for
 /// its owner across uses; the `agent37` backend honours it and every other
-/// backend refuses it.
-pub const CONTRACT_VERSION: (u32, u32) = (2, 4);
+/// backend refuses it. 2.5 adds [`NativeJailConfig::deny_read_names`], read
+/// denials by file name that only a backend able to deny by name admits, and a
+/// most-restrictive `Default` for [`NativeJailConfig`].
+pub const CONTRACT_VERSION: (u32, u32) = (2, 5);
 
 /// Minimum contract version required for resource-aware native jail members.
 pub const NATIVE_JAIL_RESOURCES_VERSION: (u32, u32) = (2, 1);
