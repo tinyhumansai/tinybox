@@ -91,8 +91,10 @@ pub use files::{
 /// its owner across uses; the `agent37` backend honours it and every other
 /// backend refuses it. 2.5 adds [`NativeJailConfig::deny_read_names`], read
 /// denials by file name that only a backend able to deny by name admits, and a
-/// most-restrictive `Default` for [`NativeJailConfig`].
-pub const CONTRACT_VERSION: (u32, u32) = (2, 5);
+/// most-restrictive `Default` for [`NativeJailConfig`]. 2.6 makes
+/// [`ResourceLimits::disk_bytes`] optional and absent by default; a host must
+/// bind a 2.6 module before it omits the field.
+pub const CONTRACT_VERSION: (u32, u32) = (2, 6);
 
 /// Minimum contract version required for resource-aware native jail members.
 pub const NATIVE_JAIL_RESOURCES_VERSION: (u32, u32) = (2, 1);
@@ -438,8 +440,12 @@ pub struct ResourceLimits {
     pub memory_bytes: u64,
     /// Maximum number of processes and threads.
     pub pids_max: u32,
-    /// Maximum writable filesystem size in bytes.
-    pub disk_bytes: u64,
+    /// Maximum writable filesystem size in bytes. Optional from contract 2.6,
+    /// and absent by default: no backend enforces a disk budget, so a value
+    /// is a request a native jail must refuse rather than a default it
+    /// pretends to apply. Absent on the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -448,7 +454,7 @@ impl Default for ResourceLimits {
             cpu_millis: 2_000,
             memory_bytes: 2 * 1024 * 1024 * 1024,
             pids_max: 512,
-            disk_bytes: 8 * 1024 * 1024 * 1024,
+            disk_bytes: None,
         }
     }
 }

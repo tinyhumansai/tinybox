@@ -147,7 +147,11 @@ fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()>
         cpu_millis: limits.cpu_millis,
         memory_bytes: limits.memory_bytes,
         pids_max: limits.pids_max,
-        disk_bytes: limits.disk_bytes,
+        // Required only when the caller set one; see
+        // `required_resource_constraints`.
+        disk_bytes: limits
+            .disk_bytes
+            .unwrap_or(tinybox_core::Resources::DEFAULT.disk_bytes),
     });
     jail.hard_requirements
         .extend(required_resource_constraints(config.resources));
@@ -163,19 +167,20 @@ fn configure_resources(jail: &mut Jail, config: &NativeJailConfig) -> Result<()>
 fn required_resource_constraints(
     resources: Option<tinybox_bus::ResourceLimits>,
 ) -> Vec<tinybox_core::Constraint> {
-    if resources.is_some() {
-        // An explicitly supplied native jail budget is a hard request. The
-        // default values in a BoxSpec remain soft unless its own
-        // `hard_requirements` lists a constraint.
-        vec![
+    // An explicitly supplied native jail budget is a hard request, disk
+    // included only when the caller set one. The default values in a BoxSpec
+    // remain soft unless its own `hard_requirements` lists a constraint.
+    resources.map_or_else(Vec::new, |limits| {
+        let mut constraints = vec![
             tinybox_core::Constraint::Cpu,
             tinybox_core::Constraint::Memory,
             tinybox_core::Constraint::Pids,
-            tinybox_core::Constraint::Disk,
-        ]
-    } else {
-        Vec::new()
-    }
+        ];
+        if limits.disk_bytes.is_some() {
+            constraints.push(tinybox_core::Constraint::Disk);
+        }
+        constraints
+    })
 }
 
 /// Validate and canonicalize each existing absolute grant path.

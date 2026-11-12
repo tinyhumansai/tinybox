@@ -63,7 +63,7 @@ fn sandbox_selection_and_spec_mapping_preserve_host_policy() -> Result<()> {
                 cpu_millis: 1500,
                 memory_bytes: 1_000_000,
                 pids_max: 12,
-                disk_bytes: 2_000_000,
+                disk_bytes: Some(2_000_000),
             },
             ports: vec![tinybox_bus::PortMapping {
                 guest: 8080,
@@ -83,6 +83,25 @@ fn sandbox_selection_and_spec_mapping_preserve_host_policy() -> Result<()> {
         assert_eq!(spec.env.get("MODE").map(String::as_str), Some("test"));
         assert_eq!(spec.retention, None);
     }
+    Ok(())
+}
+
+#[test]
+fn an_unset_disk_budget_keeps_the_soft_core_default() -> Result<()> {
+    let request = CreateRequest {
+        resource: ResourceId("disk-test".into()),
+        backend: "docker".into(),
+        workspace: Workspace::Directory("/work".into()),
+        ..Default::default()
+    };
+    assert_eq!(request.resources.disk_bytes, None);
+    let spec = make_spec(&request, "local")?;
+    assert_eq!(
+        spec.resources.disk_bytes,
+        tinybox_core::Resources::DEFAULT.disk_bytes
+    );
+    // Soft: nothing asks a backend to enforce it.
+    assert_eq!(spec.hard_requirements, vec![]);
     Ok(())
 }
 

@@ -60,7 +60,7 @@ fn native_resource_limits_are_optional_typed_and_round_trip() -> Result<(), serd
             cpu_millis: 500,
             memory_bytes: 1_048_576,
             pids_max: 32,
-            disk_bytes: 10_485_760,
+            disk_bytes: Some(10_485_760),
         })
     );
     assert_eq!(serde_json::to_value(config)?, request);
