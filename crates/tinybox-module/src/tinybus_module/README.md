@@ -272,7 +272,12 @@ requiring the process-isolation security floor sets `require_process_isolation`.
 The host retains approval policy and chooses the credential paths; it sends them
 as `deny_read` (1.20). The module retains prospective paths and resolves them
 against current filesystem aliases both at preflight and immediately before
-spawn. It refuses a denial covering the root or a writable grant. Seatbelt can
+spawn. It refuses a denial covering the root or a writable grant. A grant is
+refused as an invalid path when resolving it passes through a symlink that lives
+inside the root or a writable grant, because the jailed program could replace
+that link. That includes host-created links: a pnpm or monorepo workspace whose
+packages are linked inside the root cannot be granted through those links, so
+grant their real paths instead. Seatbelt can
 carve a denial that is a direct child of a writable grant (or of the root or
 `/private/tmp`), and refuses a deeper one, which a rename of the directory in
 between would move out of its path-based rule; allow-list backends refuse any
@@ -283,8 +288,13 @@ grant remain default-denied on allow-list backends.
 
 The jail owns a separate native collector for each execution. Output replay,
 Cancel, ReleaseOutput, Close and Shutdown use the same retained cleanup barriers
-as StartExec. Windows rejects this operation until its native jail has a
-supervised child bridge; explicit ordinary local execution remains available.
+as StartExec. Every jailed path (native shell, `StartJailedExec`, stdio) uses the
+owned-process backend, which on Windows is `AppContainer`: it runs each child in
+its own Job Object. `AppContainer` enforces filesystem, network, CPU, memory and
+process-count limits, but not `Subprocess`, and reports no isolation level, so a
+jail with `allow_subprocess: false`, `require_process_isolation`, or a read
+denial overlapping its grants is refused there, with the reason in the error
+message.
 
 
 ## Observed SSH execution

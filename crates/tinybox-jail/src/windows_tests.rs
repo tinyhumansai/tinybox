@@ -480,3 +480,28 @@ fn wait_for_child(child: &mut crate::OwnedChild) -> std::io::Result<crate::Child
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+#[test]
+fn a_cmd_script_after_slash_c_reaches_cmd_verbatim() {
+    use std::os::windows::process::CommandExt as _;
+    // The native shell's own invocation: cmd strips this one pair of quotes.
+    let mut cmd = Command::new(r"C:\Windows\System32\cmd.exe");
+    cmd.args(["/D", "/E:ON", "/V:OFF", "/S", "/C"])
+        .raw_arg("\"echo jailed\"");
+
+    assert_eq!(
+        build_command_line(&cmd),
+        r#"C:\Windows\System32\cmd.exe /D /E:ON /V:OFF /S /C "echo jailed""#
+    );
+}
+
+#[test]
+fn other_programs_keep_command_line_to_argv_quoting() {
+    let mut cmd = Command::new(r"C:\tools\node.exe");
+    cmd.args(["/C", "a \"b\""]);
+
+    assert_eq!(
+        build_command_line(&cmd),
+        r#"C:\tools\node.exe /C "a \"b\"""#
+    );
+}

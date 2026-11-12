@@ -27,13 +27,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The script: open and delete the args file, close every other inherited
-/// descriptor above 2, then `exec bwrap --args 9 -- COMMAND...`. `$0` is
-/// `bwrap`, `$1` the args file, the rest the command and its arguments (bwrap
+/// descriptor above 2 except the `$2` grant descriptors from 10 up (see
+/// [`super::args::FIRST_GRANT_FD`]), then `exec bwrap --args 9 -- COMMAND...`.
+/// `$0` is `bwrap`, `$1` the args file, the rest the command and its arguments (bwrap
 /// reads options from the file but the command itself must be on its argv; a
 /// command line is visible to every local user anyway, in the sandbox as on
 /// any host).
 const SCRIPT: &str = r#"f=$1
-shift
+k=$2
+shift 2
 exec 9<"$f" || exit 126
 command -p rm -f -- "$f"
 command -p rmdir -- "${f%/*}" 2>/dev/null
@@ -42,7 +44,9 @@ for fd in /proc/self/fd/*; do
   n=${fd##*/}
   case $n in
     0|1|2|9) ;;
-    *) eval "exec $n>&-" || exit 126 ;;
+    *) if [ "$n" -ge 10 ] && [ "$n" -lt $((10 + k)) ]; then :; else
+         eval "exec $n>&-" || exit 126
+       fi ;;
   esac
 done
 exec "$0" --args 9 -- "$@"
@@ -75,7 +79,9 @@ pub(super) fn pick_shell(exists: impl Fn(&str) -> bool) -> &'static str {
 /// Where the args file may live: `$XDG_RUNTIME_DIR` (a private per-user
 /// directory) when set, else the temp directory. A candidate that lies under
 /// any of the jail's mounts is refused, since the jailed program could then
-/// read or replace the file.
+/// read or replace the file. Candidates are canonicalized before that check,
+/// as the grants are, so a runtime directory reached through a symlink into a
+/// grant is caught; the canonical path is what is returned.
 ///
 /// # Errors
 /// `PermissionDenied` when no candidate is outside the jail's grants.
@@ -87,6 +93,7 @@ pub(super) fn base_dir(
     xdg_runtime_dir
         .into_iter()
         .chain(std::iter::once(temp_dir))
+        .filter_map(|dir| dir.canonicalize().ok())
         .find(|dir| dir.is_dir() && !grants.iter().any(|grant| dir.starts_with(grant)))
         .ok_or_else(|| {
             io::Error::new(
@@ -154,25 +161,76 @@ impl ArgsFile {
     }
 }
 
+/// Namespaces the launcher joins before it runs: `nsenter` enters the user
+/// and network namespace open on these child descriptors (by descriptor, not
+/// by pid, so a reused pid cannot redirect it), and keeps every other
+/// descriptor. The script then closes these two, as it closes everything
+/// outside its keep list.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Enter<'a> {
+    pub nsenter: &'a Path,
+    pub user_fd: i32,
+    pub net_fd: i32,
+}
+
 /// The launcher command: an empty environment, the script, `bwrap`, the file,
-/// then the command to run inside the sandbox and its arguments.
+/// how many grant descriptors to keep, then the command to run inside the
+/// sandbox and its arguments. With `enter`, the shell runs under `nsenter`.
 pub(super) fn command(
+    enter: Option<Enter<'_>>,
     shell: &str,
     bwrap: &Path,
     args: &ArgsFile,
+    grant_fds: usize,
     program: &std::ffi::OsStr,
     program_args: &[OsString],
 ) -> Command {
-    let mut launcher = Command::new(shell);
+    let mut launcher = match enter {
+        Some(enter) => {
+            let mut nsenter = Command::new(enter.nsenter);
+            nsenter
+                .arg(format!("--user=/proc/self/fd/{}", enter.user_fd))
+                .arg(format!("--net=/proc/self/fd/{}", enter.net_fd))
+                .args(["--preserve-credentials", "--", shell]);
+            nsenter
+        }
+        None => Command::new(shell),
+    };
     launcher
         .env_clear()
         .arg("-c")
         .arg(SCRIPT)
         .arg(bwrap)
         .arg(args.path())
+        .arg(grant_fds.to_string())
         .arg(program)
         .args(program_args);
     launcher
+}
+
+/// What `systemd-run --user` needs to reach the user manager, and nothing
+/// else: the launcher otherwise runs with an empty environment.
+const SCOPE_ENVIRONMENT: [&str; 2] = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
+
+/// `launcher`, run inside a transient resource scope. `scope` is the
+/// `systemd-run … --` prefix (`tinybox_linux::resource_scope_argv`). In scope
+/// mode `systemd-run` registers the scope and then execs the launcher in place,
+/// so the descriptors mapped onto it reach the launcher unchanged. `None` for
+/// an empty prefix.
+pub(super) fn in_scope(scope: &[String], launcher: &Command) -> Option<Command> {
+    let (program, prefix) = scope.split_first()?;
+    let mut scoped = Command::new(program);
+    scoped
+        .env_clear()
+        .args(prefix)
+        .arg(launcher.get_program())
+        .args(launcher.get_args());
+    for key in SCOPE_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(key) {
+            scoped.env(key, value);
+        }
+    }
+    Some(scoped)
 }
 
 #[cfg(test)]

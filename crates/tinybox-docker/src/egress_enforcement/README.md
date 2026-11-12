@@ -4,6 +4,14 @@
 `DockerEgressController`. `DockerSandbox` has no controller by default, so an
 allowlist remains Unsupported unless a host installs this implementation.
 
+The TinyBus module installs it per `Create`: a Docker box that asks for an
+allowlist runs `NativeLinuxDockerEgressController::detect` first, resolving
+names with `SystemEgressResolver`. A host that passes gets the controller for
+that box, and its teardown. Any other host refuses the allowlist with
+`Error::EgressAllowlistUnavailable`, naming the check it failed. Boxes with any
+other network policy never run detection and keep using the host's configured
+Docker daemon.
+
 ## Setup and enforcement
 
 Before creating a network, the controller requires an explicitly local host,

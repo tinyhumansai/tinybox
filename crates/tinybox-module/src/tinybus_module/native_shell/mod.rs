@@ -33,7 +33,12 @@ impl ShellContext {
         root: &Path,
         resolved: &tinybox_core::ExecRequest,
     ) -> Result<Arc<Self>> {
-        Self::prepare_with_backend(request, root, resolved, tinybox_jail::default_backend())
+        Self::prepare_with_backend(
+            request,
+            root,
+            resolved,
+            tinybox_jail::default_owned_backend(),
+        )
     }
     fn prepare_with_backend(
         request: ShellExecRequest,
@@ -63,20 +68,9 @@ impl ShellContext {
             .tempdir_in(scratch_root)
             .map_err(|_| invalid())?;
         let selection = tinybox_host::select_shell(&request.shell);
-        let mut environment = std::collections::BTreeMap::new();
-        for name in [
-            "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
-        ]
-        .into_iter()
-        .chain(selection.bootstrap_environment.iter().map(String::as_str))
-        {
-            if let Ok(value) = std::env::var(name) {
-                if value.is_empty() {
-                    return Err(invalid());
-                }
-                environment.insert(name.to_owned(), value);
-            }
-        }
+        let mut environment = host_environment(&selection.bootstrap_environment, |name| {
+            std::env::var(name).ok()
+        })?;
         if request.shell.python_utf8 {
             apply_python_utf8_defaults(&mut environment);
         }
@@ -118,14 +112,14 @@ impl ShellContext {
             {
                 return Err(invalid());
             }
-            ShellHost::Jailed(
+            ShellHost::Jailed(Box::new(
                 tinybox_host::JailLocalHost::with_backend(
                     jail,
                     backend,
                     tinybox_bus::MAX_OUTPUT_BYTES,
                 )
                 .map_err(|_| invalid())?,
-            )
+            ))
         } else {
             ShellHost::Local(tinybox_host::LimitedLocalHost::new(
                 tinybox_bus::MAX_OUTPUT_BYTES,
@@ -262,6 +256,46 @@ fn validate_runtime(request: &ShellExecRequest) -> Result<()> {
     }
     Ok(())
 }
+
+/// Host variables every native shell child receives. An empty one refuses the
+/// request, since a blank `PATH` or `HOME` would run the command somewhere
+/// nobody chose.
+const HOST_ENVIRONMENT: &[&str] = &[
+    "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
+];
+
+/// Toolchain homes passed through when the host set them, so a user who moved
+/// Cargo or rustup out of `~` still gets their toolchain (#84). Optional: an
+/// empty one counts as unset, as Cargo and rustup treat it.
+const TOOLCHAIN_HOME_ENVIRONMENT: &[&str] = &["CARGO_HOME", "RUSTUP_HOME"];
+
+/// The host part of a native shell child's environment, looked up with
+/// `lookup` (the process environment outside tests).
+fn host_environment(
+    bootstrap: &[String],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut environment = std::collections::BTreeMap::new();
+    for name in HOST_ENVIRONMENT
+        .iter()
+        .copied()
+        .chain(bootstrap.iter().map(String::as_str))
+    {
+        if let Some(value) = lookup(name) {
+            if value.is_empty() {
+                return Err(invalid());
+            }
+            environment.insert(name.to_owned(), value);
+        }
+    }
+    for name in TOOLCHAIN_HOME_ENVIRONMENT {
+        if let Some(value) = lookup(name).filter(|value| !value.is_empty()) {
+            environment.insert((*name).to_owned(), value);
+        }
+    }
+    Ok(environment)
+}
+
 fn invalid() -> tinybus::Error {
     super::resources::failure(
         tinybox_bus::INVALID_SHELL_EXEC,

@@ -105,7 +105,7 @@ impl Resources {
         &self,
         request: StdioStartRequest,
     ) -> Result<ProcessRef> {
-        self.start_stdio_with(request, tinybox_jail::default_backend())
+        self.start_stdio_with(request, tinybox_jail::default_owned_backend())
             .await
     }
 

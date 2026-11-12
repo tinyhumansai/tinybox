@@ -5,7 +5,12 @@
 #   fake-bwrap.sh        passes nothing (the isolation probe must reject it)
 #   fake-bwrap-probe.sh  also answers the isolation probe
 #   fake-bwrap-old.sh    like -probe, but rejects --disable-userns
+#   fake-bwrap-noseccomp.sh  like -probe, but its --help lacks --add-seccomp-fd
 name=$(basename "$0")
+if [ "$1" = "--help" ]; then
+  [ "$name" = "fake-bwrap-noseccomp.sh" ] || echo "    --add-seccomp-fd FD          Load and use seccomp rules from FD (repeatable)"
+  exit 0
+fi
 [ "$1" = "--args" ] && [ "$3" = "--" ] || { echo "fake bwrap: expected --args N --" >&2; exit 2; }
 shift 3
 mode=opts

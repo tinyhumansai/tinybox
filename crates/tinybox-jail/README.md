@@ -26,7 +26,9 @@ spawns, never the core process itself.
   Seatbelt on macOS, otherwise the `unsupported` backend.
 - Spawn a `std::process::Command` inside the jail, canonicalizing `root`
   (and the read-only and read/write paths) first so backends never see `..` or symlink
-  trickery.
+  trickery. Before canonicalizing, a grant whose resolution passes through a
+  symlink inside the root or a writable grant is refused (`InvalidInput`),
+  host-created links included, since the jailed program could replace one.
 - Provide a persistent registry to manage many jailed workspaces side by
   side, each with a stable id, label, directory, and metadata, indexed in a
   JSON file.
@@ -41,7 +43,7 @@ spawns, never the core process itself.
 | `crates/tinybox-jail/src/jail.rs` | Core types: the `Jail` description struct (builder plus `canonicalize`/`canonicalize_or_log`) and the `JailBackend` trait (`name`/`is_available`/`spawn`). |
 | `crates/tinybox-jail/src/detect.rs` | `pick_backend()`: first available OS backend, else an unsupported backend that fails closed. |
 | `crates/tinybox-jail/src/noop.rs` | `NoopBackend`: no enforcement, plain `Command::spawn`. Always available. |
-| `crates/tinybox-jail/src/bwrap/` | Bubblewrap backend (Linux only): user/pid/ipc/uts (+net) namespaces, grants as bind mounts, `deny_read` masked, `--die-with-parent`. `isolation()` is the minimum over configurations (`Process` with `--disable-userns`, else `None`); `Kernel` only per jail without `allow_net` (`isolation_for` / `is_suitable_for_untrusted_jail`; hosts must use the per-jail form). Never looks `bwrap` up on `PATH`; the probe is a sanity check, not authentication, and `with_program` skips the ownership check. The caller's environment and credentials travel in a private `--args` file, not in argv or any host process environment (`launcher.rs`), and inherited descriptors above 2 are closed by that launcher. No seccomp filter and no resource limits yet. Landlock is the fallback. Landlock is not layered inside because the kernel denies `mount` to a Landlock-restricted thread. |
+| `crates/tinybox-jail/src/bwrap/` | Bubblewrap backend (Linux only): user/pid/ipc/uts (+net) namespaces, grants as bind mounts, `deny_read` masked, `--die-with-parent`. `isolation()` is the minimum over configurations (`Process` with `--disable-userns`, else `None`); `Kernel` only per jail without `allow_net` (`isolation_for` / `is_suitable_for_untrusted_jail`; hosts must use the per-jail form). Never looks `bwrap` up on `PATH`; the probe is a sanity check, not authentication, and `with_program` skips the ownership check. The caller's environment and credentials travel in a private `--args` file, not in argv or any host process environment (`launcher.rs`), and inherited descriptors above 2 are closed by that launcher. Jails start under a seccomp deny list. CPU, memory and pid limits run through a rootless systemd scope for the controllers the user manager was delegated, and only those are claimed; a hard limit is refused for a jail that shares the host network or is granted `/run` or `/sys` (`scope.rs`). Landlock is the fallback. Landlock is not layered inside because the kernel denies `mount` to a Landlock-restricted thread. |
 | `crates/tinybox-jail/src/linux.rs` | Landlock backend (Linux only, `landlock` feature, on by default). Applies the ruleset to a dedicated spawn thread so no `unsafe` `pre_exec` is needed. |
 | `crates/tinybox-jail/src/macos.rs` | Seatbelt backend via `sandbox-exec`. Compiled on every host so the profile renderer is unit-tested everywhere; selected only on macOS. |
 | `crates/tinybox-jail/src/windows.rs` | `AppContainerBackend`, compiled on Windows only under the one file-scoped `unsafe_code` allowance. Available through `spawn_owned_captured` / `spawn_owned_captured_with`; the legacy `spawn` returns `Unsupported` because it cannot return a waitable `std::process::Child`. |

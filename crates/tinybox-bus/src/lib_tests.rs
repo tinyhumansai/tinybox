@@ -59,7 +59,7 @@ fn docker_run_vocabulary_is_typed_bounded_and_additive() -> Result<(), serde_jso
     assert_eq!(METHODS[28], "CleanupDocker");
     assert_eq!(METHODS[29], "RunDockerWithoutWorkspace");
     assert_eq!(METHODS[33], "StartNativeShellExec");
-    assert_eq!(CONTRACT_VERSION, (2, 4));
+    assert_eq!(CONTRACT_VERSION, (2, 6));
     assert_eq!(MAX_DOCKER_RUN_TIMEOUT_MS, 86_400_000);
     let serialized = serde_json::to_value(&request)?;
     assert_eq!(serialized["read_only_rootfs"], false);
@@ -139,7 +139,7 @@ fn host_gateway_and_docker_facts_are_additive_and_default_safely() -> Result<(),
 #[test]
 fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
 -> Result<(), serde_json::Error> {
-    assert_eq!(CONTRACT_VERSION, (2, 4));
+    assert_eq!(CONTRACT_VERSION, (2, 6));
     assert!(is_compatible(CONTRACT_VERSION));
     assert!(!is_compatible((1, 21)));
     assert!(!is_compatible((1, 8)));
@@ -157,7 +157,9 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
     assert!(!is_compatible((2, 1)));
     assert!(!is_compatible((2, 2)));
     assert!(!is_compatible((2, 3)));
-    assert!(is_compatible((2, 4)));
+    assert!(!is_compatible((2, 4)));
+    assert!(!is_compatible((2, 5)));
+    assert!(is_compatible((2, 6)));
     assert!(!supports_native_jail_resources((2, 0)));
     assert!(supports_native_jail_resources((2, 1)));
     assert!(supports_native_jail_resources((2, 2)));
@@ -167,11 +169,35 @@ fn version_and_capability_wire_snapshot_preserve_contract_compatibility()
         exec_backends: Vec::new(),
         spawn_backends: Vec::new(),
     };
-    let snapshot = serde_json::json!({"contract_version":[2,4],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
+    let snapshot = serde_json::json!({"contract_version":[2,6],"create_backends":["passthrough"],"exec_backends":[],"spawn_backends":[]});
     assert_eq!(serde_json::to_value(&capabilities)?, snapshot);
     assert_eq!(
         serde_json::from_value::<ModuleCapabilities>(snapshot)?,
         capabilities
+    );
+    Ok(())
+}
+
+#[test]
+fn disk_bytes_is_optional_and_absent_by_default() -> Result<(), serde_json::Error> {
+    // A 2.5 sender always set it; it still decodes, and re-encodes unchanged.
+    let older = serde_json::json!({
+        "cpu_millis": 500, "memory_bytes": 1024, "pids_max": 8, "disk_bytes": 4096,
+    });
+    let limits: ResourceLimits = serde_json::from_value(older.clone())?;
+    assert_eq!(limits.disk_bytes, Some(4096));
+    assert_eq!(serde_json::to_value(limits)?, older);
+
+    // Without one, nothing is claimed and nothing is sent.
+    let unset: ResourceLimits = serde_json::from_value(serde_json::json!({
+        "cpu_millis": 500, "memory_bytes": 1024, "pids_max": 8,
+    }))?;
+    assert_eq!(unset.disk_bytes, None);
+    assert_eq!(ResourceLimits::default().disk_bytes, None);
+    assert!(
+        serde_json::to_value(ResourceLimits::default())?
+            .get("disk_bytes")
+            .is_none()
     );
     Ok(())
 }
@@ -186,7 +212,7 @@ fn no_workspace_docker_operation_is_present_in_the_contract() {
             .count(),
         1
     );
-    assert_eq!(CONTRACT_VERSION, (2, 4));
+    assert_eq!(CONTRACT_VERSION, (2, 6));
 }
 
 #[test]
@@ -199,7 +225,7 @@ fn shell_analysis_wire_shape_contains_only_structural_facts() -> Result<(), serd
 
 #[test]
 fn contract_two_drops_command_classification_but_keeps_structural_shell_analysis() {
-    assert_eq!(CONTRACT_VERSION, (2, 4));
+    assert_eq!(CONTRACT_VERSION, (2, 6));
     assert!(!METHODS.contains(&"AnalyzeCommand"));
     assert!(METHODS.contains(&"AnalyzeShell"));
     assert!(METHODS.contains(&"RunNativeShell"));

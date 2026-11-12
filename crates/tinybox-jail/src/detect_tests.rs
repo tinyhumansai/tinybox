@@ -148,3 +148,22 @@ fn owned_selection_fails_closed_when_no_candidate_can_return_owned_child() {
     assert_eq!(picked.name(), UNSUPPORTED_BACKEND_NAME);
     assert!(!picked.is_owned_available());
 }
+
+/// Every jailed path asks for the owned-process backend. Off Windows that must
+/// be the same backend the plain selection picks, so the switch to it (#22)
+/// changes nothing there.
+#[cfg(not(windows))]
+#[test]
+fn off_windows_the_owned_selection_is_the_plain_selection() {
+    assert_eq!(pick_owned_backend().name(), pick_backend().name());
+}
+
+/// On Windows the owned selection is `AppContainer`, the backend the plain
+/// selection can never return.
+#[cfg(windows)]
+#[test]
+fn on_windows_the_owned_selection_is_appcontainer() {
+    let backend = pick_owned_backend();
+    assert_eq!(backend.name(), "appcontainer");
+    assert!(backend.is_owned_available());
+}

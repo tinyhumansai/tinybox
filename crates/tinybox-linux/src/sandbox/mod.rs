@@ -10,10 +10,11 @@ use tinybox_core::{
 };
 
 mod args;
+mod env_file;
 
 pub use args::{
-    NativeJailCommand, WORKSPACE_MOUNT, native_jail_argv, native_jail_argv_with_programs,
-    trusted_systemd_run_program,
+    NativeJailCommand, NativeJailLaunch, ScopeLimits, WORKSPACE_MOUNT, native_jail_argv,
+    native_jail_argv_with_programs, resource_scope_argv, trusted_systemd_run_program,
 };
 
 /// The name this sandbox registers under.
@@ -180,9 +181,27 @@ impl Sandbox for NamespaceSandbox {
             self.setrlimit_fallback,
             supports_expand_environment,
         )?;
+        // bwrap reads the environment on stdin (`--args 0`), so a command
+        // with an environment cannot also be given stdin of its own; that is
+        // refused rather than one of them being dropped.
+        let mut run = ExecRequest::new(argv);
+        match (args::environment(&info.spec, request)?, &request.stdin) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Backend {
+                    sandbox: NAME.to_owned(),
+                    operation: "pass the command's stdin",
+                    message: "a namespace box cannot give a command stdin while it also has an \
+                              environment: bubblewrap reads the environment on stdin"
+                        .to_owned(),
+                });
+            }
+            (Some(environment), None) => run = run.with_stdin(environment),
+            (None, Some(stdin)) => run = run.with_stdin(stdin.clone()),
+            (None, None) => {}
+        }
         // A command that runs and fails is a result, so the raw output is
         // returned rather than being turned into a backend error.
-        self.host.run(&ExecRequest::new(argv)).await
+        self.host.run(&run).await
     }
 
     async fn snapshot(&self, _id: &BoxId) -> Result<SnapshotId> {

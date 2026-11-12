@@ -29,13 +29,46 @@ pub struct NativeJailConfig {
     pub require_process_isolation: bool,
     /// Absolute paths the child may neither read nor write, even where the
     /// root or a grant would otherwise reach them (credential stores, for a
-    /// provider that reads allow-by-default). Paths that do not exist are
-    /// ignored. Added in contract 1.20; empty by default.
+    /// provider that reads allow-by-default). A path that does not exist yet is
+    /// kept and resolved again just before spawn, except that the bubblewrap
+    /// backend refuses a missing denial inside one of the jail's mounts: it
+    /// would have to create the path to mask it. A denial inside a grant
+    /// covers the path as it exists when the jail starts; a host that replaces
+    /// it during the run exposes the new file (see the bubblewrap backend's
+    /// known gaps). Added in contract 1.20; empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_read: Vec<String>,
     /// Optional hard resource limits; omitted for compatibility with older requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<crate::ResourceLimits>,
+    /// File or directory names the child may neither read nor write wherever
+    /// they appear (a project's `.npmrc`, say), where [`Self::deny_read`] takes
+    /// exact paths. Each is one path component: not empty, not `.` or `..`, and
+    /// without a separator, quote or NUL. Only a backend that can deny by name
+    /// (Seatbelt) admits a request carrying any; every other backend refuses
+    /// it rather than ignoring it. Added in contract 2.5; empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_read_names: Vec<String>,
+}
+
+/// The most restrictive request: no grants beyond the root, no network, no
+/// child processes, every constraint enforced and the process-isolation floor
+/// required. A host builds on it with `..NativeJailConfig::default()`, so a
+/// field added to the contract later does not break its code.
+impl Default for NativeJailConfig {
+    fn default() -> Self {
+        Self {
+            read_only: Vec::new(),
+            read_write: Vec::new(),
+            allow_net: false,
+            allow_subprocess: false,
+            enforcement: JailEnforcement::Enforced,
+            require_process_isolation: true,
+            deny_read: Vec::new(),
+            resources: None,
+            deny_read_names: Vec::new(),
+        }
+    }
 }
 
 /// Hard resource limits requested by the contract 2.1 native jail members.

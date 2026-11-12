@@ -277,3 +277,25 @@ fn rejects_a_hostname_with_no_resolver_answers()
     ));
     Ok(())
 }
+
+#[test]
+fn the_system_resolver_answers_localhost_with_loopback_only() -> std::io::Result<()> {
+    let addresses = SystemEgressResolver.resolve("localhost")?;
+
+    // Non-empty, and loopback only.
+    assert!(
+        addresses.iter().any(IpAddr::is_loopback) && addresses.iter().all(IpAddr::is_loopback),
+        "{addresses:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_system_resolver_reports_an_unresolvable_name() {
+    // `.invalid` is reserved (RFC 6761) and never resolves.
+    assert!(
+        SystemEgressResolver
+            .resolve("tinybox-egress.invalid")
+            .is_err()
+    );
+}
