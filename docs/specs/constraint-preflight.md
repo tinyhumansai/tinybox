@@ -10,13 +10,16 @@ coarse lifecycle capabilities do not imply resource enforcement.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Docker | Enforced | Enforced | Enforced | Enforced | Enforced | Unsupported | Unsupported |
 | Namespaces | Enforced | Enforced | Enforced with cgroups | Enforced with cgroups | Enforced with cgroups | Unsupported | Unsupported |
-| Native resource jail (contract 2.1) | Enforced | Enforced | Enforced | Enforced | Enforced | Unsupported | Unsupported |
+| Native resource jail (contract 2.1) | Enforced | Enforced | Enforced when delegated | Enforced when delegated | Enforced when delegated | Unsupported | Unsupported |
 | MicroVM | Enforced | Enforced | BestEffort | BestEffort | Unsupported | Unsupported | Unsupported |
 | Landlock | Enforced when full filesystem ABI available | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 | Seatbelt | BestEffort when present | BestEffort when present | Unsupported | Unsupported | Unsupported | Unsupported | BestEffort when present |
 | Noop / unavailable platform | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
-The native resource jail allows subprocesses always, and claims kernel
+The native resource jail claims CPU, memory or pids only when the user's
+systemd manager is reachable and was delegated that cgroup controller
+(`tinybox_linux::ScopeProbe`); a requested limit it cannot apply is refused.
+It allows subprocesses always, and claims kernel
 isolation only when its `bwrap` supports `--disable-userns`. The MicroVM has no
 network interface, so it refuses any egress.
 

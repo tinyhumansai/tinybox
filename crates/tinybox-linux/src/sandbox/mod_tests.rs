@@ -553,8 +553,9 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
         argv: vec!["/usr/bin/env".into()],
         env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
     };
-    let argv =
+    let launch =
         crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
+    let argv = launch.argv.clone();
     assert_eq!(argv.first().map(String::as_str), Some("/bin/bash"));
     assert!(argv.contains(&systemd_run.display().to_string()));
     assert!(systemd_run.is_absolute());
@@ -579,21 +580,27 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     );
     assert!(has(&argv, "--ro-bind"));
     assert!(has(&argv, grant.to_str().ok_or("grant path is not UTF-8")?));
-    assert!(has(&argv, "BASH_ENV"));
-    let systemd_end = argv
+    // The target environment is on no command line, the launcher's included:
+    // `/proc/<pid>/cmdline` is readable by every process of the user.
+    assert!(!argv.iter().any(|part| part.contains("BASH_ENV")));
+    assert!(!argv.iter().any(|part| part.contains("/tmp/target-init")));
+    assert!(!has(&argv, "--setenv"));
+    let args_at = argv
         .iter()
-        .position(|part| part == "--")
-        .ok_or("missing systemd delimiter")?;
-    assert!(
-        !argv[..systemd_end]
-            .iter()
-            .any(|part| part.contains("BASH_ENV"))
+        .position(|part| part == "--args")
+        .ok_or("bwrap reads the environment from a descriptor")?;
+    assert_eq!(argv.get(args_at + 1).map(String::as_str), Some("9"));
+    let file = launch.env_file().ok_or("an environment file")?;
+    assert!(has(&argv, file.to_str().ok_or("file path is not UTF-8")?));
+    assert_eq!(
+        std::fs::read(file)?,
+        b"--setenv\0BASH_ENV\0/tmp/target-init\0".to_vec()
     );
 
     // An older bwrap rejects the flag, so it is passed only when asked for.
     request.disable_userns = false;
     let argv =
-        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?.argv;
     assert!(!has(&argv, "--disable-userns"));
     Ok(())
 }

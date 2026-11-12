@@ -1710,7 +1710,12 @@ fn make_spec(request: &CreateRequest, host: &str) -> Result<BoxSpec> {
         cpu_millis: request.resources.cpu_millis,
         memory_bytes: request.resources.memory_bytes,
         pids_max: request.resources.pids_max,
-        disk_bytes: request.resources.disk_bytes,
+        // A box's resources are soft unless listed as hard requirements, and
+        // nothing applies a disk budget; keep the core default when unset.
+        disk_bytes: request
+            .resources
+            .disk_bytes
+            .unwrap_or(tinybox_core::Resources::DEFAULT.disk_bytes),
     };
     spec.ports
         .extend(request.ports.iter().map(|port| tinybox_core::PortMapping {

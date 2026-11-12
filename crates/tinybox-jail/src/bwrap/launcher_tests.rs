@@ -26,7 +26,16 @@ fn run(shell: &str, body: &str, items: &[&str]) -> io::Result<String> {
     let bwrap = stand_in(dir.path(), body)?;
     let argv: Vec<OsString> = items.iter().map(OsString::from).collect();
     let file = ArgsFile::create(&argv, &tmp())?;
-    let out = command(shell, &bwrap, &file, "prog".as_ref(), &["a".into()]).output()?;
+    let out = command(
+        None,
+        shell,
+        &bwrap,
+        &file,
+        0,
+        "prog".as_ref(),
+        &["a".into()],
+    )
+    .output()?;
     file.discard();
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -81,7 +90,7 @@ fn the_args_file_is_gone_once_the_launcher_has_started_bwrap() -> io::Result<()>
     let file = ArgsFile::create(&["x".into()], &tmp())?;
     let path = file.path().to_path_buf();
     assert!(
-        command(shell(), &bwrap, &file, "prog".as_ref(), &[])
+        command(None, shell(), &bwrap, &file, 0, "prog".as_ref(), &[])
             .status()?
             .success()
     );
@@ -94,7 +103,7 @@ fn the_launcher_runs_with_an_empty_environment() -> io::Result<()> {
     let dir = tempfile::tempdir()?;
     let bwrap = stand_in(dir.path(), "env")?;
     let file = ArgsFile::create(&[], &tmp())?;
-    let out = command(shell(), &bwrap, &file, "prog".as_ref(), &[]).output()?;
+    let out = command(None, shell(), &bwrap, &file, 0, "prog".as_ref(), &[]).output()?;
     file.discard();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -137,7 +146,7 @@ fn a_launcher_that_cannot_open_the_args_file_fails_closed_without_running_bwrap(
         dir: dir.path().join("gone"),
         file: dir.path().join("gone").join("args"),
     };
-    let status = command(shell(), &bwrap, &missing, "prog".as_ref(), &[]).status()?;
+    let status = command(None, shell(), &bwrap, &missing, 0, "prog".as_ref(), &[]).status()?;
     assert_eq!(status.code(), Some(126));
     assert!(!marker.exists(), "bwrap must not run without its arguments");
     Ok(())
@@ -193,5 +202,96 @@ fn an_args_directory_reached_through_a_symlink_into_a_grant_is_refused() -> io::
     let chosen = base_dir(&[granted.as_path()], Some(xdg), temp.path().into())?;
 
     assert_eq!(chosen, temp.path().canonicalize()?);
+    Ok(())
+}
+
+#[test]
+fn the_grant_descriptors_reach_bwrap_and_nothing_else_does() -> io::Result<()> {
+    let shell = shell();
+    if !shell.ends_with("bash") {
+        eprintln!("skipped: no bash");
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    let granted = tempfile::tempdir()?;
+    let leaked = tempfile::NamedTempFile::new()?;
+    // An inheritable descriptor the launcher must still close.
+    let stray = std::fs::File::open(leaked.path())?;
+    rustix::io::fcntl_setfd(&stray, rustix::io::FdFlags::empty())?;
+    let bwrap = stand_in(dir.path(), "ls -l /proc/self/fd")?;
+    let file = ArgsFile::create(&[], &tmp())?;
+    let mut launcher = command(None, shell, &bwrap, &file, 2, "prog".as_ref(), &[]);
+    let mappings = vec![
+        command_fds::FdMapping {
+            parent_fd: std::fs::File::open(granted.path())?.into(),
+            child_fd: 10,
+        },
+        command_fds::FdMapping {
+            parent_fd: std::fs::File::open(granted.path())?.into(),
+            child_fd: 11,
+        },
+    ];
+    command_fds::CommandFdExt::fd_mappings(&mut launcher, mappings).map_err(io::Error::other)?;
+
+    let out = launcher.output()?;
+    file.discard();
+    drop(stray);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let granted = granted.path().display().to_string();
+    for fd in ["10 ->", "11 ->"] {
+        assert!(
+            text.lines().any(|l| l.contains(fd) && l.contains(&granted)),
+            "{fd} {text}"
+        );
+    }
+    assert!(
+        !text.contains(&leaked.path().display().to_string()),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn entering_namespaces_puts_nsenter_in_front_by_descriptor() -> io::Result<()> {
+    let file = ArgsFile::create(&[], &tmp())?;
+    let enter = Enter {
+        nsenter: Path::new("/usr/bin/nsenter"),
+        user_fd: 14,
+        net_fd: 15,
+    };
+    let launcher = command(
+        Some(enter),
+        "/bin/bash",
+        Path::new("/usr/bin/bwrap"),
+        &file,
+        4,
+        "prog".as_ref(),
+        &[],
+    );
+    file.discard();
+    assert_eq!(launcher.get_program(), "/usr/bin/nsenter");
+    assert_eq!(
+        launcher.get_envs().count(),
+        0,
+        "no environment reaches nsenter"
+    );
+    let argv: Vec<String> = launcher
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        &argv[..6],
+        [
+            "--user=/proc/self/fd/14",
+            "--net=/proc/self/fd/15",
+            "--preserve-credentials",
+            "--",
+            "/bin/bash",
+            "-c",
+        ]
+    );
+    // The launcher keeps only the 4 descriptors from 10, so the namespace
+    // descriptors on 14 and 15 are closed before bwrap runs.
+    assert_eq!(argv.get(9).map(String::as_str), Some("4"));
     Ok(())
 }
