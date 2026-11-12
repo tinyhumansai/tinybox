@@ -3,7 +3,8 @@
 //! These need a working `bwrap` and a user manager delegated the `memory`
 //! controller. They skip (with a note) when either is missing, unless
 //! `TINYBOX_REQUIRE_BWRAP_LIMITS=1`, in which case a missing scope is a
-//! failure.
+//! failure. The shared-network refusal needs a host without `pasta`;
+//! `TINYBOX_REQUIRE_SHARED_NETWORK=1` makes its presence a failure too.
 #![cfg(target_os = "linux")]
 
 use std::io;
@@ -74,6 +75,11 @@ fn a_hard_limit_is_refused_for_a_jail_sharing_the_host_network() -> io::Result<(
     };
     if backend.networks_privately() {
         // With pasta the network is private, and the limit is allowed.
+        if std::env::var_os("TINYBOX_REQUIRE_SHARED_NETWORK").is_some_and(|v| v == "1") {
+            return Err(io::Error::other(
+                "TINYBOX_REQUIRE_SHARED_NETWORK=1 but pasta gives allow_net jails a private network",
+            ));
+        }
         eprintln!("skipped: pasta gives allow_net jails a private network here");
         return Ok(());
     }
