@@ -110,6 +110,27 @@ fn a_read_only_grant_nested_in_the_root_stays_read_only() -> io::Result<()> {
 }
 
 #[test]
+fn grants_are_bound_from_descriptors_whenever_bwrap_supports_it() -> io::Result<()> {
+    let Some(backend) = backend()? else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    let program = backend
+        .program()
+        .ok_or_else(|| io::Error::other("no program"))?;
+    let help = Command::new(program).arg("--help").output()?;
+    let listed = String::from_utf8_lossy(&help.stdout)
+        .split_whitespace()
+        .any(|word| word == "--bind-fd");
+    // openat2 is present on every kernel CI runs (5.6+), so the listing alone
+    // decides; the nested-grant tests above then ran through descriptors.
+    assert_eq!(backend.binds_by_descriptor(), listed);
+    eprintln!("[bwrap-real] binds_by_descriptor={listed}");
+    done("bind-fd", start);
+    Ok(())
+}
+
+#[test]
 fn a_read_only_grant_nested_in_a_read_write_grant_stays_read_only() -> io::Result<()> {
     let Some(backend) = backend()? else {
         return Ok(());
@@ -505,5 +526,81 @@ fn nested_user_namespaces_are_blocked_on_a_hardened_backend() -> io::Result<()> 
     let (ok, _) = sh(&backend, &jail(root.path()).deny_net(), "unshare -U true")?;
     assert!(!ok, "a nested user namespace could be created");
     done("disable-userns", start);
+    Ok(())
+}
+
+/// Runs `script` with the jail's `python3`, or `None` when the host has none.
+fn python(
+    backend: &tinybox_jail::BubblewrapBackend,
+    jail: &tinybox_jail::Jail,
+    script: &str,
+) -> io::Result<Option<String>> {
+    if !Path::new("/usr/bin/python3").exists() {
+        eprintln!("skipped: no /usr/bin/python3 to issue raw syscalls");
+        return Ok(None);
+    }
+    let (_, out) = sh(backend, jail, &format!("/usr/bin/python3 -c '{script}'"))?;
+    Ok(Some(out))
+}
+
+/// Raw syscalls from inside the jail: keyctl (denied), getpid (allowed) and a
+/// ptrace attach to the jail's own child (allowed on Linux 4.8+).
+const SYSCALL_PROBE: &str = r#"
+import ctypes, errno, os, platform, time
+libc = ctypes.CDLL(None, use_errno=True)
+keyctl, getpid = {"x86_64": (250, 39), "aarch64": (219, 172)}[platform.machine()]
+r = libc.syscall(keyctl, 0, -3, 0)
+print("keyctl", r, errno.errorcode.get(ctypes.get_errno(), "none"))
+print("getpid", libc.syscall(getpid) == os.getpid())
+pid = os.fork()
+if pid == 0:
+    time.sleep(5)
+    os._exit(0)
+r = libc.ptrace(16, pid, 0, 0)
+print("ptrace", r, errno.errorcode.get(ctypes.get_errno(), "none") if r else "ok")
+os.kill(pid, 9)
+os.waitpid(pid, 0)
+"#;
+
+#[test]
+fn a_denied_syscall_fails_with_eperm_and_allowed_ones_still_work() -> io::Result<()> {
+    let Some(backend) = backend()? else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    assert!(backend.installs_seccomp());
+    let root = tempfile::tempdir()?;
+    let Some(out) = python(&backend, &jail(root.path()), SYSCALL_PROBE)? else {
+        return Ok(());
+    };
+
+    assert!(
+        out.contains("keyctl -1 EPERM"),
+        "keyctl was not denied: {out}"
+    );
+    assert!(
+        out.contains("getpid True"),
+        "an allowed syscall failed: {out}"
+    );
+    done("seccomp", start);
+    Ok(())
+}
+
+#[test]
+fn a_jailed_process_can_trace_its_own_child() -> io::Result<()> {
+    let Some(backend) = backend()? else {
+        return Ok(());
+    };
+    let start = Instant::now();
+    let root = tempfile::tempdir()?;
+    let Some(out) = python(&backend, &jail(root.path()), SYSCALL_PROBE)? else {
+        return Ok(());
+    };
+
+    assert!(
+        out.contains("ptrace 0 ok"),
+        "ptrace of a jail child failed: {out}"
+    );
+    done("seccomp-ptrace", start);
     Ok(())
 }
