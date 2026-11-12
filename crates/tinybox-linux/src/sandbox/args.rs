@@ -398,6 +398,11 @@ fn wrap_scope_command(mut argv: Vec<String>) -> Vec<String> {
     argv
 }
 
+/// After the workload exits, copy the scope's counters into the report file the
+/// host prepared: `cpu.stat` as it is, then `memory.events` and `pids.events`
+/// with each key prefixed by its controller (`memory.oom_kill 1`,
+/// `pids.max 3`), so a key cannot collide across files. A file that cannot be
+/// read is left out, and the host then claims nothing for it.
 const CPU_EVENT_SCOPE_WRAPPER: &str = r#"
 unit=$1
 shift
@@ -406,10 +411,20 @@ status=$?
 report=${TINYBOX_INTERNAL_CPU_EVENT_FILE:-}
 if [ -n "$report" ]; then
     control_group=$(/usr/bin/systemctl --user show --property=ControlGroup --value "$unit" 2>/dev/null)
-    stats=
-    case $control_group in /*) stats=/sys/fs/cgroup${control_group}/cpu.stat;; esac
-    if [ -r "$stats" ]; then
-        { stat=$(<"$stats") && printf '%s\n' "$stat" > "$report"; } 2>/dev/null || :
+    dir=
+    case $control_group in /*) dir=/sys/fs/cgroup${control_group};; esac
+    if [ -n "$dir" ]; then
+        {
+            out=
+            if [ -r "$dir/cpu.stat" ]; then out=$(<"$dir/cpu.stat"); fi
+            for controller in memory pids; do
+                [ -r "$dir/$controller.events" ] || continue
+                while read -r key value; do
+                    out="$out"$'\n'"$controller.$key $value"
+                done < "$dir/$controller.events"
+            done
+            printf '%s\n' "$out" > "$report"
+        } 2>/dev/null || :
     fi
 fi
 exit "$status"
