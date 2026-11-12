@@ -410,3 +410,20 @@ fn an_owned_child_ended_by_a_signal_reports_the_signal() -> std::io::Result<()> 
     assert_eq!(status.code(), None);
     Ok(())
 }
+
+#[test]
+fn a_backend_that_cannot_deny_by_name_refuses_a_name_denial() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut jail = Jail::new(root.path(), "names");
+    jail.deny_read_names = vec![".npmrc".into()];
+    let command = std::process::Command::new("/bin/true");
+
+    let error =
+        crate::spawn_owned_captured_with(&crate::NoopBackend, &jail, command).expect_err("refused");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(
+        error.to_string().contains("cannot deny paths by name"),
+        "{error}"
+    );
+}

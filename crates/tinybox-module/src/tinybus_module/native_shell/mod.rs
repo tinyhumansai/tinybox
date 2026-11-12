@@ -112,14 +112,14 @@ impl ShellContext {
             {
                 return Err(invalid());
             }
-            ShellHost::Jailed(
+            ShellHost::Jailed(Box::new(
                 tinybox_host::JailLocalHost::with_backend(
                     jail,
                     backend,
                     tinybox_bus::MAX_OUTPUT_BYTES,
                 )
                 .map_err(|_| invalid())?,
-            )
+            ))
         } else {
             ShellHost::Local(tinybox_host::LimitedLocalHost::new(
                 tinybox_bus::MAX_OUTPUT_BYTES,
