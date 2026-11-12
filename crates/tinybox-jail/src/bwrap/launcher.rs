@@ -161,10 +161,23 @@ impl ArgsFile {
     }
 }
 
+/// Namespaces the launcher joins before it runs: `nsenter` enters the user
+/// and network namespace open on these child descriptors (by descriptor, not
+/// by pid, so a reused pid cannot redirect it), and keeps every other
+/// descriptor. The script then closes these two, as it closes everything
+/// outside its keep list.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Enter<'a> {
+    pub nsenter: &'a Path,
+    pub user_fd: i32,
+    pub net_fd: i32,
+}
+
 /// The launcher command: an empty environment, the script, `bwrap`, the file,
 /// how many grant descriptors to keep, then the command to run inside the
-/// sandbox and its arguments.
+/// sandbox and its arguments. With `enter`, the shell runs under `nsenter`.
 pub(super) fn command(
+    enter: Option<Enter<'_>>,
     shell: &str,
     bwrap: &Path,
     args: &ArgsFile,
@@ -172,7 +185,17 @@ pub(super) fn command(
     program: &std::ffi::OsStr,
     program_args: &[OsString],
 ) -> Command {
-    let mut launcher = Command::new(shell);
+    let mut launcher = match enter {
+        Some(enter) => {
+            let mut nsenter = Command::new(enter.nsenter);
+            nsenter
+                .arg(format!("--user=/proc/self/fd/{}", enter.user_fd))
+                .arg(format!("--net=/proc/self/fd/{}", enter.net_fd))
+                .args(["--preserve-credentials", "--", shell]);
+            nsenter
+        }
+        None => Command::new(shell),
+    };
     launcher
         .env_clear()
         .arg("-c")

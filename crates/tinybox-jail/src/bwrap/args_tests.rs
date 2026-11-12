@@ -5,6 +5,7 @@ use super::*;
 const OPTS: Options = Options {
     disable_userns: true,
     bind_fds: false,
+    private_resolv: false,
 };
 
 fn build(jail: &Jail) -> io::Result<Vec<String>> {
@@ -57,6 +58,7 @@ fn disable_userns_is_omitted_when_the_probe_found_no_support() -> io::Result<()>
         Options {
             disable_userns: false,
             bind_fds: false,
+            private_resolv: false,
         },
     )?;
     assert!(!argv.iter().any(|a| a == "--disable-userns"));
@@ -354,6 +356,7 @@ fn a_denial_through_a_baseline_symlink_also_covers_the_link_target() -> io::Resu
 const FD_OPTS: Options = Options {
     disable_userns: true,
     bind_fds: true,
+    private_resolv: false,
 };
 
 fn strings(argv: &[OsString]) -> Vec<String> {
