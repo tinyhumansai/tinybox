@@ -340,11 +340,14 @@ impl JailBackend for NativeResourceBackend {
     }
 
     fn isolation(&self) -> tinybox_core::IsolationLevel {
-        tinybox_core::IsolationLevel::Kernel
-    }
-
-    fn is_suitable_for_untrusted_code(&self) -> bool {
-        true
+        // A 2.1 request never shares the host network, so this is the bwrap
+        // backend's no-network level: Kernel only when the child is barred
+        // from new user namespaces, else none at all.
+        if bwrap_disables_userns() {
+            tinybox_core::IsolationLevel::Kernel
+        } else {
+            tinybox_core::IsolationLevel::None
+        }
     }
 
     fn carves_denials(&self) -> bool {
@@ -356,7 +359,8 @@ impl JailBackend for NativeResourceBackend {
         ConstraintSupport::NONE
             .with(Constraint::Filesystem, Enforcement::Enforced)
             .with(Constraint::Network, Enforcement::Enforced)
-            .with(Constraint::Subprocess, Enforcement::Enforced)
+            // `prepare_with_resources` refuses a request that denies them.
+            .with(Constraint::Subprocess, Enforcement::Unsupported)
             .with(Constraint::Cpu, Enforcement::Enforced)
             .with(Constraint::Memory, Enforcement::Enforced)
             .with(Constraint::Pids, Enforcement::Enforced)
@@ -436,6 +440,7 @@ fn prepare_with_resources(
         deny_read: jail.deny_read.clone(),
         allow_net: jail.allow_net,
         allow_subprocess: jail.allow_subprocess,
+        disable_userns: bwrap_disables_userns(),
         cpu_millis: resources.cpu_millis,
         memory_bytes: resources.memory_bytes,
         pids_max: resources.pids_max,
@@ -487,6 +492,16 @@ fn native_launchers_available() -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn native_launchers_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_disables_userns() -> bool {
+    tinybox_jail::BubblewrapBackend::new().disables_userns()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bwrap_disables_userns() -> bool {
     false
 }
 
