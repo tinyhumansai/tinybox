@@ -267,7 +267,22 @@ fn resource_backend_consumes_one_validated_launcher_plan()
     use std::process::Command;
 
     let backend = super::NativeResourceBackend::new();
-    assert_eq!(backend.isolation(), tinybox_core::IsolationLevel::Kernel);
+    // Kernel isolation is claimed only for a bwrap that bars new user
+    // namespaces, and a jail that denies subprocesses is never claimed.
+    let disables_userns = tinybox_jail::BubblewrapBackend::new().disables_userns();
+    let expected = if disables_userns {
+        tinybox_core::IsolationLevel::Kernel
+    } else {
+        tinybox_core::IsolationLevel::None
+    };
+    assert_eq!(backend.isolation(), expected);
+    assert_eq!(backend.is_suitable_for_untrusted_code(), disables_userns);
+    assert_eq!(
+        backend
+            .constraint_support()
+            .enforcement(tinybox_core::Constraint::Subprocess),
+        tinybox_core::Enforcement::Unsupported
+    );
     let jail = tinybox_jail::Jail::new(std::env::temp_dir(), "resource-plan-test");
     assert!(backend.spawn(&jail, Command::new("true")).is_err());
 

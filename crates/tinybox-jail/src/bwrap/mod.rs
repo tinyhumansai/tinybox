@@ -166,6 +166,13 @@ impl BubblewrapBackend {
         self.verified.as_ref().map(|v| v.program.as_path())
     }
 
+    /// Whether this `bwrap` passed its probe with `--disable-userns`
+    /// (bubblewrap 0.8+), so a child can be barred from new user namespaces.
+    #[must_use]
+    pub fn disables_userns(&self) -> bool {
+        self.verified.as_ref().is_some_and(|v| v.disable_userns)
+    }
+
     /// Test constructor that skips the probe, for fake launchers.
     #[cfg(test)]
     fn unverified(program: impl Into<PathBuf>, disable_userns: bool) -> Self {
