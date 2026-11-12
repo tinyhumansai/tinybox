@@ -1779,3 +1779,145 @@ fn a_name_that_is_not_one_plain_component_is_an_invalid_path()
     }
     Ok(())
 }
+
+/// Every host process command line that holds `needle`, NULs shown as spaces.
+#[cfg(target_os = "linux")]
+fn command_lines_containing(needle: &str) -> std::io::Result<Vec<String>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        if let Ok(cmdline) = std::fs::read(path.join("cmdline"))
+            && cmdline
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        {
+            found.push(String::from_utf8_lossy(&cmdline).replace('\0', " "));
+        }
+    }
+    Ok(found)
+}
+
+/// The scan the live test relies on does find a value on a command line.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_command_line_scan_finds_a_running_process_argument()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let marker = format!("scan-marker-{}", std::process::id());
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 30", &marker])
+        .spawn()?;
+    let found = command_lines_containing(&marker);
+    child.kill()?;
+    child.wait()?;
+    assert!(found?.iter().any(|line| line.contains(&marker)));
+    Ok(())
+}
+
+/// Live: while a 2.1 jailed command runs, its environment values are on no
+/// process's command line on the host, the launcher, `systemd-run` and `bwrap`
+/// included, yet the command itself sees them.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resource_jail_keeps_the_target_environment_off_every_command_line()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+
+    if !native_resource_runtime_available() {
+        eprintln!("skipped: rootless systemd scope and bubblewrap namespaces are unavailable");
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let secret = format!(
+        "jail-secret-{}",
+        root.path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("temp dir name")?
+    );
+    let mut jail = config();
+    jail.allow_subprocess = true;
+    let request = tinybox_bus::NativeJailRequest {
+        jail,
+        resources: Some(tinybox_bus::NativeJailResourceRequest {
+            cpu_millis: Some(1000),
+            memory_bytes: None,
+            pids_max: Some(64),
+            disk_bytes: None,
+        }),
+    };
+    let mut command = tinybox_core::ExecRequest::new([
+        "/bin/sh",
+        "-c",
+        "printf 'READY\\n'; read -r _; printf '%s' \"$JAIL_SECRET\"",
+    ]);
+    command.cwd = Some(workspace.clone());
+    command.env.insert("JAIL_SECRET".into(), secret.clone());
+    let backend = resource_backend();
+    let jail = prepare_with_resources(&workspace, &request, &mut command, backend.as_ref())?;
+    assert!(
+        !command.argv.iter().any(|part| part.contains(&secret)),
+        "the launcher's own argv carries the value"
+    );
+    let mut child_command = Command::new(command.argv.first().ok_or("missing launcher")?);
+    child_command
+        .args(command.argv.iter().skip(1))
+        .env_clear()
+        .envs(&command.env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = tinybox_jail::spawn_captured_with(backend.as_ref(), &jail, child_command)?;
+    let mut ready = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.as_mut().ok_or("missing stdout pipe")?),
+        &mut ready,
+    )?;
+    if ready != "READY\n" {
+        let output = child.wait_with_output()?;
+        return Err(format!(
+            "the jailed command did not start: status {:?}, stderr {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    // Every process on the host while the jail runs: launcher, systemd-run,
+    // the scope wrapper, bwrap and the target.
+    let leaked = command_lines_containing(&secret)?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or("missing stdin pipe")?
+        .write_all(b"go\n")?;
+    let output = child.wait_with_output()?;
+    assert!(
+        leaked.is_empty(),
+        "environment value on a command line: {leaked:?}"
+    );
+    assert!(
+        output.status.success(),
+        "jailed command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The command still received the value, from the private file.
+    assert!(
+        String::from_utf8_lossy(&output.stdout).ends_with(&secret),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
+}
