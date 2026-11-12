@@ -323,3 +323,35 @@ fn a_child_started_without_a_console_window_still_runs() {
     apply_window_flags(&mut command, true);
     assert!(command.status().expect("child starts").success());
 }
+
+#[test]
+fn configured_toolchain_homes_pass_through_and_a_blank_one_counts_as_unset() -> Result<()> {
+    let host: std::collections::BTreeMap<&str, &str> = [
+        ("PATH", "/usr/bin"),
+        ("CARGO_HOME", "/opt/rust/cargo"),
+        ("RUSTUP_HOME", ""),
+    ]
+    .into_iter()
+    .collect();
+    let lookup = |name: &str| host.get(name).map(ToString::to_string);
+
+    let environment = host_environment(&[], lookup)?;
+
+    assert_eq!(
+        environment.get("CARGO_HOME").map(String::as_str),
+        Some("/opt/rust/cargo")
+    );
+    assert!(!environment.contains_key("RUSTUP_HOME"));
+    assert_eq!(
+        environment.get("PATH").map(String::as_str),
+        Some("/usr/bin")
+    );
+    Ok(())
+}
+
+#[test]
+fn a_blank_fixed_host_variable_still_refuses_the_request() {
+    let lookup = |name: &str| (name == "PATH").then(String::new);
+
+    assert!(host_environment(&[], lookup).is_err());
+}
