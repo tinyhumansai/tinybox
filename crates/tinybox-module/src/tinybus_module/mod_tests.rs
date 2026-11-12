@@ -51,9 +51,11 @@ async fn serve_test_storage(bus: &MemoryBus) -> tinybus::Result<ServedTestStorag
 async fn jail_status_reports_the_detected_backend_without_starting_a_process() -> tinybus::Result<()>
 {
     let status = BoxService::default().jail_status().await?;
-    let backend = tinybox_jail::default_backend();
+    // The owned-process backend every jailed path uses: AppContainer on
+    // Windows, where the legacy selection is "unsupported".
+    let backend = tinybox_jail::default_owned_backend();
     assert_eq!(status.backend, backend.name());
-    assert_eq!(status.available, backend.is_available());
+    assert_eq!(status.available, backend.is_owned_available());
     assert_eq!(status.isolation, backend.isolation().to_string());
     assert_eq!(
         status.suitable_for_untrusted_code,
