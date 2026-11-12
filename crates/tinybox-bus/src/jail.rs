@@ -32,8 +32,10 @@ pub struct NativeJailConfig {
     /// provider that reads allow-by-default). A path that does not exist yet is
     /// kept and resolved again just before spawn, except that the bubblewrap
     /// backend refuses a missing denial inside one of the jail's mounts: it
-    /// would have to create the path to mask it. Added in contract 1.20; empty
-    /// by default.
+    /// would have to create the path to mask it. A denial inside a grant
+    /// covers the path as it exists when the jail starts; a host that replaces
+    /// it during the run exposes the new file (see the bubblewrap backend's
+    /// known gaps). Added in contract 1.20; empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_read: Vec<String>,
     /// Optional hard resource limits; omitted for compatibility with older requests.

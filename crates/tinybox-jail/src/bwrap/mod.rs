@@ -93,9 +93,18 @@
 //!   `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`, and bound with
 //!   `--bind-fd`/`--ro-bind-fd`, so what was checked is what is mounted.
 //!   [`BubblewrapBackend::binds_by_descriptor`] reports which is in effect.
-//! - `deny_read` paths must exist when the jail starts: a path created later
-//!   under a mounted grant is **not** protected. One nested more than a level
-//!   inside a writable grant is refused.
+//! - `deny_read` paths must exist when the jail starts. A missing one inside a
+//!   mount is refused, since a path created later would not be covered; one
+//!   nested more than a level inside a writable grant is refused too.
+//! - **A mask lasts only as long as the path it covers.** A denial is a mount
+//!   over that path's directory entry, and the kernel drops a mount from other
+//!   mount namespaces when its entry is unlinked or renamed over. So if a
+//!   host process replaces a denied path inside a grant while the jail runs
+//!   (an atomic rename, as credential helpers and editors write), the jail
+//!   sees the new file. Shown on bubblewrap 0.9.0 and Linux 7.0 for a file
+//!   and a directory. bwrap cannot prevent it. A host should deny a credential
+//!   store outside every grant (it is then never mounted at all), or deny its
+//!   parent directory, rather than mask a file it rewrites.
 //! - Landlock is not layered inside: the kernel denies `mount` and
 //!   `pivot_root` to a Landlock-restricted thread, which would break `bwrap`'s
 //!   own setup.
