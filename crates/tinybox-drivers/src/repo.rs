@@ -109,7 +109,9 @@ impl<T: Serialize + DeserializeOwned + Send + Sync> Repo<T> {
     where
         F: FnMut(Option<T>) -> Result<Option<T>> + Send,
     {
-        for attempt in 0..self.attempts.max(1) {
+        let attempts = self.attempts.max(1);
+        let mut attempt = 0;
+        loop {
             let (precondition, current) = match self.docs.get(&self.collection, id).await? {
                 Some(found) => {
                     let found = decode(found)?;
@@ -122,10 +124,8 @@ impl<T: Serialize + DeserializeOwned + Send + Sync> Repo<T> {
             };
             match self.write(id, &next, precondition).await {
                 Ok(version) => return Ok(Some((next, version))),
-                Err(error) if error.kind() == ErrorKind::Conflict => {
-                    if attempt + 1 == self.attempts.max(1) {
-                        return Err(error);
-                    }
+                // The last attempt's conflict is returned as it is.
+                Err(error) if error.kind() == ErrorKind::Conflict && attempt + 1 < attempts => {
                     let shift = attempt.min(10);
                     let cap = self.backoff.saturating_mul(1_u32 << shift);
                     let nanos = u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX);
@@ -137,13 +137,11 @@ impl<T: Serialize + DeserializeOwned + Send + Sync> Repo<T> {
                         ))
                         .await;
                     }
+                    attempt += 1;
                 }
                 Err(error) => return Err(error),
             }
         }
-        Err(StorageError::conflict(
-            "repository update retry budget exhausted",
-        ))
     }
 
     async fn write(&self, id: &str, value: &T, precondition: Precondition) -> Result<Version> {
@@ -165,3 +163,7 @@ fn decode<T: DeserializeOwned>(found: Versioned<serde_json::Value>) -> Result<Ve
         meta: found.meta,
     })
 }
+
+#[cfg(test)]
+#[path = "repo_tests.rs"]
+mod tests;
