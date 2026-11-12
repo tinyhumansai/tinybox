@@ -44,6 +44,22 @@ jobs:
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
           TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS=1 cargo test -j1 -p tinybox-module native_
           TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS=1 cargo test -j1 -p tinybox-module resource_aware_bus_exec_cancellation_reports_events_and_reaps_descendants
+      # The bubblewrap backend's limits ride on the same user manager. A skip
+      # is a failure here; the second run removes pasta so the shared-network
+      # refusal is the path tested.
+      - name: Prove bubblewrap jails hold their resource limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/${uid}"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          export TINYBOX_REQUIRE_BWRAP=1 TINYBOX_REQUIRE_BWRAP_LIMITS=1
+          cargo test --locked -p tinybox-jail --test bwrap_resource_limits -- --nocapture
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove --yes passt; fi
+          TINYBOX_REQUIRE_SHARED_NETWORK=1 cargo test --locked -p tinybox-jail \
+            --test bwrap_resource_limits a_hard_limit_is_refused_for_a_jail_sharing_the_host_network \
+            -- --nocapture
   # The real-bubblewrap suites. They skip when bwrap cannot run (Ubuntu 24.04
   # blocks unprivileged user namespaces by default), so this job makes bwrap
   # usable and requires it: a skip here is a failure, not a pass.

@@ -50,7 +50,7 @@
 //! [`JailBackend::is_suitable_for_untrusted_jail`]; the per-backend
 //! `is_suitable_for_untrusted_code` is false by construction. `Kernel` here
 //! means separate pid, mount, user, ipc and uts (and net) namespaces plus that
-//! deny list: it does not imply resource limits.
+//! deny list: it does not imply resource limits (see "Resource limits").
 //!
 //! # Private network
 //!
@@ -79,10 +79,17 @@
 //! `bwrap` without `--add-seccomp-fd`, or an architecture other than `x86_64`
 //! and `aarch64`, leaves the backend unavailable rather than unfiltered.
 //!
+//! # Resource limits
+//!
+//! A jail's `resources` are applied through a rootless systemd scope around
+//! the launcher, for each controller the user manager was delegated, and only
+//! those are claimed in [`JailBackend::constraint_support`] (see `scope.rs`).
+//! A hard limit is refused for a jail that could reach the user manager and
+//! leave its scope: one sharing the host network, or one granted `/run` or
+//! `/sys`. Disk is never enforced.
+//!
 //! # Known gaps (not closed in this backend)
 //!
-//! - No CPU, memory or pid limits (`tinybox-linux` offers them through a
-//!   `systemd-run` scope; not wired here).
 //! - Check-then-use gap on nested grants, **only where `bwrap` lacks
 //!   `--bind-fd` or the kernel lacks `openat2` (before Linux 5.6)**. Then the
 //!   symlink check on a grant inside a writable directory
@@ -135,6 +142,7 @@ use crate::jail::{Jail, JailBackend};
 mod args;
 mod launcher;
 mod pasta;
+mod scope;
 mod seccomp;
 
 /// Backend name reported by [`BubblewrapBackend`].
@@ -159,6 +167,9 @@ struct Verified {
     /// A working `pasta` and `nsenter`: an `allow_net` jail then gets a
     /// private network instead of the host's (see `pasta`).
     pasta: Option<pasta::Pasta>,
+    /// A trusted `systemd-run` whose scope holds CPU, memory and pid limits
+    /// for the controllers the user manager was delegated (see `scope`).
+    scope: Option<scope::ResourceScope>,
 }
 
 /// Bubblewrap (`bwrap`) namespace jail backend.
@@ -258,6 +269,7 @@ impl BubblewrapBackend {
                 bind_fds: false,
                 seccomp: Vec::new(),
                 pasta: None,
+                scope: None,
             }),
         }
     }
@@ -293,6 +305,7 @@ fn verify(program: &Path) -> Option<Verified> {
                 bind_fds: supports_fd_binds(program),
                 seccomp,
                 pasta: private_network(program),
+                scope: scope::ResourceScope::detect(),
             });
         }
     }
@@ -461,6 +474,7 @@ fn prepare_command(
     jail: &Jail,
     cmd: &Command,
     network: Option<&pasta::Network>,
+    resource_scope: Option<&[String]>,
 ) -> io::Result<Prepared> {
     let args::JailArgs { mut argv, mut fds } = args::jail_args_with_fds(
         jail,
@@ -527,6 +541,11 @@ fn prepare_command(
         cmd.get_program(),
         &program_args,
     );
+    // Before the descriptors are mapped: they are mapped onto the outermost
+    // process, which `systemd-run` replaces with the launcher in place.
+    if let Some(scoped) = resource_scope.and_then(|prefix| launcher::in_scope(prefix, &launcher)) {
+        launcher = scoped;
+    }
     // Mapped onto 10, 11, … in the child only, after fork: never inheritable
     // in this process, where another thread could spawn concurrently.
     let mappings = fds
@@ -582,10 +601,13 @@ impl JailBackend for BubblewrapBackend {
     }
 
     fn constraint_support(&self) -> ConstraintSupport {
-        if self.is_available() {
-            ConstraintSupport::NONE
-                .with(Constraint::Filesystem, Enforcement::Enforced)
-                .with(Constraint::Network, Enforcement::Enforced)
+        if let Some(verified) = &self.verified {
+            scope::with_limits(
+                ConstraintSupport::NONE
+                    .with(Constraint::Filesystem, Enforcement::Enforced)
+                    .with(Constraint::Network, Enforcement::Enforced),
+                verified.scope.as_ref(),
+            )
         } else {
             ConstraintSupport::NONE
         }
@@ -632,7 +654,13 @@ impl BubblewrapBackend {
         self.constraint_support()
             .require(self.name(), &jail.constraints())
             .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error))?;
-        log::debug!("[cwd_jail:bwrap] spawning label={}", jail.label);
+        let resource_scope =
+            scope::prefix_for(jail, verified.scope.as_ref(), self.networks_privately())?;
+        log::debug!(
+            "[cwd_jail:bwrap] spawning label={} limited={}",
+            jail.label,
+            resource_scope.is_some()
+        );
         // An `allow_net` jail gets a private network when `pasta` works;
         // dropping `network` on any error below kills `pasta` again.
         let network = match &verified.pasta {
@@ -642,7 +670,13 @@ impl BubblewrapBackend {
         let Prepared {
             launcher: mut wrapper,
             args,
-        } = prepare_command(verified, jail, cmd, network.as_ref())?;
+        } = prepare_command(
+            verified,
+            jail,
+            cmd,
+            network.as_ref(),
+            resource_scope.as_deref(),
+        )?;
         if captured {
             wrapper
                 .stdin(Stdio::piped())

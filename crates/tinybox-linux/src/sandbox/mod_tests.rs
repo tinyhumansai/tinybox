@@ -466,6 +466,58 @@ fn systemd_scope_environment_flag_is_added_only_when_supported() {
 }
 
 #[test]
+fn a_resource_scope_sets_only_the_limits_asked_for_and_ends_at_its_separator() {
+    let systemd_run = Path::new("/usr/bin/systemd-run");
+    let only_pids = args::scope_prefix(
+        systemd_run,
+        "bwrap",
+        false,
+        args::ScopeLimits {
+            pids_max: Some(16),
+            ..args::ScopeLimits::default()
+        },
+    );
+    assert_eq!(
+        only_pids.first().map(String::as_str),
+        Some("/usr/bin/systemd-run")
+    );
+    // The unit is `tinybox-bwrap-<pid>-<n>.scope`, a systemd name, not a path.
+    let unit_name = |arg: &String| {
+        arg.strip_prefix("--unit=tinybox-bwrap-")
+            .and_then(|rest| rest.strip_suffix(".scope"))
+            .is_some()
+    };
+    assert!(only_pids.iter().any(unit_name));
+    assert!(has(&only_pids, "--property=TasksMax=16"));
+    assert!(!only_pids.iter().any(|arg| arg.contains("MemoryMax")));
+    assert!(!only_pids.iter().any(|arg| arg.contains("CPUQuota")));
+    assert_eq!(only_pids.last().map(String::as_str), Some("--"));
+
+    let all = args::scope_prefix(
+        systemd_run,
+        "bwrap",
+        true,
+        args::ScopeLimits {
+            cpu_millis: Some(1),
+            memory_bytes: Some(64),
+            pids_max: Some(8),
+        },
+    );
+    for property in [
+        "--property=MemoryMax=64",
+        "--property=MemorySwapMax=0",
+        "--property=CPUQuota=0.1%",
+        "--property=TasksMax=8",
+        "--expand-environment=no",
+    ] {
+        assert!(has(&all, property), "{property} in {all:?}");
+    }
+    // Two scopes started by one process never share a unit name.
+    let unit = |argv: &[String]| argv.iter().find(|arg| arg.starts_with("--unit=")).cloned();
+    assert_ne!(unit(&only_pids), unit(&all));
+}
+
+#[test]
 fn systemd_environment_flag_probe_distinguishes_legacy_and_fails_closed() {
     assert_eq!(
         args::parse_expand_environment_help(true, b"--help", b""),

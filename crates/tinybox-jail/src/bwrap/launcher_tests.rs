@@ -295,3 +295,44 @@ fn entering_namespaces_puts_nsenter_in_front_by_descriptor() -> io::Result<()> {
     assert_eq!(argv.get(9).map(String::as_str), Some("4"));
     Ok(())
 }
+
+#[test]
+fn a_scoped_launcher_runs_under_the_prefix_with_only_the_manager_variables() -> io::Result<()> {
+    let file = ArgsFile::create(&[], &tmp())?;
+    let launcher = command(
+        None,
+        "/bin/bash",
+        Path::new("/usr/bin/bwrap"),
+        &file,
+        0,
+        "prog".as_ref(),
+        &["arg".into()],
+    );
+    file.discard();
+    let prefix: Vec<String> = ["/usr/bin/systemd-run", "--user", "--scope", "--"]
+        .map(String::from)
+        .into();
+
+    let scoped = in_scope(&prefix, &launcher).ok_or_else(|| io::Error::other("no command"))?;
+
+    assert_eq!(scoped.get_program(), "/usr/bin/systemd-run");
+    let args: Vec<&std::ffi::OsStr> = scoped.get_args().collect();
+    let inner: Vec<&std::ffi::OsStr> = std::iter::once(launcher.get_program())
+        .chain(launcher.get_args())
+        .collect();
+    assert_eq!(
+        args.get(..3),
+        Some(&["--user", "--scope", "--"].map(std::ffi::OsStr::new)[..])
+    );
+    assert_eq!(args.get(3..), Some(&inner[..]));
+    for (key, _) in scoped.get_envs() {
+        assert!(
+            SCOPE_ENVIRONMENT
+                .iter()
+                .any(|allowed| key == std::ffi::OsStr::new(allowed)),
+            "{key:?}"
+        );
+    }
+    assert!(in_scope(&[], &launcher).is_none());
+    Ok(())
+}
