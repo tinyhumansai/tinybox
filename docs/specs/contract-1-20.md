@@ -18,7 +18,10 @@ at least 20, which `tinybox_bus::is_compatible` already enforces.
 
 - Validated like grants (absolute, no `..`, no NUL, bounded length, counted
   against `MAX_NATIVE_JAIL_GRANTS`). Missing paths are retained so a store
-  created after preflight remains denied. Existing aliases and missing paths
+  created after preflight remains denied. (Since #107, the bubblewrap backend
+  instead refuses a missing denial that falls inside one of the jail's bind
+  mounts, because masking it would create it on the host.) Existing aliases and
+  missing paths
   beneath existing symlinks resolve to canonical targets; denials are resolved
   and checked again immediately before spawn.
 - Refused (`INVALID_FILE_PATH`) when a denial is the root, an ancestor of it, or
