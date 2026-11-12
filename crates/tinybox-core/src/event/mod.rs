@@ -2,11 +2,14 @@
 //!
 //! A sandbox reports what happened to a workload; it never decides what is
 //! allowed. A caller (the host, and through it an audit log) subscribes with an
-//! [`EventSink`] and records what it is told. Denial attribution is only as
-//! precise as the OS allows, so a [`SandboxEvent::Denied`] carries a
-//! [`DenialKind`] and an optional target, and a backend that cannot attribute
-//! denials emits none and declares that in its capabilities rather than
-//! guessing.
+//! [`EventSink`] and records what it is told.
+//!
+//! [`SandboxEvent::Denied`] is reserved: no backend emits it today, because
+//! none can attribute a denial without privilege (a refused syscall, path or
+//! packet fails inside the workload, out of tinybox's sight). A backend that
+//! could would report a [`DenialKind`] and an optional target, never a guess.
+//! The absence of `Denied` is not the absence of denials. See
+//! `docs/specs/contract-2-2.md`.
 
 use std::sync::Mutex;
 
@@ -48,7 +51,8 @@ pub enum LimitKind {
 pub enum SandboxEvent {
     /// The workload started inside the sandbox.
     Started,
-    /// The sandbox refused an access.
+    /// The sandbox refused an access. Reserved: no backend emits it yet (see
+    /// the module docs).
     Denied {
         /// What was refused.
         kind: DenialKind,

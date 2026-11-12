@@ -96,3 +96,10 @@ jobs:
           cargo test --locked -p tinybox-docker --test live_docker
           live_network_policy_controls_host_listener_connectivity --
           --nocapture --test-threads=1
+      - name: Prove the module detects allowlist enforcement on this host
+        env:
+          TINYBOX_LIVE_DOCKER: "1"
+        run: >-
+          cargo test --locked -p tinybox-module --lib
+          live_detection_installs_the_controller_on_a_capable_host --
+          --nocapture

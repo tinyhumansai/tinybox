@@ -63,7 +63,8 @@ pub enum LimitKind {
 pub enum SandboxEvent {
     /// The workload started.
     Started,
-    /// The sandbox refused an access.
+    /// The sandbox refused an access. Reserved: the module never emits it, as
+    /// no backend can attribute a denial without privilege (contract 2.2).
     Denied {
         /// What was refused.
         kind: DenialKind,

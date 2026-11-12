@@ -249,58 +249,93 @@ impl Jail {
 /// spells it (the path itself, its canonical form, or any alias that resolves
 /// to it).
 ///
+/// The grant is resolved one component at a time, following every link, and
+/// refused when any link on the way lives inside a writable ancestor. That also
+/// catches a host alias that points *into* a writable root
+/// (`/aliases/v -> <root>/vendor`, with `vendor` replaced by a planted link),
+/// which no prefix of the grant's own spelling would reveal.
+///
 /// # Errors
 /// `InvalidInput` naming the symlink.
 pub fn reject_symlinked_grants(writable: &[&Path], grants: &[&Path]) -> std::io::Result<()> {
-    for ancestor in writable {
-        let canonical = ancestor.canonicalize().ok();
-        for grant in grants {
-            if grant == ancestor {
-                continue;
-            }
-            // The shortest prefix of the grant that names the ancestor.
-            let mut prefixes: Vec<&Path> = grant.ancestors().collect();
-            prefixes.reverse();
-            let anchor = prefixes.into_iter().find(|prefix| {
-                *prefix == *ancestor
-                    || canonical
-                        .as_ref()
-                        .is_some_and(|c| prefix.canonicalize().is_ok_and(|p| p == *c))
-            });
-            if let Some(anchor) = anchor {
-                reject_symlink_below(anchor, grant)?;
-            }
-        }
+    let writable: Vec<PathBuf> = writable
+        .iter()
+        .filter_map(|ancestor| ancestor.canonicalize().ok())
+        .collect();
+    for grant in grants {
+        reject_link_inside(grant, &writable)?;
     }
     Ok(())
 }
 
-/// Errors when `path` lies inside `ancestor` (lexically) and any component
-/// below `ancestor` is a symlink. A path equal to `ancestor` passes.
-///
-/// # Errors
-/// `InvalidInput` naming the symlink.
-pub(crate) fn reject_symlink_below(ancestor: &Path, path: &Path) -> std::io::Result<()> {
-    let Ok(rest) = path.strip_prefix(ancestor) else {
+/// The most links one grant may pass through, as the kernel's `ELOOP` limit.
+const MAX_LINK_HOPS: usize = 40;
+
+/// Resolves `grant` component by component and refuses it when a link it
+/// passes through sits strictly inside one of the canonical `writable` paths.
+/// A missing component ends the walk, as the lexical check did.
+fn reject_link_inside(grant: &Path, writable: &[PathBuf]) -> std::io::Result<()> {
+    use std::path::Component;
+
+    if !grant.is_absolute() {
         return Ok(());
-    };
-    let mut current = ancestor.to_path_buf();
-    for component in rest.components() {
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "grant {} reaches {} through a symlink inside writable {}",
-                        path.display(),
-                        current.display(),
-                        ancestor.display()
-                    ),
-                ));
+    }
+    let mut resolved = PathBuf::new();
+    let mut pending: Vec<std::ffi::OsString> = Vec::new();
+    // Components are consumed from the back, so the queue is built reversed.
+    for component in grant.components().rev() {
+        pending.push(component.as_os_str().to_os_string());
+    }
+    let mut hops = 0;
+    while let Some(next) = pending.pop() {
+        let step = Path::new(&next);
+        match step.components().next() {
+            Some(Component::Prefix(_) | Component::RootDir) => {
+                resolved.push(step);
+                continue;
             }
-            Ok(_) => {}
-            Err(_) => break,
+            Some(Component::CurDir) | None => continue,
+            Some(Component::ParentDir) => {
+                resolved.pop();
+                continue;
+            }
+            Some(Component::Normal(_)) => {}
+        }
+        let candidate = resolved.join(step);
+        let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+            break;
+        };
+        if !meta.file_type().is_symlink() {
+            resolved = candidate;
+            continue;
+        }
+        if let Some(ancestor) = writable
+            .iter()
+            .find(|ancestor| candidate.starts_with(ancestor) && candidate != **ancestor)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "grant {} reaches {} through a symlink inside writable {}",
+                    grant.display(),
+                    candidate.display(),
+                    ancestor.display()
+                ),
+            ));
+        }
+        hops += 1;
+        if hops > MAX_LINK_HOPS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("grant {} passes through too many symlinks", grant.display()),
+            ));
+        }
+        let target = std::fs::read_link(&candidate)?;
+        if target.is_absolute() {
+            resolved = PathBuf::new();
+        }
+        for component in target.components().rev() {
+            pending.push(component.as_os_str().to_os_string());
         }
     }
     Ok(())
