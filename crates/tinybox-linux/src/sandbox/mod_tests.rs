@@ -25,6 +25,7 @@ use super::{NAME, NamespaceSandbox, args};
 #[derive(Debug, Default)]
 struct RecordingHost {
     seen: Mutex<Vec<Vec<String>>>,
+    stdin: Mutex<Vec<Option<Vec<u8>>>>,
 }
 
 impl RecordingHost {
@@ -34,6 +35,16 @@ impl RecordingHost {
 
     fn last(&self) -> Vec<String> {
         self.seen().last().cloned().unwrap_or_default()
+    }
+
+    /// The stdin the last command was given.
+    fn last_stdin(&self) -> Option<Vec<u8>> {
+        self.stdin
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last()
+            .cloned()
+            .flatten()
     }
 
     fn ran_anything(&self) -> bool {
@@ -49,6 +60,10 @@ impl Host for RecordingHost {
 
     async fn run(&self, request: &ExecRequest) -> Result<ExecOutput> {
         self.seen().push(request.argv.clone());
+        self.stdin
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.stdin.clone());
         if request.argv == ["systemd-run", "--help"] {
             return Ok(ExecOutput::new(
                 0,
@@ -283,13 +298,84 @@ async fn the_environment_is_cleared_and_then_rebuilt() -> Result<()> {
     let argv = host.last();
     // The caller's own environment must not leak in: it routinely holds tokens.
     assert!(has(&argv, "--clearenv"));
-    let set = argv
-        .iter()
-        .enumerate()
-        .filter(|(_, part)| part.as_str() == "--setenv")
-        .filter_map(|(index, _)| argv.get(index + 1).cloned())
-        .collect::<Vec<_>>();
-    assert_eq!(set, ["FROM_BOX", "FROM_COMMAND"]);
+    // No variable is on the command line, where every local process (and,
+    // for an SSH host, the remote shell) can read it; bwrap reads them on
+    // stdin, the box's first and the command's on top.
+    assert!(!has(&argv, "--setenv"), "{argv:?}");
+    assert!(!argv.iter().any(|part| part.contains("FROM_")), "{argv:?}");
+    assert!(
+        argv.windows(2).any(|w| w[0] == "--args" && w[1] == "0"),
+        "{argv:?}"
+    );
+    assert_eq!(
+        host.last_stdin(),
+        Some(b"--setenv\0FROM_BOX\x001\0--setenv\0FROM_COMMAND\x002\0".to_vec())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_an_environment_bwrap_reads_no_arguments_from_stdin() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+
+    sandbox.exec(&info.id, &ExecRequest::new(["true"])).await?;
+
+    assert!(!has(&host.last(), "--args"));
+    assert_eq!(host.last_stdin(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_an_environment_the_callers_stdin_reaches_the_command() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+
+    sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"payload".to_vec()),
+        )
+        .await?;
+
+    assert!(!has(&host.last(), "--args"));
+    assert_eq!(host.last_stdin(), Some(b"payload".to_vec()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdin_and_an_environment_together_are_refused_not_dropped() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?.with_env("TOKEN", "1")).await?;
+    let before = host.seen().len();
+
+    let result = sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"payload".to_vec()),
+        )
+        .await;
+
+    assert!(matches!(result, Err(Error::Backend { .. })), "{result:?}");
+    assert_eq!(host.seen().len(), before, "a command ran");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_nul_in_an_environment_value_is_refused_before_anything_runs() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+    let before = host.seen().len();
+
+    let result = sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["env"]).with_env("TOKEN", "a\0--bind"),
+        )
+        .await;
+
+    assert!(matches!(result, Err(Error::Backend { .. })), "{result:?}");
+    assert_eq!(host.seen().len(), before, "a command ran");
     Ok(())
 }
 
@@ -452,24 +538,23 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     let grant = root.path().join("read-only");
     std::fs::create_dir(&grant)?;
     let systemd_run = crate::trusted_systemd_run_program()?;
-    let launch = crate::native_jail_argv_with_programs(
-        &crate::NativeJailCommand {
-            root: root.path().to_path_buf(),
-            cwd,
-            read_only: vec![grant.clone()],
-            read_write: Vec::new(),
-            deny_read: Vec::new(),
-            allow_net: false,
-            allow_subprocess: true,
-            cpu_millis: Some(1),
-            memory_bytes: Some(64 * 1024 * 1024),
-            pids_max: Some(16),
-            argv: vec!["/usr/bin/env".into()],
-            env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
-        },
-        &systemd_run,
-        Path::new("/bin/true"),
-    )?;
+    let mut request = crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd,
+        read_only: vec![grant.clone()],
+        read_write: Vec::new(),
+        deny_read: Vec::new(),
+        allow_net: false,
+        allow_subprocess: true,
+        disable_userns: true,
+        cpu_millis: Some(1),
+        memory_bytes: Some(64 * 1024 * 1024),
+        pids_max: Some(16),
+        argv: vec!["/usr/bin/env".into()],
+        env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
+    };
+    let launch =
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
     let argv = launch.argv.clone();
     assert_eq!(argv.first().map(String::as_str), Some("/bin/bash"));
     assert!(argv.contains(&systemd_run.display().to_string()));
@@ -480,6 +565,7 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     assert!(has(&argv, "--property=TasksMax=16"));
     assert!(has(&argv, "--unshare-cgroup"));
     assert!(has(&argv, "--unshare-net"));
+    assert!(has(&argv, "--disable-userns"));
     assert!(has(&argv, "--tmpfs"));
     assert!(has(&argv, "/run"));
     assert!(has(&argv, "/sys"));
@@ -510,6 +596,12 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
         std::fs::read(file)?,
         b"--setenv\0BASH_ENV\0/tmp/target-init\0".to_vec()
     );
+
+    // An older bwrap rejects the flag, so it is passed only when asked for.
+    request.disable_userns = false;
+    let argv =
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?.argv;
+    assert!(!has(&argv, "--disable-userns"));
     Ok(())
 }
 
@@ -531,6 +623,7 @@ fn native_jail_does_not_resolve_trusted_launchers_from_target_path()
             deny_read: Vec::new(),
             allow_net: false,
             allow_subprocess: true,
+            disable_userns: false,
             cpu_millis: Some(1),
             memory_bytes: None,
             pids_max: None,
@@ -589,6 +682,7 @@ fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
         deny_read: Vec::new(),
         allow_net: false,
         allow_subprocess: true,
+        disable_userns: false,
         cpu_millis: Some(1000),
         memory_bytes: None,
         pids_max: None,

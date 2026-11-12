@@ -10,10 +10,15 @@ coarse lifecycle capabilities do not imply resource enforcement.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Docker | Enforced | Enforced | Enforced | Enforced | Enforced | Unsupported | Unsupported |
 | Namespaces | Enforced | Enforced | Enforced with cgroups | Enforced with cgroups | Enforced with cgroups | Unsupported | Unsupported |
+| Native resource jail (contract 2.1) | Enforced | Enforced | Enforced | Enforced | Enforced | Unsupported | Unsupported |
 | MicroVM | Enforced | Enforced | BestEffort | BestEffort | Unsupported | Unsupported | Unsupported |
 | Landlock | Enforced when full filesystem ABI available | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 | Seatbelt | BestEffort when present | BestEffort when present | Unsupported | Unsupported | Unsupported | Unsupported | BestEffort when present |
 | Noop / unavailable platform | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
+
+The native resource jail allows subprocesses always, and claims kernel
+isolation only when its `bwrap` supports `--disable-userns`. The MicroVM has no
+network interface, so it refuses any egress.
 
 Namespace resource support is opt-in; actual systemd/cgroup setup may fail and
 must prevent execution. MicroVM vCPU counts round up and memory is rounded with
