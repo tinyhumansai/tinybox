@@ -34,10 +34,18 @@ pub(super) struct OutputJournal {
     state: Mutex<JournalState>,
     cancelled: tokio::sync::Notify,
     cpu_quota_hit: AtomicBool,
+    memory_oom_hit: AtomicBool,
+    pids_max_hit: AtomicBool,
 }
 impl OutputJournal {
     pub(super) fn cpu_quota_hit(&self) -> bool {
         self.cpu_quota_hit.load(Ordering::SeqCst)
+    }
+    pub(super) fn memory_oom_hit(&self) -> bool {
+        self.memory_oom_hit.load(Ordering::SeqCst)
+    }
+    pub(super) fn pids_max_hit(&self) -> bool {
+        self.pids_max_hit.load(Ordering::SeqCst)
     }
     pub(super) fn read(&self, cursor: u64) -> Result<OutputBatch> {
         let state = self
@@ -157,9 +165,13 @@ impl ExecutionObserver for OutputJournal {
         Ok(())
     }
     fn termination_cause(&self, cause: TerminationCause) {
-        if cause == TerminationCause::CpuQuota {
-            self.cpu_quota_hit.store(true, Ordering::SeqCst);
-        }
+        let flag = match cause {
+            TerminationCause::CpuQuota => &self.cpu_quota_hit,
+            TerminationCause::MemoryOom => &self.memory_oom_hit,
+            TerminationCause::PidsMax => &self.pids_max_hit,
+            _ => return,
+        };
+        flag.store(true, Ordering::SeqCst);
     }
     async fn cancelled(&self) {
         let cancelled = self.cancelled.notified();

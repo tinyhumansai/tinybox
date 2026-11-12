@@ -309,6 +309,55 @@ fn the_check_sees_a_planted_link_however_the_root_is_spelled() -> std::io::Resul
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn a_host_alias_into_a_writable_root_cannot_reach_a_planted_link() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let secret = tempfile::tempdir()?;
+    // The jailed program replaced `vendor` with a link to a secret.
+    std::os::unix::fs::symlink(secret.path(), root.path().join("vendor"))?;
+    // The host aliases a directory inside the root, not the root itself, so
+    // no prefix of the alias names the root.
+    let holder = tempfile::tempdir()?;
+    let alias = holder.path().join("v");
+    std::os::unix::fs::symlink(root.path().join("vendor"), &alias)?;
+
+    for grant in [alias.clone(), alias.join("file")] {
+        let err = crate::reject_symlinked_grants(&[root.path()], &[grant.as_path()])
+            .err()
+            .map(|e| e.kind());
+        assert_eq!(err, Some(std::io::ErrorKind::InvalidInput), "{grant:?}");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_host_alias_into_a_real_directory_of_a_writable_root_is_allowed() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("vendor"))?;
+    let holder = tempfile::tempdir()?;
+    let alias = holder.path().join("v");
+    std::os::unix::fs::symlink(root.path().join("vendor"), &alias)?;
+
+    crate::reject_symlinked_grants(&[root.path()], &[alias.as_path()])
+}
+
+#[cfg(unix)]
+#[test]
+fn a_grant_through_a_link_cycle_is_refused_rather_than_followed_forever() -> std::io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let holder = tempfile::tempdir()?;
+    std::os::unix::fs::symlink(holder.path().join("b"), holder.path().join("a"))?;
+    std::os::unix::fs::symlink(holder.path().join("a"), holder.path().join("b"))?;
+
+    let err = crate::reject_symlinked_grants(&[root.path()], &[holder.path().join("a").as_path()])
+        .err()
+        .map(|e| e.kind());
+    assert_eq!(err, Some(std::io::ErrorKind::InvalidInput));
+    Ok(())
+}
+
 #[test]
 fn nested_denial_refuses_only_paths_deeper_than_a_direct_child() {
     let writable = Path::new("/work");

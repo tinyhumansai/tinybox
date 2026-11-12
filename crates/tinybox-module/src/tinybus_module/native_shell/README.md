@@ -31,4 +31,7 @@ Preparation validates the process reservation and claims a bounded pending slot
 before scheduling blocking work. Pending preparations and retained journals
 share the module admission budget. Close fences the resource and stops owned
 work before reporting failed scratch deletion. The sanitized child environment
-includes resource variables, with explicit shell-request overrides applied last.
+holds a fixed set of host variables (`PATH`, `HOME`, `TERM`, the locale,
+`USER`, `SHELL`, `TMPDIR`; a blank one refuses the request) plus `CARGO_HOME`
+and `RUSTUP_HOME` when the host set them non-empty, then resource variables,
+with explicit shell-request overrides applied last.
