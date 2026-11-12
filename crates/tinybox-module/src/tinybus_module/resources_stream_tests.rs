@@ -386,6 +386,7 @@ async fn jailed_start_rejects_missing_grants_without_consuming_reservation() -> 
         enforcement: tinybox_bus::JailEnforcement::Declared,
         require_process_isolation: false,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     };
     assert!(
@@ -1572,6 +1573,7 @@ async fn start_resource_descendant(
                     enforcement: tinybox_bus::JailEnforcement::Enforced,
                     require_process_isolation: true,
                     deny_read: vec![],
+                    deny_read_names: Vec::new(),
                     resources: None,
                 },
                 resources: Some(tinybox_bus::NativeJailResourceRequest {
