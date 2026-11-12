@@ -5,16 +5,39 @@ use super::*;
 #[test]
 fn cpu_throttling_counter_requires_one_well_formed_nr_throttled_value() {
     assert_eq!(
-        parse_cpu_throttled_counter("usage_usec 12\nnr_throttled 0\n"),
+        parse_counter("usage_usec 12\nnr_throttled 0\n", "nr_throttled "),
         Some(0)
     );
-    assert_eq!(parse_cpu_throttled_counter("nr_throttled 3\n"), Some(3));
-    assert_eq!(parse_cpu_throttled_counter("nr_throttled nope\n"), None);
+    assert_eq!(parse_counter("nr_throttled 3\n", "nr_throttled "), Some(3));
+    assert_eq!(parse_counter("nr_throttled nope\n", "nr_throttled "), None);
     assert_eq!(
-        parse_cpu_throttled_counter("nr_throttled 1\nnr_throttled 2\n"),
+        parse_counter("nr_throttled 1\nnr_throttled 2\n", "nr_throttled "),
         None
     );
-    assert_eq!(parse_cpu_throttled_counter("usage_usec 12\n"), None);
+    assert_eq!(parse_counter("usage_usec 12\n", "nr_throttled "), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn each_scope_counter_proves_only_its_own_cause() {
+    use tinybox_core::TerminationCause::{CpuQuota, MemoryOom, PidsMax};
+
+    // A report as the scope wrapper writes it: cpu.stat as-is, then
+    // memory.events and pids.events prefixed by their controller.
+    let quiet = "nr_throttled 0\nmemory.oom 0\nmemory.oom_kill 0\nmemory.max 0\npids.max 0\n";
+    assert_eq!(scope_causes(quiet), vec![]);
+
+    let oom = "nr_throttled 0\nmemory.max 4\nmemory.oom 1\nmemory.oom_kill 1\npids.max 0\n";
+    assert_eq!(scope_causes(oom), vec![MemoryOom]);
+
+    let forks = "nr_throttled 0\nmemory.oom_kill 0\npids.max 3\n";
+    assert_eq!(scope_causes(forks), vec![PidsMax]);
+
+    let all = "nr_throttled 2\nmemory.oom_kill 1\npids.max 1\n";
+    assert_eq!(scope_causes(all), vec![CpuQuota, MemoryOom, PidsMax]);
+
+    // `memory.max` (the limit was reached) is not an OOM kill.
+    assert_eq!(scope_causes("memory.max 9\n"), vec![]);
 }
 
 #[cfg(target_os = "linux")]

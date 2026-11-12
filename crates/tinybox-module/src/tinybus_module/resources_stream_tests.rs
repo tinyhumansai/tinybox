@@ -94,6 +94,31 @@ fn cpu_quota_observer_cause_is_forwarded_before_process_exit() {
 }
 
 #[test]
+fn memory_and_pids_causes_are_forwarded_before_process_exit() {
+    use tinybox_bus::{LimitKind, SandboxEvent};
+    use tinybox_core::ExecutionObserver;
+
+    let journal = Arc::new(OutputJournal::default());
+    journal.termination_cause(tinybox_core::TerminationCause::PidsMax);
+    journal.termination_cause(tinybox_core::TerminationCause::MemoryOom);
+    let stream = stream_with(journal, false);
+
+    // Fixed order (CPU, memory, pids) whatever order the host reported them.
+    assert_eq!(
+        stream.terminal_events(Some(137)),
+        vec![
+            SandboxEvent::LimitHit {
+                limit: LimitKind::Memory,
+            },
+            SandboxEvent::LimitHit {
+                limit: LimitKind::Pids,
+            },
+            SandboxEvent::Exited { status: Some(137) },
+        ]
+    );
+}
+
+#[test]
 fn a_timed_out_stream_keeps_its_cpu_event_and_exits_only_once_cleaned_up() {
     use tinybox_bus::{LimitKind, SandboxEvent};
     use tinybox_core::ExecutionObserver;

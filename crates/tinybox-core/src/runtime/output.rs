@@ -13,6 +13,12 @@ pub use tinybox_bus::OutputStream;
 pub enum TerminationCause {
     /// The Linux cgroup v2 CPU controller throttled work under its quota.
     CpuQuota,
+    /// The Linux cgroup v2 memory controller killed a process at its limit
+    /// (`memory.events` `oom_kill`).
+    MemoryOom,
+    /// The Linux cgroup v2 pids controller refused a fork at its limit
+    /// (`pids.events` `max`). The workload may have carried on.
+    PidsMax,
 }
 
 /// Receives bounded output batches inside the provider's execution runtime.
