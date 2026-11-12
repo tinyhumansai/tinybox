@@ -138,6 +138,7 @@ async fn native_shell_jail_adds_owned_scratch_and_refuses_unsupported_constraint
         enforcement: tinybox_bus::JailEnforcement::Enforced,
         require_process_isolation: false,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     });
     let shell = ShellContext::prepare_with_backend(

@@ -671,6 +671,7 @@ async fn verify_native_jail(
         enforcement: JailEnforcement::Enforced,
         require_process_isolation: false,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     };
     let status: tinybox_bus::JailStatus = proxy.call("JailStatus", ()).await?;
@@ -809,6 +810,7 @@ async fn verify_docker_rejects_local_jail(
                     enforcement: JailEnforcement::Declared,
                     require_process_isolation: false,
                     deny_read: Vec::new(),
+                    deny_read_names: Vec::new(),
                     resources: None,
                 },
             ),

@@ -699,6 +699,33 @@ async fn an_unenforceable_network_allowlist_is_refused_at_creation() -> Result<(
 }
 
 #[tokio::test]
+async fn any_egress_is_refused_at_creation_since_the_vm_has_no_interface() -> Result<()> {
+    for policy in [
+        tinybox_core::NetworkPolicy::Egress,
+        tinybox_core::NetworkPolicy::Open,
+    ] {
+        let sandbox = sandbox(ScriptedHost::booting("", 0));
+        let result = sandbox.create(&spec()?.with_network(policy.clone())).await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::ConstraintNotEnforced {
+                    constraint: tinybox_core::Constraint::Network,
+                    enforcement: tinybox_core::Enforcement::Unsupported,
+                    ..
+                })
+            ),
+            "{policy:?} was not refused: {result:?}"
+        );
+    }
+    let sandbox = sandbox(ScriptedHost::booting("", 0));
+    sandbox
+        .create(&spec()?.with_network(tinybox_core::NetworkPolicy::Denied))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_retention_request_is_refused_at_creation_and_leaves_no_box() -> Result<()> {
     let store = Arc::new(MemoryStore::new());
     let sandbox = MicroVmSandbox::new(ScriptedHost::booting("", 0), store.clone(), image());
