@@ -775,18 +775,48 @@ pub(super) fn bwrap(spec: &BoxSpec, request: &ExecRequest) -> Result<Vec<String>
         |cwd| cwd.display().to_string(),
     ));
 
-    // The box's own environment first, then the request's on top, matching
-    // every other backend.
+    // The variables reach bwrap on its stdin (`--args 0`, see `environment`),
+    // never on this command line: `/proc/<pid>/cmdline` is readable by every
+    // process of the user, and on an SSH host the line also travels inside
+    // the remote shell command.
     argv.push("--clearenv".to_owned());
-    for (key, value) in spec.env.iter().chain(&request.env) {
-        argv.push("--setenv".to_owned());
-        argv.push(key.clone());
-        argv.push(value.clone());
+    if !(spec.env.is_empty() && request.env.is_empty()) {
+        argv.push("--args".to_owned());
+        argv.push("0".to_owned());
     }
 
     argv.push("--".to_owned());
     argv.extend(request.argv.iter().cloned());
     Ok(argv)
+}
+
+/// What `bwrap --args 0` reads on stdin: `--setenv KEY VALUE` for the box's
+/// own environment, then the request's on top (matching every other
+/// backend), each part NUL-terminated. `None` when there is nothing to set,
+/// in which case [`bwrap`] adds no `--args`.
+///
+/// This takes the command's stdin: namespace exec forwards the caller's stdin
+/// only to a command with no environment, and refuses a command that has both.
+///
+/// # Errors
+/// [`Error::Backend`] for a key or value holding a NUL, which would end the
+/// entry early and let the rest be read as further `bwrap` options.
+pub(super) fn environment(spec: &BoxSpec, request: &ExecRequest) -> Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    for (key, value) in spec.env.iter().chain(&request.env) {
+        if key.contains('\0') || value.contains('\0') {
+            return Err(Error::Backend {
+                sandbox: NAME.to_owned(),
+                operation: "pass the command environment",
+                message: format!("the entry for {key:?} holds a NUL byte"),
+            });
+        }
+        for part in ["--setenv", key.as_str(), value.as_str()] {
+            bytes.extend_from_slice(part.as_bytes());
+            bytes.push(0);
+        }
+    }
+    Ok((!bytes.is_empty()).then_some(bytes))
 }
 
 /// The read-only root the sandbox sees.
