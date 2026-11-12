@@ -1822,7 +1822,7 @@ name = "tinybox-agent37"
 version = "0.2.6"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "reqwest",
  "serde",
  "serde_json",
