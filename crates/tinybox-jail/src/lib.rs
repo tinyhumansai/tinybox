@@ -120,6 +120,7 @@ pub fn spawn(jail: &Jail, cmd: Command) -> std::io::Result<Child> {
     jail.canonicalize()?;
     let backend = default_backend();
     require_resources(backend.as_ref(), &jail)?;
+    require_name_denials(backend.as_ref(), &jail)?;
     jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
     backend.spawn(&jail, cmd)
 }
@@ -139,6 +140,7 @@ pub fn spawn_with(backend: &dyn JailBackend, jail: &Jail, cmd: Command) -> std::
     let mut jail = jail.clone();
     jail.canonicalize()?;
     require_resources(backend, &jail)?;
+    require_name_denials(backend, &jail)?;
     jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
     backend.spawn(&jail, cmd)
 }
@@ -155,6 +157,7 @@ pub fn spawn_captured_with(
     let mut jail = jail.clone();
     jail.canonicalize()?;
     require_resources(backend, &jail)?;
+    require_name_denials(backend, &jail)?;
     jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
     backend.spawn_captured(&jail, cmd)
 }
@@ -194,6 +197,7 @@ fn checked_owned_jail(backend: &dyn JailBackend, jail: &Jail) -> std::io::Result
     let mut jail = jail.clone();
     jail.canonicalize()?;
     require_resources(backend, &jail)?;
+    require_name_denials(backend, &jail)?;
     jail.validate_denials(backend.carves_denials(), &backend.implicit_grants())?;
     Ok(jail)
 }
@@ -217,6 +221,21 @@ pub fn spawn_owned_captured_with_env(
     env: &std::collections::BTreeMap<String, String>,
 ) -> std::io::Result<OwnedChild> {
     spawn_owned_captured_with_backend_and_env(default_owned_backend().as_ref(), jail, cmd, env)
+}
+
+/// Refuse a jail denying paths by name on a backend that cannot: a name it
+/// silently ignored would leave every copy of that file readable.
+fn require_name_denials(backend: &dyn JailBackend, jail: &Jail) -> std::io::Result<()> {
+    if jail.deny_read_names.is_empty() || backend.denies_by_name() {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "jail backend `{}` cannot deny paths by name",
+            backend.name()
+        ),
+    ))
 }
 
 fn require_resources(backend: &dyn JailBackend, jail: &Jail) -> std::io::Result<()> {

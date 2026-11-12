@@ -44,6 +44,33 @@ jobs:
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
           TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS=1 cargo test -j1 -p tinybox-module native_
           TINYBOX_REQUIRE_NATIVE_RESOURCE_TESTS=1 cargo test -j1 -p tinybox-module resource_aware_bus_exec_cancellation_reports_events_and_reaps_descendants
+  # The real-bubblewrap suites. They skip when bwrap cannot run (Ubuntu 24.04
+  # blocks unprivileged user namespaces by default), so this job makes bwrap
+  # usable and requires it: a skip here is a failure, not a pass.
+  bwrap-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
+      - name: Make unprivileged bubblewrap usable
+        run: |
+          source scripts/ci/prepare-bwrap.sh
+      # The image ships passt (a podman Recommends). Without it this job keeps
+      # the default shared-network path covered; the pasta job covers the other.
+      - name: Remove pasta so the shared-network path is the one tested
+        run: |
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove --yes passt; fi
+          if command -v pasta >/dev/null 2>&1; then echo "pasta still present" >&2; exit 1; fi
+      - name: Run the real-bubblewrap suites, refusing to skip
+        shell: bash
+        env:
+          TINYBOX_REQUIRE_BWRAP: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked -p tinybox-jail --test bwrap_isolation --test bwrap_fd_leak -- --nocapture
+          cargo test --locked -p tinybox-jail --lib bwrap
   bwrap-pasta-live:
     name: Bubblewrap private network (pasta) reachability
     runs-on: ubuntu-latest
@@ -53,18 +80,13 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
-      - name: Install bubblewrap, passt (pasta) and util-linux (nsenter)
+      - name: Make unprivileged bubblewrap usable
+        run: |
+          source scripts/ci/prepare-bwrap.sh
+      - name: Install passt (pasta) and util-linux (nsenter)
         run: |
           set -euo pipefail
-          sudo apt-get install -y --no-install-recommends bubblewrap passt util-linux
-          # Ubuntu 24.04 denies unprivileged user namespaces to programs without
-          # an AppArmor profile for them, which is every bwrap jail here; the
-          # native-resource job lifts it the same way
-          # (scripts/ci/prepare-rootless-native-resources.sh).
-          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          bwrap --version
+          sudo apt-get install -y --no-install-recommends passt util-linux
           pasta --version | head -1
       - name: Prove outbound works and host loopback, gateway and abstract sockets do not
         env:
