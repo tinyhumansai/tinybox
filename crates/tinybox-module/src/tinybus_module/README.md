@@ -272,7 +272,12 @@ requiring the process-isolation security floor sets `require_process_isolation`.
 The host retains approval policy and chooses the credential paths; it sends them
 as `deny_read` (1.20). The module retains prospective paths and resolves them
 against current filesystem aliases both at preflight and immediately before
-spawn. It refuses a denial covering the root or a writable grant. Seatbelt can
+spawn. It refuses a denial covering the root or a writable grant. A grant is
+refused as an invalid path when resolving it passes through a symlink that lives
+inside the root or a writable grant, because the jailed program could replace
+that link. That includes host-created links: a pnpm or monorepo workspace whose
+packages are linked inside the root cannot be granted through those links, so
+grant their real paths instead. Seatbelt can
 carve a denial that is a direct child of a writable grant (or of the root or
 `/private/tmp`), and refuses a deeper one, which a rename of the directory in
 between would move out of its path-based rule; allow-list backends refuse any

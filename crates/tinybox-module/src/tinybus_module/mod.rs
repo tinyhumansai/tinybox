@@ -18,6 +18,7 @@ use tinybox_bus::{
 };
 
 mod docker;
+mod docker_egress;
 mod native_jail;
 mod native_shell;
 mod output;

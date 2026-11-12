@@ -22,7 +22,9 @@ include expansion cannot be resolved portably from the supplied contract:
 returning a partial grant set.
 
 Automatic toolchains, Cargo executable/configuration state, shared dependency
-caches and Git configuration are fixed read-only. Writable extras cannot
+caches and Git configuration are fixed read-only. A Cargo or Rustup home moved
+with `CARGO_HOME` or `RUSTUP_HOME` (absolute and non-empty in the host's
+environment) gets the same treatment as `~/.cargo` and `~/.rustup`. Writable extras cannot
 promote them or their ancestors/descendants. Manual grants retain writable
 precedence when they do not reach fixed state. Only allow_proc grants /proc,
 read-only. Mutable tools need separately approved disposable state.
