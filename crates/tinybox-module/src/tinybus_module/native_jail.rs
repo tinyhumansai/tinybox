@@ -301,14 +301,20 @@ fn unavailable() -> Error {
 struct NativeResourceBackend {
     expected: Mutex<Option<Vec<OsString>>>,
     requested: Mutex<Option<tinybox_bus::NativeJailResourceRequest>>,
+    scope: tinybox_linux::ScopeProbe,
     launch: Mutex<Option<tinybox_linux::NativeJailLaunch>>,
 }
 
 impl NativeResourceBackend {
     fn new() -> Self {
+        Self::with_scope(tinybox_linux::ScopeProbe::detect())
+    }
+
+    fn with_scope(scope: tinybox_linux::ScopeProbe) -> Self {
         Self {
             expected: Mutex::new(None),
             requested: Mutex::new(None),
+            scope,
             launch: Mutex::new(None),
         }
     }
@@ -369,14 +375,16 @@ impl JailBackend for NativeResourceBackend {
 
     fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
         use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+        let scope = self.scope.constraint_support();
         ConstraintSupport::NONE
             .with(Constraint::Filesystem, Enforcement::Enforced)
             .with(Constraint::Network, Enforcement::Enforced)
             // `prepare_with_resources` refuses a request that denies them.
             .with(Constraint::Subprocess, Enforcement::Unsupported)
-            .with(Constraint::Cpu, Enforcement::Enforced)
-            .with(Constraint::Memory, Enforcement::Enforced)
-            .with(Constraint::Pids, Enforcement::Enforced)
+            // Only what the user manager was delegated a controller for.
+            .with(Constraint::Cpu, scope.enforcement(Constraint::Cpu))
+            .with(Constraint::Memory, scope.enforcement(Constraint::Memory))
+            .with(Constraint::Pids, scope.enforcement(Constraint::Pids))
             .with(Constraint::Disk, Enforcement::Unsupported)
     }
 
@@ -438,6 +446,19 @@ fn prepare_with_resources(
             && resources.pids_max.is_none())
     {
         return Err(invalid());
+    }
+    // A limit the scope cannot apply is refused, never dropped.
+    let support = backend.constraint_support();
+    if [
+        (resources.cpu_millis, tinybox_core::Constraint::Cpu),
+        (resources.memory_bytes, tinybox_core::Constraint::Memory),
+        (resources.pids_max, tinybox_core::Constraint::Pids),
+    ]
+    .into_iter()
+    .any(|(limit, constraint)| {
+        limit.is_some() && support.enforcement(constraint) != tinybox_core::Enforcement::Enforced
+    }) {
+        return Err(unavailable());
     }
     backend.bind_resources(resources)?;
     let jail = prepare(root, &request.jail, command, backend)?;
