@@ -33,6 +33,19 @@ landlock = { version = "0.4", optional = true }
 # `NamespaceProbe` locates `bwrap`; reused so there is one definition of how the
 # Linux backends find it.
 tinybox-linux.workspace = true
+# Hands the bwrap launcher the grant descriptors it binds (`--bind-fd`), mapped
+# only in the child after fork; std cannot without `unsafe`, which the
+# workspace forbids. Pinned: it runs in the jail's spawn path.
+command-fds = "=0.3.3"
+# `openat2(RESOLVE_NO_SYMLINKS)` for those descriptors, safely. Already in the
+# lockfile, and the version command-fds builds on.
+nix = { version = "0.31", default-features = false, features = ["fs"] }
+# Compiles the seccomp deny list bwrap installs on every jail (`bwrap/seccomp.rs`);
+# its only dependency is libc. Default features off: no JSON frontend.
+seccompiler = { version = "0.5", default-features = false }
+# The per-architecture syscall numbers that deny list names. Already in the
+# lockfile through several dependencies.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # AppContainer profile APIs, ACL editing, STARTUPINFOEXW process spawn, and the

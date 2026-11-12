@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -553,8 +553,9 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
         argv: vec!["/usr/bin/env".into()],
         env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
     };
-    let argv =
+    let launch =
         crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
+    let argv = launch.argv.clone();
     assert_eq!(argv.first().map(String::as_str), Some("/bin/bash"));
     assert!(argv.contains(&systemd_run.display().to_string()));
     assert!(systemd_run.is_absolute());
@@ -579,21 +580,27 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     );
     assert!(has(&argv, "--ro-bind"));
     assert!(has(&argv, grant.to_str().ok_or("grant path is not UTF-8")?));
-    assert!(has(&argv, "BASH_ENV"));
-    let systemd_end = argv
+    // The target environment is on no command line, the launcher's included:
+    // `/proc/<pid>/cmdline` is readable by every process of the user.
+    assert!(!argv.iter().any(|part| part.contains("BASH_ENV")));
+    assert!(!argv.iter().any(|part| part.contains("/tmp/target-init")));
+    assert!(!has(&argv, "--setenv"));
+    let args_at = argv
         .iter()
-        .position(|part| part == "--")
-        .ok_or("missing systemd delimiter")?;
-    assert!(
-        !argv[..systemd_end]
-            .iter()
-            .any(|part| part.contains("BASH_ENV"))
+        .position(|part| part == "--args")
+        .ok_or("bwrap reads the environment from a descriptor")?;
+    assert_eq!(argv.get(args_at + 1).map(String::as_str), Some("9"));
+    let file = launch.env_file().ok_or("an environment file")?;
+    assert!(has(&argv, file.to_str().ok_or("file path is not UTF-8")?));
+    assert_eq!(
+        std::fs::read(file)?,
+        b"--setenv\0BASH_ENV\0/tmp/target-init\0".to_vec()
     );
 
     // An older bwrap rejects the flag, so it is passed only when asked for.
     request.disable_userns = false;
     let argv =
-        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?.argv;
     assert!(!has(&argv, "--disable-userns"));
     Ok(())
 }
@@ -702,6 +709,54 @@ fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
     let mut unsupported = request();
     unsupported.allow_subprocess = false;
     assert!(crate::native_jail_argv(&unsupported).is_err());
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_missing_denial_inside_a_mount_is_refused_and_one_outside_is_skipped()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let cwd = root.path().join("work");
+    std::fs::create_dir(&cwd)?;
+    let elsewhere = tempfile::tempdir()?;
+    let inside = root.path().join("credentials.json");
+    let outside = elsewhere.path().join("not-mounted");
+    let request = |deny_read: Vec<PathBuf>| crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd: cwd.clone(),
+        read_only: Vec::new(),
+        read_write: Vec::new(),
+        deny_read,
+        allow_net: false,
+        allow_subprocess: true,
+        disable_userns: false,
+        cpu_millis: Some(1000),
+        memory_bytes: None,
+        pids_max: None,
+        argv: vec!["/bin/true".into()],
+        env: BTreeMap::new(),
+    };
+    let systemd_run = crate::trusted_systemd_run_program()?;
+    let build = |deny_read| {
+        crate::native_jail_argv_with_programs(
+            &request(deny_read),
+            &systemd_run,
+            Path::new("/bin/true"),
+        )
+    };
+
+    // Masking it would make bwrap create an empty file in the caller's tree.
+    let kind = build(vec![inside.clone()]).err().map(|error| error.kind());
+    assert_eq!(kind, Some(std::io::ErrorKind::NotFound));
+    assert!(!inside.exists(), "nothing may be created on the host");
+
+    // Outside every mount the sandbox never shows it: nothing to mask.
+    let argv = build(vec![outside.clone()])?.argv;
+    assert!(
+        !argv.iter().any(|part| Path::new(part) == outside),
+        "{argv:?}"
+    );
     Ok(())
 }
 

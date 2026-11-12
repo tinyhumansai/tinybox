@@ -32,7 +32,9 @@ pub struct Jail {
     /// [`carves_denials`](JailBackend::carves_denials) subtracts them from
     /// grants; allow-list backends deny paths outside grants by default. The
     /// native module rejects overlaps that an allow-list backend cannot enforce.
-    /// Missing paths are retained so backend rules can cover later creation.
+    /// Missing paths are retained here; backends decide: Landlock and Seatbelt
+    /// rules cover later creation, while bubblewrap refuses a missing path
+    /// inside a mount.
     pub deny_read: Vec<PathBuf>,
     /// File or directory names the child may neither read nor write wherever
     /// they appear. Only a backend that
