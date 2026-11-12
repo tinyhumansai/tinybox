@@ -137,6 +137,24 @@ impl NativeLinuxDockerEgressController {
     pub fn new(resolver: Arc<dyn EgressResolver>) -> Self {
         Self { resolver }
     }
+
+    /// Return a controller only when `host` can enforce an allowlist.
+    ///
+    /// Runs the same checks as [`validate_host`](DockerEgressController::validate_host):
+    /// a local native rootful Linux Engine, root firewall chains reachable
+    /// through non-interactive `sudo`, and Docker's `FORWARD` hook in first
+    /// place. Install the returned controller only on success: an installed
+    /// controller binds every Docker command to the local rootful daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EgressAllowlistUnavailable`] naming the first check
+    /// the host failed, or the host's own error if a probe could not run.
+    pub async fn detect(host: &dyn Host, resolver: Arc<dyn EgressResolver>) -> Result<Self> {
+        let controller = Self::new(resolver);
+        controller.validate_host(host).await?;
+        Ok(controller)
+    }
 }
 
 #[cfg(test)]
@@ -393,11 +411,9 @@ fn ensure_linux_target() -> Result<()> {
 }
 
 fn unsupported(reason: &str) -> Error {
-    let _ = reason;
-    Error::ConstraintNotEnforced {
+    Error::EgressAllowlistUnavailable {
         sandbox: "docker".to_owned(),
-        constraint: tinybox_core::Constraint::Network,
-        enforcement: tinybox_core::Enforcement::Unsupported,
+        reason: reason.to_owned(),
     }
 }
 

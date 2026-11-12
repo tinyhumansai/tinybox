@@ -610,11 +610,8 @@ async fn native_controller_refuses_hosts_without_explicit_local_identity() -> Re
             sandbox
                 .create(&spec()?.with_network(NetworkPolicy::Allowlist(allowlist.clone())))
                 .await,
-            Err(Error::ConstraintNotEnforced {
-                constraint: tinybox_core::Constraint::Network,
-                enforcement: tinybox_core::Enforcement::Unsupported,
-                ..
-            })
+            Err(Error::EgressAllowlistUnavailable { reason, .. })
+                if reason.contains("local execution host")
         ));
         assert_eq!(host.commands(), Vec::<Vec<String>>::new());
     }

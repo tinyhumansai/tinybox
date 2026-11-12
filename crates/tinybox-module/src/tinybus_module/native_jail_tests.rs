@@ -1515,6 +1515,14 @@ fn process_isolation_is_decided_per_jail_so_shared_network_is_refused()
     Ok(())
 }
 
+/// A planted-link refusal is an invalid path, not an unavailable backend.
+#[cfg(unix)]
+fn assert_refused_as_an_invalid_path(result: &Result<Jail>) {
+    // `None` means a grant through a planted link was admitted.
+    let refused_as = result.as_ref().err().map(tinybus::Error::wire_name);
+    assert_eq!(refused_as, Some(tinybox_bus::INVALID_FILE_PATH));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
@@ -1536,13 +1544,13 @@ fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
     read_only
         .read_only
         .push(planted.to_string_lossy().into_owned());
-    assert!(prepare(root.path(), &read_only, &command, &backend).is_err());
+    assert_refused_as_an_invalid_path(&prepare(root.path(), &read_only, &command, &backend));
 
     let mut read_write = config();
     read_write
         .read_write
         .push(planted.to_string_lossy().into_owned());
-    assert!(prepare(root.path(), &read_write, &command, &backend).is_err());
+    assert_refused_as_an_invalid_path(&prepare(root.path(), &read_write, &command, &backend));
 
     // Also when the root is spelled through an alias of its real path.
     let alias_holder = tempfile::tempdir()?;
@@ -1552,7 +1560,7 @@ fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
     aliased
         .read_only
         .push(planted.to_string_lossy().into_owned());
-    assert!(prepare(&alias, &aliased, &command, &backend).is_err());
+    assert_refused_as_an_invalid_path(&prepare(&alias, &aliased, &command, &backend));
 
     // A symlink outside every writable ancestor is still a fine grant.
     let holder = tempfile::tempdir()?;
@@ -1561,5 +1569,111 @@ fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
     let mut outside = config();
     outside.read_only.push(tools.to_string_lossy().into_owned());
     assert!(prepare(root.path(), &outside, &command, &backend).is_ok());
+    Ok(())
+}
+
+/// Runs `script` under bash in a live 2.1 scope with `resources`, observed by a
+/// fresh journal, and returns the journal once the command has ended.
+#[cfg(target_os = "linux")]
+async fn run_in_live_scope(
+    resources: tinybox_bus::NativeJailResourceRequest,
+    script: &str,
+) -> std::result::Result<Arc<super::super::output::OutputJournal>, Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let mut jail_config = config();
+    jail_config.allow_subprocess = true;
+    jail_config.require_process_isolation = true;
+    let request = tinybox_bus::NativeJailRequest {
+        jail: jail_config,
+        resources: Some(resources),
+    };
+    let mut exec = tinybox_core::ExecRequest::new(["/bin/bash", "-c", script]);
+    exec.cwd = Some(root.path().into());
+    let backend = resource_backend();
+    let jail = prepare_with_resources(root.path(), &request, &mut exec, backend.as_ref())?;
+    for key in ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] {
+        if let Ok(value) = std::env::var(key) {
+            exec.env.insert(key.to_owned(), value);
+        }
+    }
+    let approved_env = exec.env.clone();
+    let host =
+        tinybox_host::JailLocalHost::with_backend(jail, backend, tinybox_bus::MAX_OUTPUT_BYTES)?;
+    let mut command = std::process::Command::new(exec.argv.first().ok_or("missing target")?);
+    command
+        .args(exec.argv.iter().skip(1))
+        .env_clear()
+        .envs(&approved_env);
+    let journal = Arc::new(super::super::output::OutputJournal::default());
+    // Bounded by the scope itself (the memory and task limits) and by this
+    // timeout; the scope is stopped when the launcher returns either way.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        host.run_command_observed_with_env(command, None, journal.clone(), approved_env),
+    )
+    .await??;
+    Ok(journal)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_oom_kill_in_a_live_scope_is_reported_as_a_memory_limit_hit()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    if !native_resource_runtime_available() {
+        eprintln!("skipped: rootless systemd scope and bubblewrap namespaces are unavailable");
+        return Ok(());
+    }
+    if !std::process::Command::new("python3")
+        .arg("--version")
+        .status()?
+        .success()
+    {
+        eprintln!("skipped: python3 is unavailable for the memory pressure fixture");
+        return Ok(());
+    }
+    // 64 MiB with no swap; a child touches every page of 256 MiB, so the
+    // kernel kills it inside the scope. The same fixture as
+    // native_memory_limit_kills_a_workload_that_touches_past_its_budget,
+    // which the GitHub and our runners both OOM-kill (a shell variable that
+    // only grows does not reliably reach the OOM killer on every kernel).
+    let journal = run_in_live_scope(
+        tinybox_bus::NativeJailResourceRequest {
+            cpu_millis: None,
+            memory_bytes: Some(64 * 1024 * 1024),
+            pids_max: Some(16),
+            disk_bytes: None,
+        },
+        "python3 -c 'data=bytearray(256*1024*1024)\nfor i in range(0,len(data),4096): data[i]=1'; true",
+    )
+    .await?;
+
+    assert!(journal.memory_oom_hit(), "the OOM kill was not reported");
+    assert!(!journal.pids_max_hit(), "no fork was refused");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_refused_fork_in_a_live_scope_is_reported_as_a_pids_limit_hit()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    if !native_resource_runtime_available() {
+        eprintln!("skipped: rootless systemd scope and bubblewrap namespaces are unavailable");
+        return Ok(());
+    }
+    // Eight tasks at most; twenty short sleeps are asked for, so forks fail,
+    // and everything is gone within two seconds.
+    let journal = run_in_live_scope(
+        tinybox_bus::NativeJailResourceRequest {
+            cpu_millis: None,
+            memory_bytes: Some(64 * 1024 * 1024),
+            pids_max: Some(8),
+            disk_bytes: None,
+        },
+        "for i in $(seq 20); do sleep 1 & done 2>/dev/null; wait; true",
+    )
+    .await?;
+
+    assert!(journal.pids_max_hit(), "the refused fork was not reported");
+    assert!(!journal.memory_oom_hit(), "nothing was killed for memory");
     Ok(())
 }

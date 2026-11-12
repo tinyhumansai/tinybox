@@ -49,12 +49,17 @@ impl CpuEventReport {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("scope"))
                 && arg.starts_with("--unit=tinybox-native-")
         });
-        let has_cpu_limit = args
+        // Any scope limit: the report carries the CPU, memory and pids counters.
+        let has_cpu_limit = ["CPUQuota=", "MemoryMax=", "TasksMax="]
             .iter()
-            .any(|arg| arg.starts_with("--property=CPUQuota="))
-            || args
-                .windows(2)
-                .any(|pair| pair[0] == "--property" && pair[1].starts_with("CPUQuota="));
+            .any(|property| {
+                args.iter().any(|arg| {
+                    arg.strip_prefix("--property=")
+                        .is_some_and(|p| p.starts_with(property))
+                }) || args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--property" && pair[1].starts_with(property))
+            });
         let masks_runtime = args.windows(2).any(|pair| pair == ["--tmpfs", "/run"]);
         let masks_cgroup = args.windows(2).any(|pair| pair == ["--tmpfs", "/sys"]);
         if !has_scope || !has_cpu_limit || !masks_runtime || !masks_cgroup {
@@ -87,12 +92,29 @@ impl CpuEventReport {
         Some(Self(path))
     }
 
-    fn throttling_observed(&self) -> bool {
-        std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|contents| parse_cpu_throttled_counter(&contents))
-            .is_some_and(|count| count > 0)
+    /// The causes the scope's counters prove: CPU throttling, an OOM kill and
+    /// a refused fork.
+    fn observed_causes(&self) -> Vec<tinybox_core::TerminationCause> {
+        let Ok(contents) = std::fs::read_to_string(&self.0) else {
+            return Vec::new();
+        };
+        scope_causes(&contents)
     }
+}
+
+/// The resource causes a scope report proves, each from its own counter.
+#[cfg(target_os = "linux")]
+fn scope_causes(report: &str) -> Vec<tinybox_core::TerminationCause> {
+    use tinybox_core::TerminationCause;
+    [
+        ("nr_throttled ", TerminationCause::CpuQuota),
+        ("memory.oom_kill ", TerminationCause::MemoryOom),
+        ("pids.max ", TerminationCause::PidsMax),
+    ]
+    .into_iter()
+    .filter(|(key, _)| parse_counter(report, key).is_some_and(|count| count > 0))
+    .map(|(_, cause)| cause)
+    .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -102,11 +124,13 @@ impl Drop for CpuEventReport {
     }
 }
 
+/// The value after `key` on its one line; `None` if absent, repeated or not a
+/// number.
 #[cfg(target_os = "linux")]
-fn parse_cpu_throttled_counter(stats: &str) -> Option<u64> {
+fn parse_counter(stats: &str, key: &str) -> Option<u64> {
     let mut counter = None;
     for line in stats.lines() {
-        if let Some(value) = line.strip_prefix("nr_throttled ") {
+        if let Some(value) = line.strip_prefix(key) {
             if counter.is_some() {
                 return None;
             }
@@ -132,10 +156,10 @@ fn report_cpu_termination(
     report: Option<&CpuEventReport>,
     observer: Option<&Arc<dyn ExecutionObserver>>,
 ) {
-    if report.is_some_and(CpuEventReport::throttling_observed)
-        && let Some(observer) = observer
-    {
-        observer.termination_cause(tinybox_core::TerminationCause::CpuQuota);
+    if let (Some(report), Some(observer)) = (report, observer) {
+        for cause in report.observed_causes() {
+            observer.termination_cause(cause);
+        }
     }
 }
 

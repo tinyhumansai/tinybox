@@ -383,10 +383,14 @@ impl StreamExecution {
         use tinybox_bus::{LimitKind, SandboxEvent};
 
         let mut events = Vec::new();
-        if self.journal.cpu_quota_hit() {
-            events.push(SandboxEvent::LimitHit {
-                limit: LimitKind::Cpu,
-            });
+        for (hit, limit) in [
+            (self.journal.cpu_quota_hit(), LimitKind::Cpu),
+            (self.journal.memory_oom_hit(), LimitKind::Memory),
+            (self.journal.pids_max_hit(), LimitKind::Pids),
+        ] {
+            if hit {
+                events.push(SandboxEvent::LimitHit { limit });
+            }
         }
         if self.timed_out() {
             events.push(SandboxEvent::LimitHit {
