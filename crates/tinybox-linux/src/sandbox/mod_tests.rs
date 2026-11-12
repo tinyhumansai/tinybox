@@ -452,24 +452,23 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     let grant = root.path().join("read-only");
     std::fs::create_dir(&grant)?;
     let systemd_run = crate::trusted_systemd_run_program()?;
-    let argv = crate::native_jail_argv_with_programs(
-        &crate::NativeJailCommand {
-            root: root.path().to_path_buf(),
-            cwd,
-            read_only: vec![grant.clone()],
-            read_write: Vec::new(),
-            deny_read: Vec::new(),
-            allow_net: false,
-            allow_subprocess: true,
-            cpu_millis: Some(1),
-            memory_bytes: Some(64 * 1024 * 1024),
-            pids_max: Some(16),
-            argv: vec!["/usr/bin/env".into()],
-            env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
-        },
-        &systemd_run,
-        Path::new("/bin/true"),
-    )?;
+    let mut request = crate::NativeJailCommand {
+        root: root.path().to_path_buf(),
+        cwd,
+        read_only: vec![grant.clone()],
+        read_write: Vec::new(),
+        deny_read: Vec::new(),
+        allow_net: false,
+        allow_subprocess: true,
+        disable_userns: true,
+        cpu_millis: Some(1),
+        memory_bytes: Some(64 * 1024 * 1024),
+        pids_max: Some(16),
+        argv: vec!["/usr/bin/env".into()],
+        env: BTreeMap::from([("BASH_ENV".into(), "/tmp/target-init".into())]),
+    };
+    let argv =
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
     assert_eq!(argv.first().map(String::as_str), Some("/bin/bash"));
     assert!(argv.contains(&systemd_run.display().to_string()));
     assert!(systemd_run.is_absolute());
@@ -479,6 +478,7 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
     assert!(has(&argv, "--property=TasksMax=16"));
     assert!(has(&argv, "--unshare-cgroup"));
     assert!(has(&argv, "--unshare-net"));
+    assert!(has(&argv, "--disable-userns"));
     assert!(has(&argv, "--tmpfs"));
     assert!(has(&argv, "/run"));
     assert!(has(&argv, "/sys"));
@@ -503,6 +503,12 @@ fn native_jail_command_keeps_limits_and_target_environment_after_namespace_setup
             .iter()
             .any(|part| part.contains("BASH_ENV"))
     );
+
+    // An older bwrap rejects the flag, so it is passed only when asked for.
+    request.disable_userns = false;
+    let argv =
+        crate::native_jail_argv_with_programs(&request, &systemd_run, Path::new("/bin/true"))?;
+    assert!(!has(&argv, "--disable-userns"));
     Ok(())
 }
 
@@ -524,6 +530,7 @@ fn native_jail_does_not_resolve_trusted_launchers_from_target_path()
             deny_read: Vec::new(),
             allow_net: false,
             allow_subprocess: true,
+            disable_userns: false,
             cpu_millis: Some(1),
             memory_bytes: None,
             pids_max: None,
@@ -582,6 +589,7 @@ fn native_jail_command_refuses_invalid_resource_and_isolation_requests()
         deny_read: Vec::new(),
         allow_net: false,
         allow_subprocess: true,
+        disable_userns: false,
         cpu_millis: Some(1000),
         memory_bytes: None,
         pids_max: None,
