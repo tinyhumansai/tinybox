@@ -60,7 +60,7 @@ serde_json = "1"
 # The model types are serializable; see `tinybox-core`'s dependency comment.
 serde = { version = "1", features = ["derive"] }
 # Base64 for the agent37 backend's command stdin on the JSON wire.
-base64 = "0.22"
+base64 = "0.23"
 # The agent37 backend is HTTP-native (no CLI), so it owns an HTTP client. rustls
 # avoids a system OpenSSL dependency. See tinybox-agent37's ADR-0008 note.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
