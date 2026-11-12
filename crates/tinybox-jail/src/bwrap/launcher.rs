@@ -75,7 +75,9 @@ pub(super) fn pick_shell(exists: impl Fn(&str) -> bool) -> &'static str {
 /// Where the args file may live: `$XDG_RUNTIME_DIR` (a private per-user
 /// directory) when set, else the temp directory. A candidate that lies under
 /// any of the jail's mounts is refused, since the jailed program could then
-/// read or replace the file.
+/// read or replace the file. Candidates are canonicalized before that check,
+/// as the grants are, so a runtime directory reached through a symlink into a
+/// grant is caught; the canonical path is what is returned.
 ///
 /// # Errors
 /// `PermissionDenied` when no candidate is outside the jail's grants.
@@ -87,6 +89,7 @@ pub(super) fn base_dir(
     xdg_runtime_dir
         .into_iter()
         .chain(std::iter::once(temp_dir))
+        .filter_map(|dir| dir.canonicalize().ok())
         .find(|dir| dir.is_dir() && !grants.iter().any(|grant| dir.starts_with(grant)))
         .ok_or_else(|| {
             io::Error::new(

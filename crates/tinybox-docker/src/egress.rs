@@ -21,6 +21,29 @@ pub trait EgressResolver: std::fmt::Debug + Send + Sync {
     fn resolve(&self, hostname: &str) -> std::io::Result<Vec<IpAddr>>;
 }
 
+/// Resolves allowlist names with the host's system resolver, once per name.
+///
+/// [`plan_egress_allowlist`] pins whatever this returns and refuses loopback,
+/// metadata and IPv6 link-local answers, so the workload never depends on DNS
+/// after the box is created.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemEgressResolver;
+
+impl EgressResolver for SystemEgressResolver {
+    fn resolve(&self, hostname: &str) -> std::io::Result<Vec<IpAddr>> {
+        use std::net::ToSocketAddrs as _;
+
+        // Port 0 is a placeholder: only the addresses are used.
+        let mut addresses: Vec<IpAddr> = (hostname, 0)
+            .to_socket_addrs()?
+            .map(|socket| socket.ip())
+            .collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        Ok(addresses)
+    }
+}
+
 /// A resolved allowlist plan whose destinations no longer depend on DNS.
 ///
 /// The native Linux Docker controller uses each target both to install a

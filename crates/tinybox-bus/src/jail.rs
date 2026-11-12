@@ -29,12 +29,13 @@ pub struct NativeJailConfig {
     pub require_process_isolation: bool,
     /// Absolute paths the child may neither read nor write, even where the
     /// root or a grant would otherwise reach them (credential stores, for a
-    /// provider that reads allow-by-default). A path that does not exist is
-    /// ignored outside every grant, and refused inside one, by bubblewrap
-    /// backends (a later-created path would not be covered). A denial inside
-    /// a grant covers the path as it exists when the jail starts; a host that
-    /// replaces it during the run exposes the new file (see the bubblewrap
-    /// backend's known gaps). Added in contract 1.20; empty by default.
+    /// provider that reads allow-by-default). A path that does not exist yet is
+    /// kept and resolved again just before spawn, except that the bubblewrap
+    /// backend refuses a missing denial inside one of the jail's mounts: it
+    /// would have to create the path to mask it. A denial inside a grant
+    /// covers the path as it exists when the jail starts; a host that replaces
+    /// it during the run exposes the new file (see the bubblewrap backend's
+    /// known gaps). Added in contract 1.20; empty by default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_read: Vec<String>,
     /// Optional hard resource limits; omitted for compatibility with older requests.
