@@ -11,5 +11,6 @@ pub(in crate::tinybus_module) struct ShellContext {
 }
 pub(super) enum ShellHost {
     Local(tinybox_host::LimitedLocalHost),
-    Jailed(tinybox_host::JailLocalHost),
+    // Boxed: the jail it holds is far larger than a local host.
+    Jailed(Box<tinybox_host::JailLocalHost>),
 }

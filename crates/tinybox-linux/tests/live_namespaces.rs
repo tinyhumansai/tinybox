@@ -257,6 +257,82 @@ async fn live_the_callers_environment_does_not_leak_in() -> Result<()> {
 }
 
 #[tokio::test]
+async fn live_an_environment_value_is_on_no_command_line_while_the_box_runs() -> Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let dir = workspace()?;
+    let sandbox = sandbox();
+    let secret = format!("namespace-secret-{}", std::process::id());
+    let spec = spec(dir.path())?.with_env("BOX_SECRET", secret.clone());
+    let info = sandbox.create(&spec).await?;
+
+    // The box signals through the workspace once it runs, then waits, so the
+    // host can look at every process while bwrap and the command are alive.
+    let running = {
+        let sandbox = sandbox.clone();
+        let id = info.id.clone();
+        tokio::spawn(async move {
+            let script = "printf '%s' \"$BOX_SECRET\" > seen; touch ready; sleep 3";
+            sandbox
+                .exec(&id, &ExecRequest::new(["/bin/sh", "-c", script]))
+                .await
+        })
+    };
+    let ready = dir.path().join("ready");
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let leaked = command_lines_containing(&secret)?;
+    let output = running.await.map_err(|error| Error::Backend {
+        sandbox: "namespace".to_owned(),
+        operation: "join the box command",
+        message: error.to_string(),
+    })??;
+    sandbox.destroy(&info.id).await?;
+
+    assert!(ready.exists(), "the box command never started");
+    assert!(
+        leaked.is_empty(),
+        "environment value on a command line: {leaked:?}"
+    );
+    assert!(output.succeeded(), "{}", output.stderr_lossy());
+    // The command still received it, from bwrap's stdin.
+    let seen =
+        fs::read_to_string(dir.path().join("seen")).map_err(|error| Error::io("read", &error))?;
+    assert_eq!(seen, secret);
+    Ok(())
+}
+
+/// Every host process command line that holds `needle`, NULs shown as spaces.
+fn command_lines_containing(needle: &str) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(|error| Error::io("read /proc", &error))? {
+        let path = entry
+            .map_err(|error| Error::io("read /proc", &error))?
+            .path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        if let Ok(cmdline) = fs::read(path.join("cmdline"))
+            && cmdline
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        {
+            found.push(String::from_utf8_lossy(&cmdline).replace('\0', " "));
+        }
+    }
+    Ok(found)
+}
+
+#[tokio::test]
 async fn live_an_argument_is_never_interpreted_as_a_shell_would() -> Result<()> {
     if !enabled() {
         return Ok(());
