@@ -38,19 +38,56 @@ pub fn resolve_local_jail_grants(
     protected: &ProtectedPaths,
 ) -> tinybox_core::Result<JailGrants> {
     let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
-    resolve_local_jail_grants_in(home, xdg_config_home.as_deref(), cfg, protected)
+    resolve_local_jail_grants_in(
+        home,
+        xdg_config_home.as_deref(),
+        &ConfiguredHomes::from_env(),
+        cfg,
+        protected,
+    )
 }
 
-/// [`resolve_local_jail_grants`] with `XDG_CONFIG_HOME` passed in rather than
-/// read from the process environment, so callers (and tests) stay hermetic.
+/// Toolchain homes the user moved away from `~/.cargo` and `~/.rustup`, from
+/// `CARGO_HOME` and `RUSTUP_HOME`. A blank or relative value counts as unset,
+/// as Cargo and rustup themselves treat a blank one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConfiguredHomes {
+    pub(crate) cargo: Option<PathBuf>,
+    pub(crate) rustup: Option<PathBuf>,
+}
+
+impl ConfiguredHomes {
+    fn from_env() -> Self {
+        let configured = |name: &str| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        Self {
+            cargo: configured("CARGO_HOME"),
+            rustup: configured("RUSTUP_HOME"),
+        }
+    }
+}
+
+/// [`resolve_local_jail_grants`] with `XDG_CONFIG_HOME` and the configured
+/// toolchain homes passed in rather than read from the process environment, so
+/// callers (and tests) stay hermetic.
 pub(crate) fn resolve_local_jail_grants_in(
     home: Option<&Path>,
     xdg_config_home: Option<&std::ffi::OsStr>,
+    homes: &ConfiguredHomes,
     cfg: &LocalGrantConfig,
     protected: &ProtectedPaths,
 ) -> tinybox_core::Result<JailGrants> {
     let home = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
     let mut b = Builder::new(home.as_deref(), protected);
+    // Protected whether or not toolchain homes are granted, like `~/.cargo`:
+    // a writable extra must not reach host-run parts of a moved home either.
+    if let Some(cargo) = &homes.cargo {
+        b.protect_cargo_home(cargo);
+    }
 
     if cfg.toolchain_homes {
         if let Some(h) = home.as_deref() {
@@ -58,6 +95,14 @@ pub(crate) fn resolve_local_jail_grants_in(
             for dir in HOME_READ_ONLY_DIRS {
                 b.fixed_read_only(&h.join(dir), "toolchain");
             }
+        }
+        // A moved home gets the same treatment as the default one: Cargo's
+        // host-run parts and caches read-only, rustup's whole home read-only.
+        if let Some(cargo) = &homes.cargo {
+            b.add_cargo_home(cargo);
+        }
+        if let Some(rustup) = &homes.rustup {
+            b.fixed_read_only(rustup, "toolchain");
         }
         for dir in SYSTEM_TOOLCHAIN_DIRS {
             b.fixed_read_only(Path::new(dir), "toolchain");
@@ -95,6 +140,9 @@ struct Builder<'a> {
     grants: JailGrants,
     seen: HashSet<PathBuf>,
     fixed_read_only: Vec<PathBuf>,
+    /// Every Cargo home whose host-run parts a writable grant must not reach:
+    /// `~/.cargo`, plus a configured `CARGO_HOME`.
+    cargo_homes: Vec<PathBuf>,
 }
 
 impl<'a> Builder<'a> {
@@ -105,6 +153,7 @@ impl<'a> Builder<'a> {
             grants: JailGrants::default(),
             seen: HashSet::new(),
             fixed_read_only: Vec::new(),
+            cargo_homes: home.map(|home| home.join(".cargo")).into_iter().collect(),
         }
     }
 
@@ -192,11 +241,11 @@ impl<'a> Builder<'a> {
                 })
             };
             let exposes_fixed = self.fixed_read_only.iter().any(|root| reaches(root));
-            let exposes_cargo = self.home.is_some_and(|home| {
+            let exposes_cargo = self.cargo_homes.iter().any(|cargo| {
                 ["bin", "git", "registry"]
                     .into_iter()
                     .chain(CARGO_READ_ONLY_FILES.iter().copied())
-                    .any(|entry| reaches(&home.join(".cargo").join(entry)))
+                    .any(|entry| reaches(&cargo.join(entry)))
             });
             if exposes_fixed || exposes_cargo {
                 log::warn!(
@@ -214,12 +263,21 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Refuse writable extras on `cargo`, its ancestors and its descendants
+    /// (see [`Self::add_cargo_home`]), without granting anything.
+    fn protect_cargo_home(&mut self, cargo: &Path) {
+        if !self.cargo_homes.iter().any(|known| known == cargo) {
+            self.cargo_homes.push(cargo.to_path_buf());
+        }
+    }
+
     /// Grant only the parts of `~/.cargo` that jailed Cargo needs. The root is
     /// never writable: `bin` and Cargo configuration run later outside the
     /// jail, so writable access there would persist an escape for host tools.
     /// Shared dependency sources are also read-only: a cached build script can
     /// execute during a later host build. Fetches need a disposable Cargo home.
     fn add_cargo_home(&mut self, cargo: &Path) {
+        self.protect_cargo_home(cargo);
         if !cargo.is_dir() {
             return;
         }
