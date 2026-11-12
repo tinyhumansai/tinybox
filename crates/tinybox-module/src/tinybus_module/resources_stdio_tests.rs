@@ -70,6 +70,7 @@ fn jail_config() -> tinybox_bus::NativeJailConfig {
         enforcement: tinybox_bus::JailEnforcement::Enforced,
         require_process_isolation: true,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     }
 }
