@@ -322,6 +322,10 @@ pub struct NativeJailCommand {
     pub allow_net: bool,
     /// Whether the process may create child processes.
     pub allow_subprocess: bool,
+    /// Pass `--disable-userns` (bubblewrap 0.8+), so the process cannot
+    /// create a user namespace of its own. Set it only for a `bwrap` known to
+    /// support the flag; without it the jail is not kernel isolation.
+    pub disable_userns: bool,
     /// Hard CPU limit in thousandths of one CPU.
     pub cpu_millis: Option<u64>,
     /// Hard resident memory limit in bytes.
@@ -625,6 +629,9 @@ fn native_bwrap_argv(
         "--unshare-cgroup",
     ] {
         argv.push(flag.to_owned());
+    }
+    if request.disable_userns {
+        argv.push("--disable-userns".to_owned());
     }
     // The private network namespace also isolates AF_UNIX abstract sockets,
     // closing the same-UID user-manager escape path.
