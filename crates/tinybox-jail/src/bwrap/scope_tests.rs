@@ -19,8 +19,14 @@ fn limited_jail(root: &Path) -> Jail {
 fn only_delegated_controllers_are_claimed_and_none_without_a_scope() {
     let support = with_limits(ConstraintSupport::NONE, Some(&delegated("cpu memory")));
     assert_eq!(support.enforcement(Constraint::Cpu), Enforcement::Enforced);
-    assert_eq!(support.enforcement(Constraint::Memory), Enforcement::Enforced);
-    assert_eq!(support.enforcement(Constraint::Pids), Enforcement::Unsupported);
+    assert_eq!(
+        support.enforcement(Constraint::Memory),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Pids),
+        Enforcement::Unsupported
+    );
 
     let none = with_limits(ConstraintSupport::NONE, None);
     for limit in LIMITS {
@@ -88,7 +94,10 @@ fn a_hard_limit_is_refused_for_a_jail_granted_the_manager_or_cgroup_paths() -> i
         let error = prefix_for(&jail, Some(&delegated("cpu")), true)
             .err()
             .ok_or_else(|| io::Error::other(format!("a grant of {granted} was accepted")))?;
-        assert!(error.to_string().contains("/run or /sys"), "{granted}: {error}");
+        assert!(
+            error.to_string().contains("/run or /sys"),
+            "{granted}: {error}"
+        );
     }
     Ok(())
 }

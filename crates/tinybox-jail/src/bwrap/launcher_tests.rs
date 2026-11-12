@@ -320,7 +320,10 @@ fn a_scoped_launcher_runs_under_the_prefix_with_only_the_manager_variables() -> 
     let inner: Vec<&std::ffi::OsStr> = std::iter::once(launcher.get_program())
         .chain(launcher.get_args())
         .collect();
-    assert_eq!(args.get(..3), Some(&["--user", "--scope", "--"].map(std::ffi::OsStr::new)[..]));
+    assert_eq!(
+        args.get(..3),
+        Some(&["--user", "--scope", "--"].map(std::ffi::OsStr::new)[..])
+    );
     assert_eq!(args.get(3..), Some(&inner[..]));
     for (key, _) in scoped.get_envs() {
         assert!(

@@ -57,12 +57,20 @@ fn a_hard_memory_limit_kills_a_jail_that_exceeds_it() -> io::Result<()> {
     let start = Instant::now();
     let root = tempfile::tempdir()?;
 
-    let (ok, out) = sh(&backend, &memory_jail(root.path(), 32 * 1024 * 1024), ALLOCATE)?;
+    let (ok, out) = sh(
+        &backend,
+        &memory_jail(root.path(), 32 * 1024 * 1024),
+        ALLOCATE,
+    )?;
     assert!(!ok, "128 MiB fit under a 32 MiB limit: {out}");
     assert!(!out.contains("held"), "{out}");
 
     // The same work under a roomy limit completes, so the limit is the cause.
-    let (ok, out) = sh(&backend, &memory_jail(root.path(), 1024 * 1024 * 1024), ALLOCATE)?;
+    let (ok, out) = sh(
+        &backend,
+        &memory_jail(root.path(), 1024 * 1024 * 1024),
+        ALLOCATE,
+    )?;
     assert!(ok && out.contains("held 134217728"), "{out}");
     done("memory-limit", start);
     Ok(())

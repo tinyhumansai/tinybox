@@ -477,12 +477,17 @@ fn a_resource_scope_sets_only_the_limits_asked_for_and_ends_at_its_separator() {
             ..args::ScopeLimits::default()
         },
     );
-    assert_eq!(only_pids.first().map(String::as_str), Some("/usr/bin/systemd-run"));
-    assert!(
-        only_pids
-            .iter()
-            .any(|arg| arg.starts_with("--unit=tinybox-bwrap-") && arg.ends_with(".scope"))
+    assert_eq!(
+        only_pids.first().map(String::as_str),
+        Some("/usr/bin/systemd-run")
     );
+    // The unit is `tinybox-bwrap-<pid>-<n>.scope`, a systemd name, not a path.
+    let unit_name = |arg: &String| {
+        arg.strip_prefix("--unit=tinybox-bwrap-")
+            .and_then(|rest| rest.strip_suffix(".scope"))
+            .is_some()
+    };
+    assert!(only_pids.iter().any(unit_name));
     assert!(has(&only_pids, "--property=TasksMax=16"));
     assert!(!only_pids.iter().any(|arg| arg.contains("MemoryMax")));
     assert!(!only_pids.iter().any(|arg| arg.contains("CPUQuota")));

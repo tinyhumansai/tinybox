@@ -243,7 +243,13 @@ fn a_private_network_jail_enters_the_holder_and_brings_its_own_resolver() -> io:
         std::fs::File::open("/proc/self/ns/net")?,
         writer.into(),
     );
-    let prepared = prepare_command(&backend_state, &jail, &Command::new("true"), Some(&network), None)?;
+    let prepared = prepare_command(
+        &backend_state,
+        &jail,
+        &Command::new("true"),
+        Some(&network),
+        None,
+    )?;
     assert_eq!(prepared.launcher.get_program(), "/usr/bin/nsenter");
     let argv = argv_of(&prepared.launcher);
     assert!(argv.iter().any(|a| a == "--preserve-credentials"));
@@ -317,14 +323,28 @@ fn limits_are_claimed_only_for_controllers_the_scope_was_delegated() {
         verified: Some(state),
     };
     let support = backend.constraint_support();
-    assert_eq!(support.enforcement(Constraint::Filesystem), Enforcement::Enforced);
-    assert_eq!(support.enforcement(Constraint::Memory), Enforcement::Enforced);
+    assert_eq!(
+        support.enforcement(Constraint::Filesystem),
+        Enforcement::Enforced
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Memory),
+        Enforcement::Enforced
+    );
     assert_eq!(support.enforcement(Constraint::Pids), Enforcement::Enforced);
-    assert_eq!(support.enforcement(Constraint::Cpu), Enforcement::Unsupported);
-    assert_eq!(support.enforcement(Constraint::Disk), Enforcement::Unsupported);
+    assert_eq!(
+        support.enforcement(Constraint::Cpu),
+        Enforcement::Unsupported
+    );
+    assert_eq!(
+        support.enforcement(Constraint::Disk),
+        Enforcement::Unsupported
+    );
     // Without a scope, as before: no limit is claimed.
     assert_eq!(
-        available().constraint_support().enforcement(Constraint::Memory),
+        available()
+            .constraint_support()
+            .enforcement(Constraint::Memory),
         Enforcement::Unsupported
     );
 }
