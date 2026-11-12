@@ -216,3 +216,53 @@ async fn template_port_failures_keep_the_operation_context() -> TestResult {
     ));
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_reports_a_failed_insert_and_a_conflict_with_no_stored_row() -> TestResult {
+    let base = storage("template-import-failures")?;
+    let faulty = Faulty::new(Arc::clone(base.documents()), Faults::default());
+    let wrapped = Storage::new(
+        faulty.clone(),
+        Arc::clone(base.streams()),
+        Arc::clone(base.kv()),
+        Arc::clone(base.blobs()),
+        Arc::clone(base.queues()),
+        Arc::clone(base.secrets()),
+    );
+    let store = DocumentTemplateStore::open(wrapped).await?;
+    let name = TemplateName::new("legacy")?;
+    let snapshot = SnapshotId::new("snapshot")?;
+
+    // Anything but a conflict is passed through as it is.
+    faulty
+        .failing
+        .faults
+        .fail_operation_nth("put", 1, ErrorKind::Backend);
+    assert!(matches!(
+        store.import_if_missing(&name, &snapshot),
+        Err(Error::Store {
+            operation: "import",
+            ..
+        })
+    ));
+
+    // A conflict with nothing behind it: the row vanished between the two
+    // calls, which the import reports rather than retrying blindly.
+    faulty
+        .failing
+        .faults
+        .fail_operation_nth("put", 1, ErrorKind::Conflict);
+    let vanished = store.import_if_missing(&name, &snapshot);
+    assert!(
+        matches!(
+            &vanished,
+            Err(Error::Store { operation: "import", message }) if message.contains("disappeared")
+        ),
+        "{vanished:?}"
+    );
+    assert!(matches!(
+        store.get(&name),
+        Err(Error::UnknownTemplate { .. })
+    ));
+    Ok(())
+}

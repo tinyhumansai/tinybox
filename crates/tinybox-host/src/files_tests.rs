@@ -321,3 +321,83 @@ async fn concurrent_symlink_rename_cannot_redirect_a_staged_write_outside() -> R
     );
     Ok(())
 }
+
+/// A staged file whose flush or sync fails, as a full disk would.
+#[derive(Debug)]
+struct UnsyncableFile {
+    inner: cap_std::fs::File,
+    fail_flush: bool,
+}
+
+impl Write for UnsyncableFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.fail_flush {
+            return Err(std::io::Error::other("injected flush failure"));
+        }
+        self.inner.flush()
+    }
+}
+
+impl super::StagedFile for UnsyncableFile {
+    fn sync_all(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected sync failure"))
+    }
+}
+
+fn staged_writer<W>(dir: cap_std::fs::Dir, file: W, next_offset: u64) -> LocalFileWriter<W> {
+    LocalFileWriter {
+        dir,
+        temporary: PathBuf::from(".target.bin.tinybox-transfer.tmp"),
+        destination: PathBuf::from("target.bin"),
+        file: Some(file),
+        next_offset,
+        finished: false,
+        poisoned: false,
+    }
+}
+
+#[tokio::test]
+async fn a_write_past_the_largest_offset_is_refused_before_it_is_written() -> Result<()> {
+    let root = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
+    let dir = open_root(root.path())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let file = dir
+        .open_with(".target.bin.tinybox-transfer.tmp", &options)
+        .map_err(|error| Error::io("create staged fixture", &error))?;
+    let last = u64::MAX - 1;
+    let mut writer = staged_writer(dir, file, last);
+    let refused = writer.write_chunk(last, b"data").await;
+    assert!(matches!(refused, Err(Error::Io { .. })), "{refused:?}");
+    let staged = std::fs::metadata(root.path().join(".target.bin.tinybox-transfer.tmp"))
+        .map_err(|error| Error::io("inspect staged fixture", &error))?;
+    assert_eq!(staged.len(), 0, "nothing was written");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_flush_or_sync_never_publishes_the_staged_file() -> Result<()> {
+    for fail_flush in [true, false] {
+        let root = tempfile::tempdir().map_err(|error| Error::io("create fixture", &error))?;
+        let dir = open_root(root.path())?;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let inner = dir
+            .open_with(".target.bin.tinybox-transfer.tmp", &options)
+            .map_err(|error| Error::io("create staged fixture", &error))?;
+        let mut writer = staged_writer(dir, UnsyncableFile { inner, fail_flush }, 0);
+        writer.write_chunk(0, b"payload").await?;
+        let failed = writer.finish().await;
+        let expected = if fail_flush { "flush" } else { "sync" };
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains(expected)),
+            "{expected}: {failed:?}"
+        );
+        assert!(!root.path().join("target.bin").exists(), "{expected}");
+    }
+    Ok(())
+}

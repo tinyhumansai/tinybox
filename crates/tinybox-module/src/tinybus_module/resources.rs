@@ -1856,3 +1856,7 @@ fn validate_id(id: &ResourceId) -> Result<()> {
 #[cfg(test)]
 #[path = "resources_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "resources_mapping_tests.rs"]
+mod mapping_tests;
