@@ -371,6 +371,47 @@ fn nested_denial_refuses_only_paths_deeper_than_a_direct_child() {
 }
 
 #[test]
+fn a_status_from_an_exit_code_carries_no_signal() {
+    let status = ChildStatus::from_code(Some(3));
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(status.signal(), None);
+    assert_eq!(
+        ChildStatus::from_code(None).with_signal(Some(9)).signal(),
+        Some(9)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_owned_child_ended_by_a_signal_reports_the_signal() -> std::io::Result<()> {
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir()?;
+    let jail = Jail::new(root.path(), "owned-signal");
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", "kill -9 $$"]);
+
+    let mut child = crate::spawn_owned_captured_with(&crate::NoopBackend, &jail, command)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "child did not exit",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(status.signal(), Some(9));
+    assert_eq!(status.code(), None);
+    Ok(())
+}
+
+#[test]
 fn a_backend_that_cannot_deny_by_name_refuses_a_name_denial() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut jail = Jail::new(root.path(), "names");

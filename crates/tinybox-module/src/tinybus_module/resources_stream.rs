@@ -156,7 +156,7 @@ fn select_collector(
                 root,
                 config,
                 resolved,
-                tinybox_jail::default_backend(),
+                tinybox_jail::default_owned_backend(),
             )?,
             NativeJailRequest::Resources(config) => {
                 super::super::native_jail::collector_with_resources(root, config, resolved)?

@@ -1983,3 +1983,132 @@ fn a_resource_jail_keeps_the_target_environment_off_every_command_line()
     );
     Ok(())
 }
+
+/// Shaped like Windows `AppContainer`: usable only through the owned-process
+/// API, enforcing filesystem, network and resource limits but not
+/// `Subprocess`, reporting no isolation level, and unable to carve denials.
+struct OwnedOnlyBackend;
+impl JailBackend for OwnedOnlyBackend {
+    fn name(&self) -> &'static str {
+        "owned-only"
+    }
+    fn is_available(&self) -> bool {
+        false
+    }
+    fn is_owned_available(&self) -> bool {
+        true
+    }
+    fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
+        use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+        ConstraintSupport::NONE
+            .with(Constraint::Filesystem, Enforcement::Enforced)
+            .with(Constraint::Network, Enforcement::Enforced)
+            .with(Constraint::Cpu, Enforcement::Enforced)
+            .with(Constraint::Memory, Enforcement::Enforced)
+            .with(Constraint::Pids, Enforcement::Enforced)
+    }
+    fn spawn(&self, _: &Jail, _: std::process::Command) -> std::io::Result<std::process::Child> {
+        Err(std::io::Error::other("preflight fixture never spawns"))
+    }
+}
+
+/// The request a host sends for an MCP stdio server: network and children
+/// allowed, no isolation floor, no denials.
+fn owned_only_request(root: &std::path::Path) -> (NativeJailConfig, tinybox_core::ExecRequest) {
+    let mut config = config();
+    config.allow_net = true;
+    config.allow_subprocess = true;
+    let mut command = tinybox_core::ExecRequest::new(["irrelevant"]);
+    command.cwd = Some(root.into());
+    (config, command)
+}
+
+/// The refusal message, which must say why.
+fn refusal(result: Result<Jail>) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    match result {
+        Err(Error::MethodFailed { message, .. }) => Ok(message),
+        other => Err(format!("expected a refusal, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn a_backend_usable_only_through_the_owned_api_is_admitted()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let (config, command) = owned_only_request(root.path());
+
+    let jail = prepare(root.path(), &config, &command, &OwnedOnlyBackend)?;
+
+    assert_eq!(jail.root, root.path().canonicalize()?);
+    Ok(())
+}
+
+#[test]
+fn a_jail_forbidding_children_is_refused_naming_subprocess()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let (mut config, command) = owned_only_request(root.path());
+    config.allow_subprocess = false;
+
+    for enforcement in [JailEnforcement::Enforced, JailEnforcement::Declared] {
+        config.enforcement = enforcement;
+        let message = refusal(prepare(root.path(), &config, &command, &OwnedOnlyBackend))?;
+        assert!(
+            message.contains("backend `owned-only` cannot enforce subprocess"),
+            "{message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_jail_requiring_process_isolation_is_refused_saying_so()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let (mut config, command) = owned_only_request(root.path());
+    config.require_process_isolation = true;
+
+    let message = refusal(prepare(root.path(), &config, &command, &OwnedOnlyBackend))?;
+
+    assert!(message.contains("requires process isolation"), "{message}");
+    assert!(message.contains("`owned-only`"), "{message}");
+    Ok(())
+}
+
+#[test]
+fn a_denial_overlapping_a_read_only_grant_is_refused_for_a_backend_that_cannot_carve()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let shared = tempfile::tempdir()?;
+    let secret = shared.path().join("secret");
+    std::fs::create_dir(&secret)?;
+    let (mut config, command) = owned_only_request(root.path());
+    config
+        .read_only
+        .push(shared.path().to_string_lossy().into_owned());
+    config.deny_read.push(secret.to_string_lossy().into_owned());
+
+    let message = refusal(prepare(root.path(), &config, &command, &OwnedOnlyBackend))?;
+
+    assert!(message.contains("cannot carve denials"), "{message}");
+    Ok(())
+}
+
+#[test]
+fn a_denial_inside_a_writable_grant_is_refused_for_a_backend_that_cannot_carve()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let writable = tempfile::tempdir()?;
+    let secret = writable.path().join("secret");
+    std::fs::create_dir(&secret)?;
+    let (mut config, command) = owned_only_request(root.path());
+    config
+        .read_write
+        .push(writable.path().to_string_lossy().into_owned());
+    config.deny_read.push(secret.to_string_lossy().into_owned());
+
+    let message = refusal(prepare(root.path(), &config, &command, &OwnedOnlyBackend))?;
+
+    assert!(message.contains("cannot carve a denial"), "{message}");
+    Ok(())
+}

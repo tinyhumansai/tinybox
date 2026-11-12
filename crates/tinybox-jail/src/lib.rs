@@ -95,6 +95,10 @@ pub fn default_backend() -> Arc<dyn JailBackend> {
 }
 
 /// Cached default backend for the process-owned child API.
+///
+/// Every jailed path in the module uses this one. Off Windows it is the same
+/// backend [`default_backend`] picks; on Windows it is `AppContainer`, which
+/// `default_backend` can never return.
 pub fn default_owned_backend() -> Arc<dyn JailBackend> {
     DEFAULT_OWNED_BACKEND
         .get_or_init(detect::pick_owned_backend)

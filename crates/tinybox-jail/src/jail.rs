@@ -593,6 +593,7 @@ pub trait JailBackend: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildStatus {
     code: Option<i32>,
+    signal: Option<i32>,
 }
 
 impl ChildStatus {
@@ -600,13 +601,27 @@ impl ChildStatus {
     /// is represented by `None` on platforms that expose it that way.
     #[must_use]
     pub const fn from_code(code: Option<i32>) -> Self {
-        Self { code }
+        Self { code, signal: None }
+    }
+
+    /// The same status, recording the signal that ended the process on
+    /// platforms that report one.
+    #[must_use]
+    pub const fn with_signal(mut self, signal: Option<i32>) -> Self {
+        self.signal = signal;
+        self
     }
 
     /// Exit code when the process has one (signal termination has none).
     #[must_use]
     pub const fn code(self) -> Option<i32> {
         self.code
+    }
+
+    /// The signal that ended the process, when it was signalled (Unix).
+    #[must_use]
+    pub const fn signal(self) -> Option<i32> {
+        self.signal
     }
 
     /// Whether the process returned exit code zero.
@@ -767,8 +782,15 @@ impl OwnedProcess for StdOwnedProcess {
 
     fn try_wait(&mut self) -> std::io::Result<Option<ChildStatus>> {
         self.0.try_wait().map(|status| {
-            status.map(|status| ChildStatus {
-                code: status.code(),
+            status.map(|status| {
+                #[cfg(unix)]
+                let signal = {
+                    use std::os::unix::process::ExitStatusExt;
+                    status.signal()
+                };
+                #[cfg(not(unix))]
+                let signal = None;
+                ChildStatus::from_code(status.code()).with_signal(signal)
             })
         })
     }
