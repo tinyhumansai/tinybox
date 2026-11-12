@@ -167,19 +167,41 @@ fn the_args_directory_prefers_xdg_runtime_dir_but_never_one_inside_a_grant() -> 
     let xdg = tempfile::tempdir()?;
     let temp = tempfile::tempdir()?;
     let chosen = base_dir(&[], Some(xdg.path().into()), temp.path().into())?;
-    assert_eq!(chosen, xdg.path());
+    assert_eq!(chosen, xdg.path().canonicalize()?);
     // XDG dir inside a grant: fall back to the temp dir.
-    let chosen = base_dir(&[xdg.path()], Some(xdg.path().into()), temp.path().into())?;
-    assert_eq!(chosen, temp.path());
+    let granted = xdg.path().canonicalize()?;
+    let chosen = base_dir(
+        &[granted.as_path()],
+        Some(xdg.path().into()),
+        temp.path().into(),
+    )?;
+    assert_eq!(chosen, temp.path().canonicalize()?);
     // Unset or missing XDG dir: temp dir.
     let missing = xdg.path().join("missing");
     let chosen = base_dir(&[], Some(missing), temp.path().into())?;
-    assert_eq!(chosen, temp.path());
+    assert_eq!(chosen, temp.path().canonicalize()?);
     // Everything inside a grant: refuse.
     let kind = base_dir(&[temp.path()], None, temp.path().join("sub"))
         .err()
         .map(|e| e.kind());
     assert_eq!(kind, Some(io::ErrorKind::PermissionDenied));
+    Ok(())
+}
+
+#[test]
+fn an_args_directory_reached_through_a_symlink_into_a_grant_is_refused() -> io::Result<()> {
+    let grant = tempfile::tempdir()?;
+    let runtime = grant.path().join("runtime");
+    std::fs::create_dir(&runtime)?;
+    let holder = tempfile::tempdir()?;
+    let xdg = holder.path().join("xdg");
+    std::os::unix::fs::symlink(&runtime, &xdg)?;
+    let temp = tempfile::tempdir()?;
+    let granted = grant.path().canonicalize()?;
+
+    let chosen = base_dir(&[granted.as_path()], Some(xdg), temp.path().into())?;
+
+    assert_eq!(chosen, temp.path().canonicalize()?);
     Ok(())
 }
 

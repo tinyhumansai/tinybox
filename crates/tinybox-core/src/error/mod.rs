@@ -76,6 +76,19 @@ pub enum Error {
         enforcement: crate::Enforcement,
     },
 
+    /// A network allowlist was requested, but this host cannot enforce one.
+    ///
+    /// Unlike [`Error::ConstraintNotEnforced`], this names why: for example a
+    /// remote or Desktop Docker daemon, a rootless engine, or firewall chains
+    /// that need passwordless `sudo`.
+    #[error("sandbox {sandbox} cannot enforce a network allowlist on this host: {reason}")]
+    EgressAllowlistUnavailable {
+        /// Backend refusing the request.
+        sandbox: String,
+        /// What the host is missing.
+        reason: String,
+    },
+
     /// A resource limit was zero, and every limit tinybox applies must be
     /// positive to be meaningful.
     #[error("resource limit {limit} must be greater than zero")]

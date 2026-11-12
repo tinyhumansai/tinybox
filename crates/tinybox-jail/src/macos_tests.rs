@@ -378,12 +378,20 @@ fn launcher_leads_a_process_group_so_a_group_kill_reaches_grandchildren() {
         .stderr(Stdio::null());
     let mut child = backend.spawn(&jail, cmd).expect("spawn");
 
+    // Bounded, so a shell that never writes the file fails the test instead
+    // of hanging it.
     let pidfile = root.join("gc.pid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let grandchild = loop {
         if let Ok(text) = fs::read_to_string(&pidfile)
             && let Ok(pid) = text.trim().parse::<u32>()
         {
             break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for {}", pidfile.display());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
