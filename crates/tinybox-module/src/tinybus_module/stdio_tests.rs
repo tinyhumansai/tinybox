@@ -35,6 +35,7 @@ fn request() -> StdioStartRequest {
             enforcement: JailEnforcement::Declared,
             require_process_isolation: false,
             deny_read: Vec::new(),
+            deny_read_names: Vec::new(),
             resources: None,
         },
     }
