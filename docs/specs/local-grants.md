@@ -17,7 +17,9 @@ bounds (1,000,000 entries, 128 levels) omit the grant. Nested links are not
 followed; protected pair-prefix aliases are conservatively refused.
 
 Toolchain discovery includes existing system roots, operator Rustup/NVM/npm,
-piecewise Cargo and admitted Git config/ignore paths. Fixed host executable,
+piecewise Cargo and admitted Git config/ignore paths. A Cargo or Rustup home
+moved with an absolute, non-empty `CARGO_HOME` or `RUSTUP_HOME` in the host's
+environment is discovered the same way as `~/.cargo` and `~/.rustup`. Fixed host executable,
 configuration and cached dependency state remain read-only; writable extras
 cannot promote it. Mutable toolchains require disposable approved state.
 Only the explicit allow_proc toggle grants /proc, read-only.

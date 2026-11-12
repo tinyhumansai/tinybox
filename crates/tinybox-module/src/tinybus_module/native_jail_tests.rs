@@ -1515,6 +1515,14 @@ fn process_isolation_is_decided_per_jail_so_shared_network_is_refused()
     Ok(())
 }
 
+/// A planted-link refusal is an invalid path, not an unavailable backend.
+#[cfg(unix)]
+fn assert_refused_as_an_invalid_path(result: &Result<Jail>) {
+    // `None` means a grant through a planted link was admitted.
+    let refused_as = result.as_ref().err().map(tinybus::Error::wire_name);
+    assert_eq!(refused_as, Some(tinybox_bus::INVALID_FILE_PATH));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
@@ -1536,13 +1544,13 @@ fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
     read_only
         .read_only
         .push(planted.to_string_lossy().into_owned());
-    assert!(prepare(root.path(), &read_only, &command, &backend).is_err());
+    assert_refused_as_an_invalid_path(&prepare(root.path(), &read_only, &command, &backend));
 
     let mut read_write = config();
     read_write
         .read_write
         .push(planted.to_string_lossy().into_owned());
-    assert!(prepare(root.path(), &read_write, &command, &backend).is_err());
+    assert_refused_as_an_invalid_path(&prepare(root.path(), &read_write, &command, &backend));
 
     // Also when the root is spelled through an alias of its real path.
     let alias_holder = tempfile::tempdir()?;
@@ -1552,7 +1560,7 @@ fn a_symlink_planted_in_the_writable_root_cannot_redirect_a_grant()
     aliased
         .read_only
         .push(planted.to_string_lossy().into_owned());
-    assert!(prepare(&alias, &aliased, &command, &backend).is_err());
+    assert_refused_as_an_invalid_path(&prepare(&alias, &aliased, &command, &backend));
 
     // A symlink outside every writable ancestor is still a fine grant.
     let holder = tempfile::tempdir()?;

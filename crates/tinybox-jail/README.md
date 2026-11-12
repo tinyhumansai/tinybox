@@ -26,7 +26,9 @@ spawns, never the core process itself.
   Seatbelt on macOS, otherwise the `unsupported` backend.
 - Spawn a `std::process::Command` inside the jail, canonicalizing `root`
   (and the read-only and read/write paths) first so backends never see `..` or symlink
-  trickery.
+  trickery. Before canonicalizing, a grant whose resolution passes through a
+  symlink inside the root or a writable grant is refused (`InvalidInput`),
+  host-created links included, since the jailed program could replace one.
 - Provide a persistent registry to manage many jailed workspaces side by
   side, each with a stable id, label, directory, and metadata, indexed in a
   JSON file.
