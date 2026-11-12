@@ -752,7 +752,7 @@ fn a_missing_denial_inside_a_mount_is_refused_and_one_outside_is_skipped()
     assert!(!inside.exists(), "nothing may be created on the host");
 
     // Outside every mount the sandbox never shows it: nothing to mask.
-    let argv = build(vec![outside.clone()])?;
+    let argv = build(vec![outside.clone()])?.argv;
     assert!(
         !argv.iter().any(|part| Path::new(part) == outside),
         "{argv:?}"
