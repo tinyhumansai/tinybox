@@ -1549,6 +1549,7 @@ async fn run_native_shell_runs_a_jailed_command_under_appcontainer_on_windows()
         enforcement: tinybox_bus::JailEnforcement::Enforced,
         require_process_isolation: false,
         deny_read: Vec::new(),
+        deny_read_names: Vec::new(),
         resources: None,
     });
 
