@@ -10,6 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
+mod scope;
+
+pub use scope::ScopeProbe;
+
 /// Whether an unprivileged process may create a user namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsernsStatus {

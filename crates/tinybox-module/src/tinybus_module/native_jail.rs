@@ -306,14 +306,33 @@ fn unavailable() -> Error {
 struct NativeResourceBackend {
     expected: Mutex<Option<Vec<OsString>>>,
     requested: Mutex<Option<tinybox_bus::NativeJailResourceRequest>>,
+    scope: tinybox_linux::ScopeProbe,
+    launch: Mutex<Option<tinybox_linux::NativeJailLaunch>>,
 }
 
 impl NativeResourceBackend {
     fn new() -> Self {
+        Self::with_scope(tinybox_linux::ScopeProbe::detect())
+    }
+
+    fn with_scope(scope: tinybox_linux::ScopeProbe) -> Self {
         Self {
             expected: Mutex::new(None),
             requested: Mutex::new(None),
+            scope,
+            launch: Mutex::new(None),
         }
+    }
+
+    /// Holds the launch, and with it the private environment file, until this
+    /// execution's backend is dropped.
+    fn keep(&self, launch: tinybox_linux::NativeJailLaunch) -> Result<()> {
+        let mut held = self.launch.lock().map_err(|_| unavailable())?;
+        if held.is_some() {
+            return Err(unavailable());
+        }
+        *held = Some(launch);
+        Ok(())
     }
 
     fn bind(&self, argv: &[String]) -> Result<()> {
@@ -361,14 +380,16 @@ impl JailBackend for NativeResourceBackend {
 
     fn constraint_support(&self) -> tinybox_core::ConstraintSupport {
         use tinybox_core::{Constraint, ConstraintSupport, Enforcement};
+        let scope = self.scope.constraint_support();
         ConstraintSupport::NONE
             .with(Constraint::Filesystem, Enforcement::Enforced)
             .with(Constraint::Network, Enforcement::Enforced)
             // `prepare_with_resources` refuses a request that denies them.
             .with(Constraint::Subprocess, Enforcement::Unsupported)
-            .with(Constraint::Cpu, Enforcement::Enforced)
-            .with(Constraint::Memory, Enforcement::Enforced)
-            .with(Constraint::Pids, Enforcement::Enforced)
+            // Only what the user manager was delegated a controller for.
+            .with(Constraint::Cpu, scope.enforcement(Constraint::Cpu))
+            .with(Constraint::Memory, scope.enforcement(Constraint::Memory))
+            .with(Constraint::Pids, scope.enforcement(Constraint::Pids))
             .with(Constraint::Disk, Enforcement::Unsupported)
     }
 
@@ -431,6 +452,19 @@ fn prepare_with_resources(
     {
         return Err(invalid());
     }
+    // A limit the scope cannot apply is refused, never dropped.
+    let support = backend.constraint_support();
+    if [
+        (resources.cpu_millis, tinybox_core::Constraint::Cpu),
+        (resources.memory_bytes, tinybox_core::Constraint::Memory),
+        (resources.pids_max, tinybox_core::Constraint::Pids),
+    ]
+    .into_iter()
+    .any(|(limit, constraint)| {
+        limit.is_some() && support.enforcement(constraint) != tinybox_core::Enforcement::Enforced
+    }) {
+        return Err(unavailable());
+    }
     backend.bind_resources(resources)?;
     let jail = prepare(root, &request.jail, command, backend)?;
     if request.jail.allow_net || !request.jail.allow_subprocess {
@@ -471,10 +505,14 @@ fn configure_resource_launcher(
         .map(Path::to_path_buf)
         .ok_or_else(unavailable)?;
     let systemd_run = tinybox_linux::trusted_systemd_run_program().map_err(|_| unavailable())?;
-    let argv = tinybox_linux::native_jail_argv_with_programs(native, &systemd_run, &bwrap)
+    let launch = tinybox_linux::native_jail_argv_with_programs(native, &systemd_run, &bwrap)
         .map_err(|_| unavailable())?;
-    backend.bind(&argv)?;
-    command.argv = argv;
+    backend.bind(&launch.argv)?;
+    command.argv.clone_from(&launch.argv);
+    // Held for the execution: the launcher opens and deletes the private file
+    // carrying the target's environment, and dropping this removes it if the
+    // launcher never ran.
+    backend.keep(launch)?;
     command.env = launcher_environment();
     command.cwd = None;
     Ok(())

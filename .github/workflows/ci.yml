@@ -71,6 +71,32 @@ jobs:
           set -euo pipefail
           cargo test --locked -p tinybox-jail --test bwrap_isolation --test bwrap_fd_leak -- --nocapture
           cargo test --locked -p tinybox-jail --lib bwrap
+  bwrap-pasta-live:
+    name: Bubblewrap private network (pasta) reachability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
+      - name: Make unprivileged bubblewrap usable
+        run: |
+          source scripts/ci/prepare-bwrap.sh
+      - name: Install passt (pasta) and util-linux (nsenter)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends passt util-linux
+          pasta --version | head -1
+      - name: Prove outbound works and host loopback, gateway and abstract sockets do not
+        env:
+          TINYBOX_REQUIRE_BWRAP: "1"
+          TINYBOX_REQUIRE_PASTA: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked -p tinybox-jail --test bwrap_pasta_live -- --nocapture
+          cargo test --locked -p tinybox-jail --test bwrap_isolation -- --nocapture
+          cargo test --locked -p tinybox-jail --test bwrap_fd_leak -- --nocapture
   docker-network-live:
     name: Docker Egress and denied network connectivity
     runs-on: ubuntu-22.04
