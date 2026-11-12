@@ -327,6 +327,41 @@ async fn without_an_environment_bwrap_reads_no_arguments_from_stdin() -> Result<
 }
 
 #[tokio::test]
+async fn without_an_environment_the_callers_stdin_reaches_the_command() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?).await?;
+
+    sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"payload".to_vec()),
+        )
+        .await?;
+
+    assert!(!has(&host.last(), "--args"));
+    assert_eq!(host.last_stdin(), Some(b"payload".to_vec()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdin_and_an_environment_together_are_refused_not_dropped() -> Result<()> {
+    let (sandbox, host) = sandbox();
+    let info = sandbox.create(&spec()?.with_env("TOKEN", "1")).await?;
+    let before = host.seen().len();
+
+    let result = sandbox
+        .exec(
+            &info.id,
+            &ExecRequest::new(["cat"]).with_stdin(b"payload".to_vec()),
+        )
+        .await;
+
+    assert!(matches!(result, Err(Error::Backend { .. })), "{result:?}");
+    assert_eq!(host.seen().len(), before, "a command ran");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_nul_in_an_environment_value_is_refused_before_anything_runs() -> Result<()> {
     let (sandbox, host) = sandbox();
     let info = sandbox.create(&spec()?).await?;

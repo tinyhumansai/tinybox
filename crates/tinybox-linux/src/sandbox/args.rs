@@ -788,8 +788,8 @@ pub(super) fn bwrap(spec: &BoxSpec, request: &ExecRequest) -> Result<Vec<String>
 /// backend), each part NUL-terminated. `None` when there is nothing to set,
 /// in which case [`bwrap`] adds no `--args`.
 ///
-/// This takes the command's stdin, which namespace exec does not forward; a
-/// command that needed one would have to move these to another descriptor.
+/// This takes the command's stdin: namespace exec forwards the caller's stdin
+/// only to a command with no environment, and refuses a command that has both.
 ///
 /// # Errors
 /// [`Error::Backend`] for a key or value holding a NUL, which would end the
