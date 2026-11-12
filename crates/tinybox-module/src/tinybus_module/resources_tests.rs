@@ -3478,3 +3478,195 @@ async fn agent37_exec_is_admitted_through_the_module_guard() -> Result<()> {
     resources.close(&id).await?;
     Ok(())
 }
+
+/// A remote host whose file providers break their contract: the reader returns
+/// more than it was asked for and the writer acknowledges a wrong offset.
+#[derive(Debug, Default)]
+struct OverreachingFileHost {
+    remote: RemoteProcessHost,
+}
+
+#[derive(Debug)]
+struct OverreadingReader;
+
+#[async_trait::async_trait]
+impl tinybox_core::WorkspaceFileReader for OverreadingReader {
+    fn size(&self) -> u64 {
+        16
+    }
+
+    async fn read_chunk(
+        &mut self,
+        _offset: u64,
+        max_bytes: usize,
+    ) -> tinybox_core::Result<Vec<u8>> {
+        Ok(vec![b'x'; max_bytes + 1])
+    }
+}
+
+#[derive(Debug)]
+struct MisacknowledgingWriter;
+
+#[async_trait::async_trait]
+impl tinybox_core::WorkspaceFileWriter for MisacknowledgingWriter {
+    async fn write_chunk(&mut self, offset: u64, bytes: &[u8]) -> tinybox_core::Result<u64> {
+        Ok(offset + bytes.len() as u64 + 1)
+    }
+
+    async fn finish(&mut self) -> tinybox_core::Result<u64> {
+        Ok(0)
+    }
+
+    async fn abort(&mut self) -> tinybox_core::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Host for OverreachingFileHost {
+    fn name(&self) -> &'static str {
+        tinybox_ssh::NAME
+    }
+
+    async fn run(&self, request: &NativeRequest) -> tinybox_core::Result<NativeOutput> {
+        self.remote.run(request).await
+    }
+
+    async fn open_workspace_file(
+        &self,
+        _root: &std::path::Path,
+        _relative: &std::path::Path,
+    ) -> tinybox_core::Result<Box<dyn tinybox_core::WorkspaceFileReader>> {
+        Ok(Box::new(OverreadingReader))
+    }
+
+    async fn begin_workspace_file_write(
+        &self,
+        _root: &std::path::Path,
+        _relative: &std::path::Path,
+        _transfer_id: &str,
+    ) -> tinybox_core::Result<Box<dyn tinybox_core::WorkspaceFileWriter>> {
+        Ok(Box::new(MisacknowledgingWriter))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_that_overreads_or_misacknowledges_is_a_backend_error() -> Result<()> {
+    let resources = Resources::test_resources();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create_on(
+            CreateRequest {
+                resource: resource.clone(),
+                backend: "passthrough".into(),
+                workspace: Workspace::Directory(".".into()),
+                ..Default::default()
+            },
+            Arc::new(OverreachingFileHost::default()),
+        )
+        .await?;
+
+    let transfer = resources
+        .reserve(ReserveRequest::FileRead(resource.clone()))
+        .await?;
+    resources
+        .begin_file_read(BeginFileReadRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            path: "data.bin".into(),
+        })
+        .await?;
+    let overread = resources
+        .read_file_chunk(ReadFileChunkRequest {
+            resource: resource.clone(),
+            transfer,
+            offset: 0,
+            max_bytes: 4,
+        })
+        .await;
+    assert_eq!(
+        error_name(overread.err()).as_deref(),
+        Some(tinybox_bus::BACKEND_ERROR)
+    );
+
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    resources
+        .begin_file_write(BeginFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            path: "data.bin".into(),
+        })
+        .await?;
+    let chunk = WriteFileChunkRequest {
+        resource: resource.clone(),
+        transfer,
+        offset: 0,
+        bytes: b"data".to_vec(),
+    };
+    let misacknowledged = resources.write_file_chunk(chunk.clone()).await;
+    assert_eq!(
+        error_name(misacknowledged.err()).as_deref(),
+        Some(tinybox_bus::BACKEND_ERROR)
+    );
+    // The bad acknowledgement was not taken as progress.
+    let retried = resources.write_file_chunk(chunk).await;
+    assert_eq!(
+        error_name(retried.err()).as_deref(),
+        Some(tinybox_bus::BACKEND_ERROR)
+    );
+    resources.close(&resource).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_write_replays_for_its_own_path_and_refuses_another() -> Result<()> {
+    let workspace = tempfile::tempdir()
+        .map_err(|error| Error::failed(format!("create workspace fixture: {error}")))?;
+    let resources = Resources::test_resources();
+    let resource = resources.reserve(ReserveRequest::Resource).await?;
+    resources
+        .create(CreateRequest {
+            resource: resource.clone(),
+            backend: "passthrough".into(),
+            workspace: Workspace::Directory(workspace.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
+    let transfer = resources
+        .reserve(ReserveRequest::FileWrite(resource.clone()))
+        .await?;
+    let begin = |path: &str| BeginFileWriteRequest {
+        resource: resource.clone(),
+        transfer: transfer.clone(),
+        path: path.into(),
+    };
+    resources.begin_file_write(begin("out.bin")).await?;
+    resources
+        .write_file_chunk(WriteFileChunkRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+            offset: 0,
+            bytes: b"data".to_vec(),
+        })
+        .await?;
+    resources
+        .finish_file_write(FinishFileWriteRequest {
+            resource: resource.clone(),
+            transfer: transfer.clone(),
+        })
+        .await?;
+
+    // A retried begin after the finish reports where the write ended.
+    let replayed = resources.begin_file_write(begin("out.bin")).await?;
+    assert_eq!(replayed.next_offset, 4);
+    let elsewhere = resources.begin_file_write(begin("other.bin")).await;
+    assert_eq!(
+        error_name(elsewhere.err()).as_deref(),
+        Some(tinybox_bus::INVALID_ID)
+    );
+    assert!(!workspace.path().join("other.bin").exists());
+    resources.close(&resource).await?;
+    Ok(())
+}
