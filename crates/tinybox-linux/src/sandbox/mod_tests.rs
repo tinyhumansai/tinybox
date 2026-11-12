@@ -723,6 +723,7 @@ fn a_missing_denial_inside_a_mount_is_refused_and_one_outside_is_skipped()
         deny_read,
         allow_net: false,
         allow_subprocess: true,
+        disable_userns: false,
         cpu_millis: Some(1000),
         memory_bytes: None,
         pids_max: None,
