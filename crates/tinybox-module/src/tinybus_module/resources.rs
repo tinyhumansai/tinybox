@@ -371,11 +371,19 @@ impl Resources {
                 .map_err(|error| backend_error(&error))?;
             let recording = Arc::new(super::storage::RecordingStore::new(shared));
             let store: Arc<dyn tinybox_core::Store> = recording.clone();
-            let selection = make_sandbox(
+            let egress = super::docker_egress::docker_egress_controller(
+                &request.backend,
+                &request.network,
+                host.as_ref(),
+            )
+            .await
+            .map_err(|error| backend_error(&error))?;
+            let selection = make_sandbox_with(
                 &request.backend,
                 host.clone(),
                 store.clone(),
                 &request.resource.0,
+                egress,
             )?;
             let sandbox = selection.sandbox.clone();
             let spec = make_spec(&request, host.name())?;
@@ -1574,11 +1582,24 @@ fn check_resource_open(
     Ok(())
 }
 
+#[cfg(test)]
 fn make_sandbox(
     backend: &str,
     host: Arc<dyn Host>,
     store: Arc<dyn Store>,
     namespace: &str,
+) -> Result<SandboxSelection> {
+    make_sandbox_with(backend, host, store, namespace, None)
+}
+
+/// Build the sandbox for `backend`. A Docker allowlist box gets `egress`, the
+/// controller detection installed for it; every other box gets none.
+fn make_sandbox_with(
+    backend: &str,
+    host: Arc<dyn Host>,
+    store: Arc<dyn Store>,
+    namespace: &str,
+    egress: Option<Arc<dyn tinybox_docker::DockerEgressController>>,
 ) -> Result<SandboxSelection> {
     match backend {
         "passthrough" => {
@@ -1590,10 +1611,12 @@ fn make_sandbox(
             })
         }
         "docker" => {
-            let sandbox = Arc::new(
-                tinybox_docker::DockerSandbox::with_namespace(host, store, namespace)
-                    .map_err(|error| backend_error(&error))?,
-            );
+            let mut docker = tinybox_docker::DockerSandbox::with_namespace(host, store, namespace)
+                .map_err(|error| backend_error(&error))?;
+            if let Some(controller) = egress {
+                docker = docker.with_egress_controller(controller);
+            }
+            let sandbox = Arc::new(docker);
             Ok(SandboxSelection {
                 sandbox: sandbox.clone(),
                 docker_sandbox: Some(sandbox),
